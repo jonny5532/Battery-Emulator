@@ -18,7 +18,9 @@ void SolaxInverter::
     update_values() {  //This function maps all the values fetched from battery CAN to the correct CAN messages
   // If not receiveing any communication from the inverter, open contactors and return to battery announce state
   if (millis() - LastFrameTime >= SolaxTimeout) {
+#ifndef DISCOURAGE_CONTACTOR_OPENING
     datalayer.system.status.inverter_allows_contactor_closing = false;
+#endif
     STATE = BATTERY_ANNOUNCE;
   }
   //Calculate the required values
@@ -133,7 +135,9 @@ void SolaxInverter::map_can_frame_to_variable(CAN_frame rx_frame) {
 #ifdef DEBUG_LOG
         logging.println("Solax Battery State: Announce");
 #endif
+#ifndef DISCOURAGE_CONTACTOR_OPENING
         datalayer.system.status.inverter_allows_contactor_closing = false;
+#endif
         SOLAX_1875.data.u8[4] = (0x00);  // Inform Inverter: Contactor 0=off, 1=on.
         for (uint8_t i = 0; i < number_of_batteries; i++) {
           transmit_can_frame(&SOLAX_187E, can_config.inverter);
@@ -210,5 +214,7 @@ void SolaxInverter::map_can_frame_to_variable(CAN_frame rx_frame) {
 void SolaxInverter::setup(void) {  // Performs one time setup at startup
   strncpy(datalayer.system.info.inverter_protocol, Name, 63);
   datalayer.system.info.inverter_protocol[63] = '\0';
+#ifndef DISCOURAGE_CONTACTOR_OPENING
   datalayer.system.status.inverter_allows_contactor_closing = false;  // The inverter needs to allow first
+#endif
 }
