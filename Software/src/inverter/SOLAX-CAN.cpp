@@ -212,9 +212,8 @@ void SolaxInverter::map_can_frame_to_variable(CAN_frame rx_frame) {
 #endif
   }
   if (rx_frame.ID == 0x1871 && rx_frame.data.u8[0] == (0x03)) {
-#ifdef DEBUG_LOG
-    logging.println("1871 03-frame received from inverter");
-#endif
+    // This appears to be a timestamp, that the inverter will send to certain
+    // models of battery. We are not interested in it.
   }
 }
 
