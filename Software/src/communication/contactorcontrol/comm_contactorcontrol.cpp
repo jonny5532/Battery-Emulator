@@ -289,6 +289,9 @@ void handle_BMSpower() {
     // If power has been removed for 30 seconds, restore the power
     if (datalayer.system.status.BMS_reset_in_progress && currentTime - lastPowerRemovalTime >= powerRemovalDuration) {
       // Reapply power to the BMS
+#ifdef DEBUG_LOG
+  logging.printf("BMS_POWER to high\n");
+#endif
       digitalWrite(BMS_POWER, HIGH);
 #ifdef BMS_2_POWER
       digitalWrite(BMS_2_POWER, HIGH);  // Same for battery 2
@@ -323,7 +326,12 @@ void start_bms_reset() {
       // We try to keep contactors engaged during this pause, and just ramp power down to 0.
       setBatteryPause(true, false, false, false);
 
+      // TODO: wait longer for the inverter to stop passing current, to reduce stress on opening contactors
+
 #ifdef BMS_POWER
+#ifdef DEBUG_LOG
+  logging.printf("BMS_POWER to low\n");
+#endif
       digitalWrite(BMS_POWER, LOW);  // Remove power by setting the BMS power pin to LOW
 #endif
 #ifdef BMS_2_POWER
