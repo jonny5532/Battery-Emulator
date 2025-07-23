@@ -155,6 +155,13 @@ void SolaxInverter::map_can_frame_to_variable(CAN_frame rx_frame) {
         // Byte 4 changes from 0 to 1
         if (rx_frame.data.u64 == Contactor_Close_Payload)
           STATE = WAITING_FOR_CONTACTOR;
+
+#ifdef DISCOURAGE_CONTACTOR_OPENING
+        // The Solax will wait for contactors to open, but they never will, so
+        // jump straight to closing states.
+        STATE = WAITING_FOR_CONTACTOR;
+#endif
+
         break;
 
       case (WAITING_FOR_CONTACTOR):
