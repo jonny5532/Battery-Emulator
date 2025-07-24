@@ -130,14 +130,30 @@ void SolaxInverter::map_can_frame_to_variable(CAN_frame rx_frame) {
   if (rx_frame.ID == 0x1871 && rx_frame.data.u8[0] == (0x01) ||
       rx_frame.ID == 0x1871 && rx_frame.data.u8[0] == (0x02)) {
     LastFrameTime = millis();
+
+#ifdef DISCOURAGE_CONTACTOR_OPENING
+    // Skip the state machine and just always transmit the same thing.
+    datalayer.system.status.inverter_allows_contactor_closing = true;
+    SOLAX_1875.data.u8[4] = (0x01);  // Inform Inverter: Contactor 0=off, 1=on.
+    transmit_can_frame(&SOLAX_187E, can_config.inverter);
+    transmit_can_frame(&SOLAX_187A, can_config.inverter);
+    transmit_can_frame(&SOLAX_1872, can_config.inverter);
+    transmit_can_frame(&SOLAX_1873, can_config.inverter);
+    transmit_can_frame(&SOLAX_1874, can_config.inverter);
+    transmit_can_frame(&SOLAX_1875, can_config.inverter);
+    transmit_can_frame(&SOLAX_1876, can_config.inverter);
+    transmit_can_frame(&SOLAX_1877, can_config.inverter);
+    transmit_can_frame(&SOLAX_1878, can_config.inverter);
+    transmit_can_frame(&SOLAX_100A001, can_config.inverter);
+    return;
+#endif
+
     switch (STATE) {
       case (BATTERY_ANNOUNCE):
 #ifdef DEBUG_LOG
         logging.println("Solax Battery State: Announce");
 #endif
-#ifndef DISCOURAGE_CONTACTOR_OPENING
         datalayer.system.status.inverter_allows_contactor_closing = false;
-#endif
         SOLAX_1875.data.u8[4] = (0x00);  // Inform Inverter: Contactor 0=off, 1=on.
         for (uint8_t i = 0; i < number_of_batteries; i++) {
           transmit_can_frame(&SOLAX_187E, can_config.inverter);
@@ -155,12 +171,6 @@ void SolaxInverter::map_can_frame_to_variable(CAN_frame rx_frame) {
         // Byte 4 changes from 0 to 1
         if (rx_frame.data.u64 == Contactor_Close_Payload)
           STATE = WAITING_FOR_CONTACTOR;
-
-#ifdef DISCOURAGE_CONTACTOR_OPENING
-        // The Solax will wait for contactors to open, but they never will, so
-        // jump straight to closing states.
-        STATE = WAITING_FOR_CONTACTOR;
-#endif
 
         break;
 
@@ -220,7 +230,5 @@ void SolaxInverter::map_can_frame_to_variable(CAN_frame rx_frame) {
 void SolaxInverter::setup(void) {  // Performs one time setup at startup
   strncpy(datalayer.system.info.inverter_protocol, Name, 63);
   datalayer.system.info.inverter_protocol[63] = '\0';
-#ifndef DISCOURAGE_CONTACTOR_OPENING
   datalayer.system.status.inverter_allows_contactor_closing = false;  // The inverter needs to allow first
-#endif
 }
