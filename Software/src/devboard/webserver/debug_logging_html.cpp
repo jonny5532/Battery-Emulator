@@ -5,7 +5,10 @@
 
 #if defined(DEBUG_VIA_WEB) || defined(LOG_TO_SD)
 String debug_logger_processor(void) {
-  String content = String(index_html_header);
+  String content = String();
+  // Reserve enough space for the content to avoid reallocations.
+  content.reserve(1000 + sizeof(datalayer.system.info.logged_can_messages));
+  content += index_html_header;
   // Page format
   content += "<style>";
   content += "body { background-color: black; color: white; font-family: Arial, sans-serif; }";
@@ -28,7 +31,23 @@ String debug_logger_processor(void) {
 
   // Start a new block for the debug log messages
   content += "<PRE style='text-align: left'>";
-  content += String(datalayer.system.info.logged_can_messages);
+  size_t offset = datalayer.system.info.logged_can_messages_offset;
+  // If we're mid-buffer, print the older part first.
+  if (offset > 0 && offset < (sizeof(datalayer.system.info.logged_can_messages) - 1)) {
+    // There will always be a \0 at the end of the buffer, so this is safe.
+    char* next_newline = strchr(&datalayer.system.info.logged_can_messages[offset + 1], '\n');
+    if (next_newline != NULL) {
+      // We found a newline, so append from the character after that, which could
+      // be the last character in the buffer (a \0).
+      content += next_newline + 1;
+    } else {
+      // No newline found, so append from the next character after the offset.
+      content += &datalayer.system.info.logged_can_messages[offset + 1];
+    }
+  }
+  // Append the first part of the buffer up to the current write offset (which
+  // points to the first \0).
+  content.concat(datalayer.system.info.logged_can_messages, offset);
   content += "</PRE>";
 
   // Add JavaScript for navigation
