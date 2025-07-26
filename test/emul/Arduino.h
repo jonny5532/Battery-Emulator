@@ -16,6 +16,8 @@
 #include "Logging.h"
 #include "Print.h"
 
+#include "HardwareSerial.h"
+#include "Print.h"
 #include "esp-hal-gpio.h"
 
 // Arduino base constants for print formatting
@@ -119,6 +121,7 @@ unsigned long millis();
 
 void delay(unsigned long ms);
 void delayMicroseconds(unsigned long us);
+
 int max(int a, int b);
 
 bool ledcAttachChannel(uint8_t pin, uint32_t freq, uint8_t resolution, int8_t channel);

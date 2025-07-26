@@ -65,6 +65,8 @@ include_directories(emul)
 # For eModBus
 add_compile_definitions(ESP32 HW_LILYGO COMMON_IMAGE)
 
+set_source_files_properties(../Software/Software.ino PROPERTIES LANGUAGE CXX)
+
 # add the executable
 add_executable(tests 
     tests.cpp 
@@ -169,6 +171,7 @@ add_executable(tests
     emul/serial.cpp
     emul/Arduino.cpp
     emul/freertos/FreeRTOS.cpp
+#    ../Software/Software.ino
     )
 
 target_link_libraries(tests
