@@ -1,20 +1,14 @@
 #ifndef ARDUINO_H
 #define ARDUINO_H
 
+#include <inttypes.h>
+#include <stdarg.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-
-#include <algorithm>
-#include <cctype>
-#include <cmath>
-#include <cstdlib>
-#include <cstring>
-
-#include "HardwareSerial.h"
-#include "Logging.h"
-#include "Print.h"
 
 #include "HardwareSerial.h"
 #include "Print.h"
@@ -123,6 +117,7 @@ void delay(unsigned long ms);
 void delayMicroseconds(unsigned long us);
 
 int max(int a, int b);
+int min(int a, int b);
 
 bool ledcAttachChannel(uint8_t pin, uint32_t freq, uint8_t resolution, int8_t channel);
 bool ledcWrite(uint8_t pin, uint32_t duty);

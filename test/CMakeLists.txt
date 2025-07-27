@@ -81,6 +81,7 @@ add_executable(tests
     ../Software/src/devboard/safety/safety.cpp
     ../Software/src/devboard/hal/hal.cpp
     ../Software/src/devboard/utils/events.cpp
+    ../Software/src/devboard/utils/logging.cpp
     ../Software/src/datalayer/datalayer.cpp
     ../Software/src/datalayer/datalayer_extended.cpp
     ../Software/src/lib/eModbus-eModbus/Logging.cpp
@@ -171,7 +172,7 @@ add_executable(tests
     emul/serial.cpp
     emul/Arduino.cpp
     emul/freertos/FreeRTOS.cpp
-#    ../Software/Software.ino
+    ../Software/Software.cpp
     )
 
 target_link_libraries(tests
