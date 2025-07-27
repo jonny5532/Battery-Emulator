@@ -1,5 +1,5 @@
-#ifndef _FREERTOS_H_
-#define _FREERTOS_H_
+#ifndef EMUL_FREERTOS_H
+#define EMUL_FREERTOS_H
 
 #include "task.h"
 
@@ -10,12 +10,24 @@ typedef unsigned int UBaseType_t;
 
 const BaseType_t tskNO_AFFINITY = -1;
 
+struct tskTaskControlBlock;
+typedef struct tskTaskControlBlock* TaskHandle_t;
+
+typedef void (*TaskFunction_t)(void*);
+
 extern "C" {
-BaseType_t xTaskCreatePinnedToCore(TaskFunction_t pxTaskCode, const char* const pcName, const uint32_t ulStackDepth,
+  BaseType_t xTaskCreatePinnedToCore(TaskFunction_t pxTaskCode, const char* const pcName, const uint32_t ulStackDepth,
                                    void* const pvParameters, UBaseType_t uxPriority, TaskHandle_t* const pxCreatedTask,
                                    const BaseType_t xCoreID);
-
-void vTaskDelete(TaskHandle_t xTaskToDelete);
+  void vTaskDelete(TaskHandle_t xTaskToDelete);
 }
+
+#define CONFIG_FREERTOS_HZ 1000
+#define configTICK_RATE_HZ CONFIG_FREERTOS_HZ
+
+#ifndef pdMS_TO_TICKS
+#define pdMS_TO_TICKS(xTimeInMs) \
+  ((TickType_t)(((TickType_t)(xTimeInMs) * (TickType_t)configTICK_RATE_HZ) / (TickType_t)1000U))
+#endif
 
 #endif

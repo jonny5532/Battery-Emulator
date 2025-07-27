@@ -13,6 +13,8 @@
 #include "HardwareSerial.h"
 #include "Print.h"
 #include "esp-hal-gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // Arduino base constants for print formatting
 constexpr int BIN = 2;
@@ -132,5 +134,17 @@ class ESPClass {
 };
 
 extern ESPClass ESP;
+
+typedef int esp_err_t;
+
+esp_err_t esp_task_wdt_add(TaskHandle_t task_handle);
+esp_err_t esp_task_wdt_reset(void);
+
+typedef struct {
+  uint32_t timeout_ms; /**< TWDT timeout duration in milliseconds */
+  uint32_t
+      idle_core_mask; /**< Bitmask of the core whose idle task should be subscribed on initialization where 1 << i means that core i's idle task will be monitored by the TWDT */
+  bool trigger_panic; /**< Trigger panic when timeout occurs */
+} esp_task_wdt_config_t;
 
 #endif
