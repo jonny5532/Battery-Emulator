@@ -49,6 +49,8 @@
 #endif
 volatile unsigned long long bmsResetTimeOffset = 0;
 
+#include "src/lib/TinyWebServer/TinyWebServer.h"
+
 // The current software version, shown on webserver
 const char* version_number = "8.16.0";
 
@@ -66,6 +68,8 @@ TaskHandle_t logging_loop_task;
 TaskHandle_t mqtt_loop_task;
 
 Logging logging;
+
+extern TinyWebServer tinyWebServer;
 
 // Initialization
 void setup() {
@@ -112,6 +116,8 @@ void setup() {
   pinMode(0, INPUT_PULLUP);
 
   check_reset_reason();
+
+  xTaskCreate(tiny_web_server_loop, "TinyWebServer_loop", 2400, &tinyWebServer, TASK_CONNECTIVITY_PRIO, NULL);
 
   // Initialize Task Watchdog for subscribed tasks
   esp_task_wdt_config_t wdt_config = {
