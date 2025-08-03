@@ -241,7 +241,7 @@ class RenaultZoeGen2Battery : public CanBattery {
       1614454107;  // Production timestamp in seconds since January 1, 1970. Production timestamp used: February 25, 2021 at 8:08:27 AM GMT
   bool battery_balancing_shunts[96];
 
-  CAN_frame ZOE_373 = {
+  static constexpr CAN_frame ZOE_373 = {
       .FD = false,
       .ext_ID = false,
       .DLC = 8,
@@ -260,35 +260,35 @@ class RenaultZoeGen2Battery : public CanBattery {
                                  .DLC = 8,
                                  .ID = 0x18DADBF1,
                                  .data = {0x03, 0x22, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00}};
-  CAN_frame ZOE_POLL_FLOW_CONTROL = {.FD = false,
+  static constexpr CAN_frame ZOE_POLL_FLOW_CONTROL = {.FD = false,
                                      .ext_ID = true,
                                      .DLC = 8,
                                      .ID = 0x18DADBF1,
                                      .data = {0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
   //NVROL Reset
-  CAN_frame ZOE_NVROL_1_18DADBF1 = {.FD = false,
+  static constexpr CAN_frame ZOE_NVROL_1_18DADBF1 = {.FD = false,
                                     .ext_ID = true,
                                     .DLC = 8,
                                     .ID = 0x18DADBF1,
                                     .data = {0x02, 0x10, 0x03, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}};
-  CAN_frame ZOE_NVROL_2_18DADBF1 = {.FD = false,
+  static constexpr CAN_frame ZOE_NVROL_2_18DADBF1 = {.FD = false,
                                     .ext_ID = true,
                                     .DLC = 8,
                                     .ID = 0x18DADBF1,
                                     .data = {0x04, 0x31, 0x01, 0xB0, 0x09, 0x00, 0xAA, 0xAA}};
   //Enable temporisation before sleep
-  CAN_frame ZOE_SLEEP_1_18DADBF1 = {.FD = false,
+  static constexpr CAN_frame ZOE_SLEEP_1_18DADBF1 = {.FD = false,
                                     .ext_ID = true,
                                     .DLC = 8,
                                     .ID = 0x18DADBF1,
                                     .data = {0x02, 0x10, 0x03, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}};
-  CAN_frame ZOE_SLEEP_2_18DADBF1 = {.FD = false,
+  static constexpr CAN_frame ZOE_SLEEP_2_18DADBF1 = {.FD = false,
                                     .ext_ID = true,
                                     .DLC = 8,
                                     .ID = 0x18DADBF1,
                                     .data = {0x04, 0x2E, 0x92, 0x81, 0x01, 0xAA, 0xAA, 0xAA}};
 
-  const uint16_t poll_commands[163] = {POLL_SOC,
+  static constexpr uint16_t poll_commands[163] = {POLL_SOC,
                                        POLL_USABLE_SOC,
                                        POLL_SOH,
                                        POLL_PACK_VOLTAGE,

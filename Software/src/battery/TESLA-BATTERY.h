@@ -307,7 +307,7 @@ class TeslaBattery : public CanBattery {
   //0x3A1 VCFRONT_vehicleStatus: "cycle_time" 50ms, VCFRONT_vehicleStatusChecksum/VCFRONT_vehicleStatusCounter eventually need to be generated via generateMuxFrameCounterChecksum
   //Looks like 2 muxes, counter at bit 52 width 4 and checksum at bit 56 width 8? Need later software Model3_ETH.compact.json signal file or DBC.
   //Migrated to an array until figured out
-  CAN_frame TESLA_3A1[16] = {
+  static constexpr CAN_frame TESLA_3A1[16] = {
       {.FD = false, .ext_ID = false, .DLC = 8, .ID = 0x3A1, .data = {0xC3, 0xFF, 0xFF, 0xFF, 0x3D, 0x00, 0xD0, 0x01}},
       {.FD = false, .ext_ID = false, .DLC = 8, .ID = 0x3A1, .data = {0x08, 0x62, 0x0B, 0x18, 0x00, 0x28, 0xE2, 0xCB}},
       {.FD = false, .ext_ID = false, .DLC = 8, .ID = 0x3A1, .data = {0xC3, 0xFF, 0xFF, 0xFF, 0x3D, 0x00, 0xF0, 0x21}},

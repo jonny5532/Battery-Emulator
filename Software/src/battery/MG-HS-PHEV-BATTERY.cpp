@@ -380,4 +380,17 @@ void MgHsPHEVBattery::setup(void) {  // Performs one time setup at startup
   datalayer.battery.info.min_cell_voltage_mV = MIN_CELL_VOLTAGE_MV;
   datalayer.battery.info.total_capacity_Wh = BATTERY_WH_MAX;
   datalayer.battery.info.number_of_cells = 90;
+
+  set_active_contactor_control(this);
+}
+
+void MgHsPHEVBattery::open_contactors() {
+
+}
+
+void MgHsPHEVBattery::close_contactors() {
+}
+
+bool MgHsPHEVBattery::respects_contactor_requests() {
+  return false;
 }

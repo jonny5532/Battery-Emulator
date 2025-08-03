@@ -2,17 +2,22 @@
 #define MG_HS_PHEV_BATTERY_H
 
 #include "CanBattery.h"
+#include <src/communication/contactorcontrol/comm_contactorcontrol.h>
 
 #ifdef MG_HS_PHEV_BATTERY
 #define SELECTED_BATTERY_CLASS MgHsPHEVBattery
 #endif
 
-class MgHsPHEVBattery : public CanBattery {
+class MgHsPHEVBattery : public CanBattery, public ContactorControl {
  public:
   virtual void setup(void);
   virtual void handle_incoming_can_frame(CAN_frame rx_frame);
   virtual void update_values();
   virtual void transmit_can(unsigned long currentMillis);
+
+  void open_contactors() override;
+  void close_contactors() override;
+  bool respects_contactor_requests() override;
 
   static constexpr const char* Name = "MG HS PHEV 16.6kWh battery";
 

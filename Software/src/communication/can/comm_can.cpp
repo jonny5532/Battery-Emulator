@@ -193,7 +193,7 @@ bool init_CAN() {
   return true;
 }
 
-void transmit_can_frame_to_interface(CAN_frame* tx_frame, int interface) {
+void transmit_can_frame_to_interface(const CAN_frame* tx_frame, int interface) {
   if (!allowed_to_send_CAN) {
     return;
   }
@@ -331,7 +331,7 @@ void receive_frame_canfd_addon() {  // This section checks if we have a complete
 }
 
 // Support functions
-void print_can_frame(CAN_frame frame, frameDirection msgDir) {
+void print_can_frame(const CAN_frame frame, frameDirection msgDir) {
 #ifdef DEBUG_CAN_DATA  // If enabled in user settings, print out the CAN messages via USB
   uint8_t i = 0;
   Serial.print("(");
@@ -379,7 +379,7 @@ void map_can_frame_to_variable(CAN_frame* rx_frame, CAN_Interface interface) {
   }
 }
 
-void dump_can_frame(CAN_frame& frame, frameDirection msgDir) {
+void dump_can_frame(const CAN_frame& frame, frameDirection msgDir) {
   char* message_string = datalayer.system.info.logged_can_messages;
   int offset = datalayer.system.info.logged_can_messages_offset;  // Keeps track of the current position in the buffer
   size_t message_string_size = sizeof(datalayer.system.info.logged_can_messages);
