@@ -15,4 +15,4 @@ int main(int argc, char** argv) {
   return RUN_ALL_TESTS();
 }
 
-void store_settings_equipment_stop(void) {}
+//void store_settings_equipment_stop(void) {}

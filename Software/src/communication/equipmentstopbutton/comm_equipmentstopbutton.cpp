@@ -1,4 +1,5 @@
 #include "comm_equipmentstopbutton.h"
+#include "../../../USER_SETTINGS.h"
 #include "../../devboard/hal/hal.h"
 #include "../../devboard/safety/safety.h"
 #include "../../devboard/utils/debounce_button.h"
