@@ -209,6 +209,7 @@ add_executable(tests
     emul/time.cpp
     emul/serial.cpp
     emul/WString.cpp
+    emul/cbuf.cpp
     emul/WiFi.cpp
     emul/Arduino.cpp
     emul/freertos/FreeRTOS.cpp

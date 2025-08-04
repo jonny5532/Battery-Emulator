@@ -15,11 +15,11 @@ volatile CAN_Configuration can_config = {.battery = CAN_Interface::CAN_NATIVE,
                                          .shunt = CAN_Interface::CAN_NATIVE};
 
 
+#include "esp_system.h"
+
 int max(int a, int b) {
   return (a > b) ? a : b;
 }
-
-//#include "esp_system.h"
 
 int min(int a, int b) {
   return (a < b) ? a : b;
