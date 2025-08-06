@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include "../../datalayer/datalayer.h"
 #include "Print.h"
+#include <mutex>
 #include "types.h"
 
 #ifndef UNIT_TEST
@@ -11,6 +12,7 @@
 
 class Logging : public Print {
   void add_timestamp(size_t size);
+  std::mutex writeMutex;
 
  public:
   virtual size_t write(const uint8_t* buffer, size_t size);
