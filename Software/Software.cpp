@@ -12,6 +12,7 @@
 #include "src/communication/can/comm_can.h"
 #include "src/communication/contactorcontrol/comm_contactorcontrol.h"
 #include "src/communication/equipmentstopbutton/comm_equipmentstopbutton.h"
+#include "src/communication/meter_emu/comm_meter_emu.h"
 #include "src/communication/nvm/comm_nvm.h"
 #include "src/communication/precharge_control/precharge_control.h"
 #include "src/communication/rs485/comm_rs485.h"
@@ -542,6 +543,8 @@ void setup() {
   init_CAN();
 
   init_rs485();
+
+  init_meter_emu();
 
   init_equipment_stop_button();
 
