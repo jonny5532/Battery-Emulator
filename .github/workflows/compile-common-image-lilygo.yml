@@ -51,6 +51,9 @@ jobs:
     - name: Build image for Lilygo
       run: pio run -e lilygo_330
 
+    - name: Build image for Lilygo
+      run: esptool --chip esp32 merge-bin -o .pio/build/lilygo_330/merged-firmware.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/lilygo_330/bootloader.bin 0x8000 .pio/build/lilygo_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/lilygo_330/firmware.bin
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
