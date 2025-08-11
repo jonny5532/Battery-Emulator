@@ -49,16 +49,28 @@ jobs:
     - name: Copy USER_SECRETS.TEMPLATE.h to USER_SECRETS.h
       run: cp ./Software/USER_SECRETS.TEMPLATE.h ./Software/USER_SECRETS.h
 
-    - name: Build image for Lilygo
+    - name: Build update image for Lilygo
       run: |
         pio run -e lilygo_330
         mkdir -p output
-        mv .pio/build/lilygo_330/firmware.bin output/lilygo.bin
+        mv .pio/build/lilygo_330/firmware.bin output/lilygo-update.bin
 
-    - name: Build image for Stark
+    - name: Build factory image for Lilygo
+      run: |
+        esptool --chip esp32 merge-bin -o .pio/build/lilygo_330/factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/lilygo_330/bootloader.bin 0x8000 .pio/build/lilygo_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/lilygo_330/firmware.bin
+        mkdir -p output
+        mv .pio/build/lilygo_330/factory.bin output/lilygo-factory.bin
+
+    - name: Build update image for Stark
       run: |
         pio run -e stark_330
-        mv .pio/build/stark_330/firmware.bin output/stark.bin
+        mv .pio/build/stark_330/firmware.bin output/stark-update.bin
+
+    - name: Build factory image for Stark
+      run: |
+        esptool --chip esp32 merge-bin -o .pio/build/stark_330/factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/stark_330/bootloader.bin 0x8000 .pio/build/stark_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/stark_330/firmware.bin
+        mkdir -p output
+        mv .pio/build/stark_330/factory.bin output/stark-factory.bin
 
     - name: Upload to GitHub Release
       uses: softprops/action-gh-release@v1
