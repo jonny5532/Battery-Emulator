@@ -57,9 +57,7 @@ jobs:
 
     - name: Build factory image for Lilygo
       run: |
-        esptool --chip esp32 merge-bin -o .pio/build/lilygo_330/factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/lilygo_330/bootloader.bin 0x8000 .pio/build/lilygo_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/lilygo_330/firmware.bin
-        mkdir -p output
-        mv .pio/build/lilygo_330/factory.bin output/lilygo-factory.bin
+        esptool --chip esp32 merge-bin -o output/lilygo-factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/lilygo_330/bootloader.bin 0x8000 .pio/build/lilygo_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 output/lilygo-update.bin
 
     - name: Build update image for Stark
       run: |
@@ -68,9 +66,7 @@ jobs:
 
     - name: Build factory image for Stark
       run: |
-        esptool --chip esp32 merge-bin -o .pio/build/stark_330/factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/stark_330/bootloader.bin 0x8000 .pio/build/stark_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/stark_330/firmware.bin
-        mkdir -p output
-        mv .pio/build/stark_330/factory.bin output/stark-factory.bin
+        esptool --chip esp32 merge-bin -o output/stark-factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/stark_330/bootloader.bin 0x8000 .pio/build/stark_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 output/stark-update.bin
 
     - name: 🌐 Deploy to Web Installer repo
       env:
@@ -80,8 +76,10 @@ jobs:
         cd web-installer
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        cp ../output/lilygo-factory.bin .
-        git add lilygo-factory.bin
+        mkdir -p images/${{ steps.vars.outputs.tag }}
+        cp ../output/lilygo-factory.bin images/${{ steps.vars.outputs.tag }}/lilygo-factory.bin
+        cp ../output/stark-factory.bin images/${{ steps.vars.outputs.tag }}/stark-factory.bin
+        git add binaries
         git commit -m "Deploy from GitHub Actions"
         git push origin main
 
