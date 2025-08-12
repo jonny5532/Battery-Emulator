@@ -72,6 +72,19 @@ jobs:
         mkdir -p output
         mv .pio/build/stark_330/factory.bin output/stark-factory.bin
 
+    - name: 🌐 Deploy to Web Installer repo
+      env:
+        WEB_INSTALLER_PUSH_TOKEN: ${{ secrets.WEB_INSTALLER_PUSH_TOKEN }}
+      run: |
+        git clone https://$WEB_INSTALLER_PUSH_TOKENgithub.com/jonny5532/BE-Web-Installer web-installer
+        cd web-installer
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        cp ../output/lilygo-factory.bin .
+        git add lilygo-factory.bin
+        git commit -m "Deploy from GitHub Actions"
+        git push origin main
+
     - name: Upload to GitHub Release
       uses: softprops/action-gh-release@v1
       with:
