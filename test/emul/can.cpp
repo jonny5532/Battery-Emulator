@@ -23,3 +23,5 @@ void register_transmitter(Transmitter* transmitter) {}
 
 void dump_can_frame(CAN_frame& frame, frameDirection msgDir) {}
 bool use_canfd_as_can = false;
+
+void dump_can_frame(CAN_frame& frame, enum frameDirection) {}

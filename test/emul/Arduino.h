@@ -23,7 +23,22 @@
 
 #include "esp32-hal-log.h"
 
-//typedef	uint64_t	time_t;
+typedef uint8_t byte;
+typedef unsigned int word;
+
+uint16_t makeWord(uint16_t w);
+uint16_t makeWord(uint8_t h, uint8_t l);
+
+#define word(...) makeWord(__VA_ARGS__)
+
+#define lowByte(w) ((uint8_t)((w) & 0xff))
+#define highByte(w) ((uint8_t)((w) >> 8))
+
+#define bitRead(value, bit) (((value) >> (bit)) & 0x01)
+#define bitSet(value, bit) ((value) |= (1UL << (bit)))
+#define bitClear(value, bit) ((value) &= ~(1UL << (bit)))
+#define bitToggle(value, bit) ((value) ^= (1UL << (bit)))
+#define bitWrite(value, bit, bitvalue) ((bitvalue) ? bitSet(value, bit) : bitClear(value, bit))
 
 // Arduino base constants for print formatting
 constexpr int BIN = 2;
@@ -120,6 +135,8 @@ inline void onWifiDisconnect(WiFiEvent_t event, WiFiEventInfo_t info) {
 }
 
 unsigned long micros();
+uint16_t analogRead(uint8_t pin);
+
 // Can be previously declared as a macro in stupid eModbus
 #undef millis
 unsigned long millis();
