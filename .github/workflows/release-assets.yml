@@ -52,22 +52,22 @@ jobs:
     - name: 🛠 Build update image for Lilygo
       run: |
         pio run -e lilygo_330
-        cp .pio/build/lilygo_330/firmware.bin output/BE_${{ steps.vars.outputs.tag }_LilygoT-CAN485.ota.bin
+        cp .pio/build/lilygo_330/firmware.bin output/BE_${{ steps.vars.outputs.tag }}_LilygoT-CAN485.ota.bin
 
     - name: 🛠 Build factory image for Lilygo
       run: |
         esptool --chip esp32 merge-bin -o .pio/build/lilygo_330/factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/lilygo_330/bootloader.bin 0x8000 .pio/build/lilygo_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/lilygo_330/firmware.bin
-        mv .pio/build/lilygo_330/factory.bin output/BE_${{ steps.vars.outputs.tag }_LilygoT-CAN485.factory.bin
+        mv .pio/build/lilygo_330/factory.bin output/BE_${{ steps.vars.outputs.tag }}_LilygoT-CAN485.factory.bin
 
     - name: 🛠 Build update image for Stark
       run: |
         pio run -e stark_330
-        cp .pio/build/stark_330/firmware.bin output/BE_${{ steps.vars.outputs.tag }_StarkCMR.ota.bin
+        cp .pio/build/stark_330/firmware.bin output/BE_${{ steps.vars.outputs.tag }}_StarkCMR.ota.bin
 
     - name: 🛠 Build factory image for Stark
       run: |
         esptool --chip esp32 merge-bin -o .pio/build/stark_330/factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/stark_330/bootloader.bin 0x8000 .pio/build/stark_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/stark_330/firmware.bin
-        mv .pio/build/stark_330/factory.bin output/BE_${{ steps.vars.outputs.tag }__StarkCMR.factory.bin
+        mv .pio/build/stark_330/factory.bin output/BE_${{ steps.vars.outputs.tag }}__StarkCMR.factory.bin
 
     - name: 🌐 Deploy to Web Installer repo
       env:
