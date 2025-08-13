@@ -90,6 +90,6 @@ jobs:
       with:
         tag_name: ${{ steps.vars.outputs.tag }}
         files: |
-          output/*
+          output/*.ota.bin
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
