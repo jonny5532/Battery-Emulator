@@ -13,7 +13,7 @@ jobs:
   build-and-upload:
     runs-on: ubuntu-latest
     steps:
-    - name: Set release tag
+    - name: 🏷 Set release tag
       id: vars
       run: |
         if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
@@ -22,12 +22,12 @@ jobs:
           echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Checkout code at tag
+    - name: 📂 Checkout code at tag
       uses: actions/checkout@v4
       with:
         ref: refs/tags/${{ steps.vars.outputs.tag }}
 
-    - name: Build artifacts
+    - name: 🛠 Build artifacts
       run: |
         mkdir output
         echo "Built for tag ${{ steps.vars.outputs.tag }}" > output/info.txt
@@ -46,27 +46,28 @@ jobs:
       run: pip install --upgrade platformio
 
       # Copy USER_SECRETS.TEMPLATE.h to USER_SECRETS.h
-    - name: Copy USER_SECRETS.TEMPLATE.h to USER_SECRETS.h
+    - name: 📋 Copy USER_SECRETS.TEMPLATE.h to USER_SECRETS.h
       run: cp ./Software/USER_SECRETS.TEMPLATE.h ./Software/USER_SECRETS.h
 
-    - name: Build update image for Lilygo
+    - name: 🛠 Build update image for Lilygo
       run: |
         pio run -e lilygo_330
-        mkdir -p output
-        mv .pio/build/lilygo_330/firmware.bin output/lilygo-update.bin
+        cp .pio/build/lilygo_330/firmware.bin output/BE_${{ steps.vars.outputs.tag }_LilygoT-CAN485.ota.bin
 
-    - name: Build factory image for Lilygo
+    - name: 🛠 Build factory image for Lilygo
       run: |
-        esptool --chip esp32 merge-bin -o output/lilygo-factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/lilygo_330/bootloader.bin 0x8000 .pio/build/lilygo_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 output/lilygo-update.bin
+        esptool --chip esp32 merge-bin -o .pio/build/lilygo_330/factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/lilygo_330/bootloader.bin 0x8000 .pio/build/lilygo_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/lilygo_330/firmware.bin
+        mv .pio/build/lilygo_330/factory.bin output/BE_${{ steps.vars.outputs.tag }_LilygoT-CAN485.factory.bin
 
-    - name: Build update image for Stark
+    - name: 🛠 Build update image for Stark
       run: |
         pio run -e stark_330
-        mv .pio/build/stark_330/firmware.bin output/stark-update.bin
+        cp .pio/build/stark_330/firmware.bin output/BE_${{ steps.vars.outputs.tag }_StarkCMR.ota.bin
 
-    - name: Build factory image for Stark
+    - name: 🛠 Build factory image for Stark
       run: |
-        esptool --chip esp32 merge-bin -o output/stark-factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/stark_330/bootloader.bin 0x8000 .pio/build/stark_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 output/stark-update.bin
+        esptool --chip esp32 merge-bin -o .pio/build/stark_330/factory.bin --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 .pio/build/stark_330/bootloader.bin 0x8000 .pio/build/stark_330/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/stark_330/firmware.bin
+        mv .pio/build/stark_330/factory.bin output/BE_${{ steps.vars.outputs.tag }__StarkCMR.factory.bin
 
     - name: 🌐 Deploy to Web Installer repo
       env:
@@ -77,13 +78,12 @@ jobs:
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         mkdir -p images/${{ steps.vars.outputs.tag }}
-        cp ../output/lilygo-factory.bin images/${{ steps.vars.outputs.tag }}/lilygo-factory.bin
-        cp ../output/stark-factory.bin images/${{ steps.vars.outputs.tag }}/stark-factory.bin
+        cp ../output/*.factory.bin images/${{ steps.vars.outputs.tag }}/
         git add images
         git commit -m "Deploy from GitHub Actions"
         git push origin main
 
-    - name: Upload to GitHub Release
+    - name: 📡 Upload to GitHub Release
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ steps.vars.outputs.tag }}
