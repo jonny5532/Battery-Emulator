@@ -75,7 +75,7 @@ jobs:
       env:
         WEB_INSTALLER_PUSH_TOKEN: ${{ secrets.WEB_INSTALLER_PUSH_TOKEN }}
       run: |
-        git clone https://$WEB_INSTALLER_PUSH_TOKEN@github.com/dalathegreat/BE-Web-Installer web-installer
+        git clone https://$WEB_INSTALLER_PUSH_TOKEN@github.com/jonny5532/BE-Web-Installer web-installer
         cd web-installer
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
