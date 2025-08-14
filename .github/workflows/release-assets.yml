@@ -74,8 +74,10 @@ jobs:
     - name: 🌐 Deploy to Web Installer repo
       env:
         WEB_INSTALLER_PUSH_TOKEN: ${{ secrets.WEB_INSTALLER_PUSH_TOKEN }}
+        REPO_OWNER: ${{ github.repository_owner }}
       run: |
-        git clone https://$WEB_INSTALLER_PUSH_TOKEN@github.com/jonny5532/BE-Web-Installer web-installer
+        echo owner is $REPO_OWNER
+        git clone https://$WEB_INSTALLER_PUSH_TOKEN@github.com/$REPO_OWNER/BE-Web-Installer web-installer
         cd web-installer
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
