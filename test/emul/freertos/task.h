@@ -69,4 +69,6 @@ void vTaskDelay(const TickType_t xTicksToDelay);
 
 #define tskNO_AFFINITY ((BaseType_t)0x7FFFFFFF)
 
+inline void taskYIELD(void) {}
+
 #endif
