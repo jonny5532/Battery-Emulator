@@ -63,7 +63,7 @@ include_directories("${source_dir}/googletest/include"
 include_directories(emul)
 
 # For eModBus
-add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NO_POSIX_ERROR_CODES ESP32 ARDUINO HW_LILYGO COMMON_IMAGE)
+add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NO_POSIX_ERROR_CODES ESP32 ARDUINO HW_LILYGO COMMON_IMAGE ASYNCTCP_ALLOW_ANY_ERRNOS_VALUES)
 
 set_source_files_properties(../Software/Software.ino PROPERTIES LANGUAGE CXX)
 
