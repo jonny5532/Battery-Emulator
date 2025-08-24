@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <mqtt_client.h>
+#include <algorithm>
 #include <functional>
 #include <list>
 #include "../../battery/BATTERIES.h"
@@ -12,7 +13,6 @@
 #include "../../lib/bblanchon-ArduinoJson/ArduinoJson.h"
 #include "../utils/events.h"
 #include "../utils/timer.h"
-#include "mqtt.h"
 
 bool mqtt_enabled = false;
 bool ha_autodiscovery_enabled = false;
