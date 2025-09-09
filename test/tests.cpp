@@ -7,11 +7,13 @@
 
 void RegisterCanLogTests(void);
 void RegisterStillAliveTests(void);
+void RegisterDoubleBatteryTests(void);
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   RegisterCanLogTests();
   RegisterStillAliveTests();
+  RegisterDoubleBatteryTests();
   return RUN_ALL_TESTS();
 }
 
