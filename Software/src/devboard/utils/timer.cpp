@@ -1,5 +1,7 @@
 #include "timer.h"
 
+#include <Arduino.h>
+
 MyTimer::MyTimer(unsigned long interval) : interval(interval) {
   previous_millis = millis();
 }

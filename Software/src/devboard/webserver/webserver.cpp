@@ -1,5 +1,9 @@
-#include "webserver.h"
 #include <Preferences.h>
+#include <WiFi.h>
+#include "../../lib/ESP32Async-ESPAsyncWebServer/src/ESPAsyncWebServer.h"
+#include "../../lib/ayushsharma82-ElegantOTA/src/ElegantOTA.h"
+#include "../../lib/mathieucarbou-AsyncTCPSock/src/AsyncTCP.h"
+
 #include <ctime>
 #include <vector>
 #include "../../battery/BATTERIES.h"
@@ -16,8 +20,10 @@
 #include "../sdcard/sdcard.h"
 #include "../utils/events.h"
 #include "../utils/led_handler.h"
+#include "../utils/time_meas.h"
 #include "../utils/timer.h"
 #include "esp_task_wdt.h"
+#include "webserver.h"
 
 #include <string>
 extern std::string http_username;
@@ -859,6 +865,10 @@ String getConnectResultString(wl_status_t status) {
 }
 
 void ota_monitor() {
+  START_TIME_MEASUREMENT(ota);
+  ElegantOTA.loop();
+  END_TIME_MEASUREMENT_MAX(ota, datalayer.system.status.time_ota_us);
+
   if (ota_active && ota_timeout_timer.elapsed()) {
     // OTA timeout, try to restore can and clear the update event
     set_event(EVENT_OTA_UPDATE_TIMEOUT, 0);
@@ -951,16 +961,12 @@ String processor(const String& var) {
     content += "<div style='background-color: #303E47; padding: 10px; margin-bottom: 10px; border-radius: 50px'>";
     content += "<h4>Software: " + String(version_number);
 
-// Show hardware used:
-#ifdef HW_LILYGO
-    content += " Hardware: LilyGo T-CAN485";
-#endif  // HW_LILYGO
-#ifdef HW_LILYGO2CAN
-    content += " Hardware: LilyGo T_2CAN";
-#endif  // HW_LILYGO2CAN
-#ifdef HW_STARK
-    content += " Hardware: Stark CMR Module";
-#endif  // HW_STARK
+#ifdef COMMON_IMAGE
+    content += " (Common image) ";
+#endif
+    content += " Hardware: ";
+    content += esp32hal->name();
+
     content += " @ " + String(datalayer.system.info.CPU_temperature, 1) + " &deg;C</h4>";
     content += "<h4>Uptime: " + get_uptime() + "</h4>";
     if (datalayer.system.info.performance_measurement_active) {

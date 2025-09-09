@@ -1,4 +1,5 @@
 #include "wifi.h"
+#include <Arduino.h>
 #include <ESPmDNS.h>
 #include "../utils/events.h"
 #include "../utils/logging.h"
@@ -54,8 +55,7 @@ static uint16_t current_check_interval = WIFI_CHECK_INTERVAL;
 static bool connected_once = false;
 
 void init_WiFi() {
-  DEBUG_PRINTF("init_Wifi enabled=%d, apå=%d, ssid=%s, password=%s\n", wifi_enabled, wifiap_enabled, ssid.c_str(),
-               password.c_str());
+  DEBUG_PRINTF("init_Wifi enabled=%d, ap=%d, ssid=%s\n", wifi_enabled, wifiap_enabled, ssid.c_str());
 
   if (!custom_hostname.empty()) {
     WiFi.setHostname(custom_hostname.c_str());

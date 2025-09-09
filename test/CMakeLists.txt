@@ -63,11 +63,12 @@ include_directories("${source_dir}/googletest/include"
 include_directories(emul)
 
 # For eModBus
-add_compile_definitions(ESP32 HW_LILYGO COMMON_IMAGE)
+add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NO_POSIX_ERROR_CODES ESP32 ARDUINO HW_LILYGO COMMON_IMAGE ASYNCTCP_ALLOW_ANY_ERRNOS_VALUES)
 
 # add the executable
 add_executable(tests 
     tests.cpp 
+    #main_tests.cpp 
     safety_tests.cpp 
     battery/NissanLeafTest.cpp 
     battery/still_alive_tests.cpp
@@ -76,9 +77,17 @@ add_executable(tests
     ../Software/src/communication/can/obd.cpp
     ../Software/src/communication/contactorcontrol/comm_contactorcontrol.cpp
     ../Software/src/communication/rs485/comm_rs485.cpp
+    ../Software/src/communication/precharge_control/precharge_control.cpp
+    ../Software/src/communication/equipmentstopbutton/comm_equipmentstopbutton.cpp
+    ../Software/src/communication/nvm/comm_nvm.cpp
+    ../Software/src/communication/rs485/comm_rs485.cpp
+    ../Software/src/devboard/wifi/wifi.cpp
+    ../Software/src/devboard/mqtt/mqtt.cpp
     ../Software/src/devboard/safety/safety.cpp
     ../Software/src/devboard/hal/hal.cpp
     ../Software/src/devboard/utils/events.cpp
+    ../Software/src/devboard/utils/logging.cpp
+    ../Software/src/devboard/utils/debounce_button.cpp
     ../Software/src/datalayer/datalayer.cpp
     ../Software/src/datalayer/datalayer_extended.cpp
     ../Software/src/lib/eModbus-eModbus/Logging.cpp
@@ -87,7 +96,18 @@ add_executable(tests
     ../Software/src/lib/eModbus-eModbus/ModbusServerRTU.cpp
     ../Software/src/lib/eModbus-eModbus/ModbusTypeDefs.cpp
     ../Software/src/lib/eModbus-eModbus/RTUutils.cpp
-#    ../Software/src/lib/eModbus-eModbus/scripts/mbServerFCs.cpp
+    ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/AsyncWebHeader.cpp
+    ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/AsyncWebServerRequest.cpp
+    ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/WebServer.cpp
+    ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/WebRequest.cpp
+    ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/WebHandlers.cpp
+    ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/WebResponses.cpp
+    ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/WebAuthentication.cpp
+    ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/Middleware.cpp
+    ../Software/src/lib/mathieucarbou-AsyncTCPSock/src/AsyncTCP.cpp
+    ../Software/src/lib/adafruit-Adafruit_NeoPixel/Adafruit_NeoPixel.cpp
+    ../Software/src/lib/ayushsharma82-ElegantOTA/src/elop.cpp
+    ../Software/src/lib/ayushsharma82-ElegantOTA/src/ElegantOTA.cpp
     ../Software/src/battery/BATTERIES.cpp
     ../Software/src/battery/Battery.cpp
     ../Software/src/battery/BMW-I3-BATTERY.cpp
@@ -164,11 +184,42 @@ add_executable(tests
     ../Software/src/charger/CHARGERS.cpp
     ../Software/src/charger/CHEVY-VOLT-CHARGER.cpp
     ../Software/src/charger/NISSAN-LEAF-CHARGER.cpp
+    ../Software/src/devboard/webserver/advanced_battery_html.cpp
+    ../Software/src/devboard/webserver/can_logging_html.cpp
+    ../Software/src/devboard/webserver/can_replay_html.cpp
+    ../Software/src/devboard/webserver/cellmonitor_html.cpp
+    ../Software/src/devboard/webserver/debug_logging_html.cpp
+    ../Software/src/devboard/webserver/events_html.cpp
+    ../Software/src/devboard/webserver/index_html.cpp
+    ../Software/src/devboard/webserver/settings_html.cpp
+    ../Software/src/devboard/webserver/webserver.cpp
+    ../Software/src/devboard/utils/types.cpp
+    ../Software/src/devboard/utils/timer.cpp
+    ../Software/src/devboard/utils/led_handler.cpp
+    ../Software/Software.cpp
     emul/can.cpp
     emul/time.cpp
     emul/serial.cpp
+    emul/WString.cpp
+    emul/cbuf.cpp
+    emul/WiFi.cpp
     emul/Arduino.cpp
     emul/freertos/FreeRTOS.cpp
+    emul/Update.cpp
+    emul/MD5Builder.cpp
+    emul/HardwareSerial.cpp
+    emul/Preferences.cpp
+    emul/print.cpp
+    emul/mqtt.cpp
+    emul/SD_MMC.cpp
+    emul/sdcard.cpp
+    emul/freertos/task.cpp
+    emul/freertos/semphr.cpp
+    emul/freertos/ringbuf.cpp
+    emul/lwip/sockets.cpp
+    emul/lwip/dns.cpp
+    emul/libb64/cencode.cpp
+    emul/hacks.cpp
     )
 
 target_link_libraries(tests

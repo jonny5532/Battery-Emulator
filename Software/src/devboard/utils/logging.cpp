@@ -58,6 +58,8 @@ size_t Logging::write(const uint8_t* buffer, size_t size) {
     return 0;
   }
 
+  std::lock_guard<std::mutex> lock(writeMutex);
+
   if (previous_message_was_newline) {
     add_timestamp(size);
   }
@@ -91,6 +93,8 @@ void Logging::printf(const char* fmt, ...) {
   if (!datalayer.system.info.web_logging_active && !datalayer.system.info.usb_logging_active) {
     return;
   }
+
+  std::lock_guard<std::mutex> lock(writeMutex);
 
   if (previous_message_was_newline) {
     add_timestamp(MAX_LINE_LENGTH_PRINTF);

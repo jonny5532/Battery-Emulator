@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <list>
 #include "src/battery/BATTERIES.h"
 #include "src/charger/CHARGERS.h"
 #include "src/communication/Transmitter.h"
@@ -28,10 +29,12 @@
 #include "src/devboard/webserver/webserver.h"
 #include "src/devboard/wifi/wifi.h"
 #include "src/inverter/INVERTERS.h"
+#include "src/lib/ayushsharma82-ElegantOTA/src/ElegantOTA.h"
 
-#if !defined(HW_LILYGO) && !defined(HW_LILYGO2CAN) && !defined(HW_STARK) && !defined(HW_3LB) && !defined(HW_DEVKIT)
-#error You must select a target hardware!
+#ifdef PERIODIC_BMS_RESET_AT
+#include "src/devboard/utils/ntp_time.h"
 #endif
+volatile unsigned long long bmsResetTimeOffset = 0;
 
 // The current software version, shown on webserver
 const char* version_number = "9.0.RC8";
@@ -56,6 +59,13 @@ std::string mqtt_user;      //TODO, move?
 std::string mqtt_password;  //TODO, move?
 std::string http_username;  //TODO, move?
 std::string http_password;  //TODO, move?
+
+void init_serial();
+void check_reset_reason();
+void connectivity_loop();
+void core_loop();
+void check_interconnect_available();
+void update_calculated_values();
 
 static std::list<Transmitter*> transmitters;
 void register_transmitter(Transmitter* transmitter) {
@@ -376,12 +386,6 @@ void core_loop(void*) {
     receive_rs485();  // Process serial2 RS485 interface
 
     END_TIME_MEASUREMENT_MAX(comm, datalayer.system.status.time_comm_us);
-
-    if (webserver_enabled) {
-      START_TIME_MEASUREMENT(ota);
-      ElegantOTA.loop();
-      END_TIME_MEASUREMENT_MAX(ota, datalayer.system.status.time_ota_us);
-    }
 
     // Process
     currentMillis = millis();

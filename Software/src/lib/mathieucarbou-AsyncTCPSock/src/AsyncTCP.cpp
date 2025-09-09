@@ -516,7 +516,7 @@ bool AsyncClient::connect(IPAddress ip, uint16_t port)
     memcpy(&(serveraddr.sin_addr.s_addr), &ip_addr, 4);
     serveraddr.sin_port = htons(port);
 
-#ifdef EINPROGRESS
+#if defined(EINPROGRESS) && !defined(ASYNCTCP_ALLOW_ANY_ERRNOS_VALUES)
     #if EINPROGRESS != 119
     #error EINPROGRESS invalid
     #endif
@@ -1243,6 +1243,12 @@ void AsyncServer::begin()
 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) return;
+
+#ifdef HW_PC
+    // Allow reboots to reuse the same port
+    int optval = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
+#endif
 
     struct sockaddr_in server;
     server.sin_family = AF_INET;

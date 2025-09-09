@@ -1,28 +1,35 @@
 #ifndef ARDUINO_H
 #define ARDUINO_H
 
+#include <inttypes.h>
+#include <stdarg.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-
-#include <algorithm>
-#include <cctype>
+#include <chrono>
 #include <cmath>
-#include <cstdlib>
-#include <cstring>
 
 #include "HardwareSerial.h"
-#include "Logging.h"
 #include "Print.h"
-
+#include "Printable.h"
 #include "esp-hal-gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "soc/gpio_num.h"
 
-// Arduino base constants for print formatting
-constexpr int BIN = 2;
-constexpr int OCT = 8;
-constexpr int DEC = 10;
-constexpr int HEX = 16;
+#include "WString.h"
+
+#include "esp32-hal-log.h"
+
+typedef uint8_t byte;
+//typedef unsigned int word;
+
+uint16_t makeWord(uint16_t w);
+uint16_t makeWord(uint8_t h, uint8_t l);
+
 // Arduino type aliases
 using byte = uint8_t;
 #define boolean bool
@@ -98,41 +105,77 @@ inline int analogRead(uint8_t pin) {
 }
 
 // Mock WiFi types
-typedef int WiFiEvent_t;
 typedef int WiFiEventInfo_t;
 
-// Mock WiFi functions
-inline void onWifiConnect(WiFiEvent_t event, WiFiEventInfo_t info) {
-  (void)event;
-  (void)info;
-}
-
-inline void onWifiDisconnect(WiFiEvent_t event, WiFiEventInfo_t info) {
-  (void)event;
-  (void)info;
-}
-
 unsigned long micros();
+
 // Can be previously declared as a macro in stupid eModbus
 #undef millis
 unsigned long millis();
 
-void delay(unsigned long ms);
-void delayMicroseconds(unsigned long us);
-int max(int a, int b);
+void delayMicroseconds(uint32_t us);
 
-bool ledcAttachChannel(uint8_t pin, uint32_t freq, uint8_t resolution, int8_t channel);
+int max(int a, int b);
+int min(int a, int b);
+
+bool ledcAttachChannel(uint8_t pin, uint32_t freq, uint8_t resolution, uint8_t channel);
 bool ledcWrite(uint8_t pin, uint32_t duty);
 
-class ESPClass {
+class EspClass {
  public:
   size_t getFlashChipSize() {
     // This is a placeholder for the actual implementation
     // that retrieves the flash chip size.
     return 4 * 1024 * 1024;  // Example: returning 4MB
   }
+  void restart();
 };
 
-extern ESPClass ESP;
+typedef int esp_err_t;
+
+esp_err_t esp_task_wdt_add(TaskHandle_t task_handle);
+esp_err_t esp_task_wdt_reset(void);
+
+typedef struct {
+  uint32_t timeout_ms; /**< TWDT timeout duration in milliseconds */
+  uint32_t
+      idle_core_mask; /**< Bitmask of the core whose idle task should be subscribed on initialization where 1 << i means that core i's idle task will be monitored by the TWDT */
+  bool trigger_panic; /**< Trigger panic when timeout occurs */
+} esp_task_wdt_config_t;
+
+esp_err_t esp_task_wdt_init(const esp_task_wdt_config_t* config);
+
+void delay(uint32_t ms);
+
+float temperatureRead();
+
+uint32_t ledcWriteTone(uint8_t pin, uint32_t freq);
+
+/*size_t strlen_P(const char *s);
+int strncmp_P (const char *, const char *, size_t);
+int	strcmp_P (const char *, const char *);
+int	memcmp_P (const void *, const void *, size_t);
+void *memcpy_P (void *, const void *, size_t);
+*/
+
+#define pgm_read_byte(addr) (*(const unsigned char*)(addr))
+
+#define PROGMEM
+#define PGM_P const char*
+#define PSTR(s) (s)
+#define __unused
+
+#define snprintf_P snprintf
+#define strlen_P strlen
+#define memcpy_P memcpy
+#define sprintf_P sprintf
+
+char* strndup(const char* str, size_t size);
+
+extern EspClass ESP;
+
+struct tm* localtime_r(const time_t*, struct tm*);
+
+int strcasecmp(const char*, const char*);
 
 #endif

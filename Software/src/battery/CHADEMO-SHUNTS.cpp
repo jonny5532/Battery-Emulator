@@ -21,6 +21,7 @@
 #include "CHADEMO-SHUNTS.h"
 #include "../datalayer/datalayer.h"
 #include "../devboard/utils/events.h"
+#include "../devboard/utils/logging.h"
 #include "CHADEMO-BATTERY.h"
 
 /* Initial frames received from ISA shunts provide invalid during initialization */

@@ -2,8 +2,8 @@
 #define HARDWARESERIAL_H
 
 #include <stdint.h>
-#include <cstddef>
-#include "Print.h"
+#include <string.h>
+#include <mutex>
 #include "Stream.h"
 
 enum SerialConfig {
@@ -36,29 +36,37 @@ enum SerialConfig {
 class HardwareSerial : public Stream {
  public:
   // Implement ALL pure virtual functions from base classes
-  int available() override { return 0; }
-  int read() override { return -1; }
-  int peek() override { return -1; }
-  void flush() override {}                      // Implement flush from Print
-  size_t write(uint8_t) override { return 0; }  // Implement write from Print
+  virtual int available() override { return 0; }
+  virtual int read() override { return -1; }
+  virtual int peek() override { return -1; }
+  void flush() override {}  // Implement flush from Print
 
   // Your existing methods
-  uint32_t baudRate() { return 9600; }
   void begin(unsigned long baud, uint32_t config = SERIAL_8N1, int8_t rxPin = -1, int8_t txPin = -1,
              bool invert = false, unsigned long timeout_ms = 20000UL, uint8_t rxfifo_full_thrhd = 120) {}
-  void setTxBufferSize(uint16_t size) {}
-  void setRxBufferSize(uint16_t size) {}
-  bool setRxFIFOFull(uint8_t fifoBytes) { return false; }
-
-  // Add the buffer write method
-  size_t write(const uint8_t* buffer, size_t size) override {
-    (void)buffer;
-    (void)size;
-    return 0;
+  uint32_t baudRate() {
+    return 115200;  // Default baud rate for emulation
   }
+
+  size_t write(uint8_t);
+  size_t write(const uint8_t* buffer, size_t size);
+  inline size_t write(const char* buffer, size_t size) { return write((uint8_t*)buffer, size); }
+  inline size_t write(const char* s) { return write((uint8_t*)s, strlen(s)); }
+
+  size_t setRxBufferSize(size_t new_size) { return new_size; };
+  size_t setTxBufferSize(size_t new_size) { return new_size; };
+  bool setRxFIFOFull(uint8_t fifoBytes) { return false; }
+  operator bool() const;
+
+ private:
+  std::mutex writeMutex;
 };
+
 extern HardwareSerial Serial;
 extern HardwareSerial Serial1;
 extern HardwareSerial Serial2;
+
+// similarly to Arduino
+//#define Serial Serial
 
 #endif
