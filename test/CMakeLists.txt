@@ -98,7 +98,8 @@ add_executable(tests
     ../Software/src/lib/eModbus-eModbus/ModbusServerRTU.cpp
     ../Software/src/lib/eModbus-eModbus/ModbusTypeDefs.cpp
     ../Software/src/lib/eModbus-eModbus/RTUutils.cpp
-    ../Software/src/lib/eModbus-eModbus/scripts/mbServerFCs.cpp
+    ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/AsyncWebHeader.cpp
+    ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/AsyncWebServerRequest.cpp
     ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/WebServer.cpp
     ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/WebRequest.cpp
     ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/WebHandlers.cpp
@@ -109,8 +110,6 @@ add_executable(tests
     ../Software/src/lib/adafruit-Adafruit_NeoPixel/Adafruit_NeoPixel.cpp
     ../Software/src/lib/ayushsharma82-ElegantOTA/src/elop.cpp
     ../Software/src/lib/ayushsharma82-ElegantOTA/src/ElegantOTA.cpp
-    ../Software/src/lib/YiannisBourkelis-Uptime-Library/src/uptime_formatter.cpp
-    ../Software/src/lib/YiannisBourkelis-Uptime-Library/src/uptime.cpp
     ../Software/src/battery/BATTERIES.cpp
     ../Software/src/battery/Battery.cpp
     ../Software/src/battery/BMW-I3-BATTERY.cpp
@@ -219,11 +218,15 @@ add_executable(tests
     emul/Preferences.cpp
     emul/print.cpp
     emul/mqtt.cpp
+    emul/SD_MMC.cpp
+    emul/sdcard.cpp
     emul/freertos/task.cpp
     emul/freertos/semphr.cpp
+    emul/freertos/ringbuf.cpp
     emul/lwip/sockets.cpp
     emul/lwip/dns.cpp
     emul/libb64/cencode.cpp
+    emul/hacks.cpp
     )
 
 target_link_libraries(tests

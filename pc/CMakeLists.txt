@@ -41,7 +41,6 @@ add_executable(BatteryEmulator
     ../Software/src/lib/eModbus-eModbus/ModbusMessage.cpp
     ../Software/src/lib/eModbus-eModbus/ModbusTypeDefs.cpp
     ../Software/src/lib/eModbus-eModbus/Logging.cpp
-    ../Software/src/lib/eModbus-eModbus/scripts/mbServerFCs.cpp
     ../Software/src/lib/eModbus-eModbus/RTUutils.cpp
     ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/AsyncWebHeader.cpp
     ../Software/src/lib/ESP32Async-ESPAsyncWebServer/src/AsyncWebServerRequest.cpp
@@ -55,9 +54,6 @@ add_executable(BatteryEmulator
     ../Software/src/lib/adafruit-Adafruit_NeoPixel/Adafruit_NeoPixel.cpp
     ../Software/src/lib/ayushsharma82-ElegantOTA/src/elop.cpp
     ../Software/src/lib/ayushsharma82-ElegantOTA/src/ElegantOTA.cpp
-    ../Software/src/lib/YiannisBourkelis-Uptime-Library/src/uptime_formatter.cpp
-    ../Software/src/lib/YiannisBourkelis-Uptime-Library/src/uptime.cpp
-    ../Software/USER_SETTINGS.cpp
     ${BATTERY_SOURCE}
     ${CHARGER_SOURCE}
     ${INVERTER_SOURCE}
@@ -73,7 +69,7 @@ add_executable(BatteryEmulator
     ../Software/src/devboard/utils/types.cpp
     ../Software/src/devboard/utils/timer.cpp
     ../Software/src/devboard/utils/led_handler.cpp
-    ../Software/Software.ino
+    ../Software/Software.cpp
     ../test/emul/can.cpp
     ../test/emul/cbuf.cpp
     ../test/emul/time.cpp
@@ -87,10 +83,13 @@ add_executable(BatteryEmulator
     ../test/emul/Preferences.cpp
     ../test/emul/print.cpp
     ../test/emul/mqtt.cpp
+    ../test/emul/SD_MMC.cpp
+    ../test/emul/sdcard.cpp
     ../test/emul/freertos/task.cpp
     ../test/emul/freertos/semphr.cpp
     ../test/emul/freertos/ringbuf.cpp
     ../test/emul/lwip/sockets.cpp
     ../test/emul/lwip/dns.cpp
     ../test/emul/libb64/cencode.cpp
+    ../test/emul/hacks.cpp
     )

@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#undef F
+
 // -- Utility Macros
 #define F(x, y, z) (((x) & (y)) | ((~x) & (z)))
 #define G(x, y, z) (((x) & (z)) | ((y) & (~z)))

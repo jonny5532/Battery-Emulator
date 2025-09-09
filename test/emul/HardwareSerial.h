@@ -39,11 +39,9 @@ class HardwareSerial : public Stream {
   virtual int available() override { return 0; }
   virtual int read() override { return -1; }
   virtual int peek() override { return -1; }
-  void flush() override {}                      // Implement flush from Print
-  size_t write(uint8_t) override { return 0; }  // Implement write from Print
+  void flush() override {}  // Implement flush from Print
 
   // Your existing methods
-  uint32_t baudRate() { return 9600; }
   void begin(unsigned long baud, uint32_t config = SERIAL_8N1, int8_t rxPin = -1, int8_t txPin = -1,
              bool invert = false, unsigned long timeout_ms = 20000UL, uint8_t rxfifo_full_thrhd = 120) {}
   uint32_t baudRate() {
@@ -64,18 +62,11 @@ class HardwareSerial : public Stream {
   std::mutex writeMutex;
 };
 
-  // Add the buffer write method
-  size_t write(const uint8_t* buffer, size_t size) override {
-    (void)buffer;
-    (void)size;
-    return 0;
-  }
-};
 extern HardwareSerial Serial;
 extern HardwareSerial Serial1;
 extern HardwareSerial Serial2;
 
 // similarly to Arduino
-#define Serial Serial0
+//#define Serial Serial
 
 #endif

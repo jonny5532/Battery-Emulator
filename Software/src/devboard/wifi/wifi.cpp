@@ -1,7 +1,6 @@
 #include "wifi.h"
 #include <Arduino.h>
 #include <ESPmDNS.h>
-#include "../../../USER_SETTINGS.h"
 #include "../utils/events.h"
 #include "../utils/logging.h"
 

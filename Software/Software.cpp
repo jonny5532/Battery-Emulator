@@ -29,6 +29,7 @@
 #include "src/devboard/webserver/webserver.h"
 #include "src/devboard/wifi/wifi.h"
 #include "src/inverter/INVERTERS.h"
+#include "src/lib/ayushsharma82-ElegantOTA/src/ElegantOTA.h"
 
 #ifdef PERIODIC_BMS_RESET_AT
 #include "src/devboard/utils/ntp_time.h"
@@ -134,12 +135,6 @@ void core_loop(void*) {
     receive_rs485();  // Process serial2 RS485 interface
 
     END_TIME_MEASUREMENT_MAX(comm, datalayer.system.status.time_comm_us);
-
-    if (webserver_enabled) {
-      START_TIME_MEASUREMENT(ota);
-      ElegantOTA.loop();
-      END_TIME_MEASUREMENT_MAX(ota, datalayer.system.status.time_ota_us);
-    }
 
     // Process
     currentMillis = millis();

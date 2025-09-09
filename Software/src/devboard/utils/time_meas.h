@@ -1,6 +1,8 @@
 #ifndef TIME_MEAS_H_
 #define TIME_MEAS_H_
 
+#include "value_mapping.h"
+
 #include "esp_timer.h"
 
 /** Start time measurement in microseconds

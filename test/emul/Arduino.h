@@ -32,20 +32,6 @@ uint16_t makeWord(uint8_t h, uint8_t l);
 
 #define word(...) makeWord(__VA_ARGS__)
 
-#define lowByte(w) ((uint8_t)((w) & 0xff))
-#define highByte(w) ((uint8_t)((w) >> 8))
-
-#define bitRead(value, bit) (((value) >> (bit)) & 0x01)
-#define bitSet(value, bit) ((value) |= (1UL << (bit)))
-#define bitClear(value, bit) ((value) &= ~(1UL << (bit)))
-#define bitToggle(value, bit) ((value) ^= (1UL << (bit)))
-#define bitWrite(value, bit, bitvalue) ((bitvalue) ? bitSet(value, bit) : bitClear(value, bit))
-
-// Arduino base constants for print formatting
-constexpr int BIN = 2;
-constexpr int OCT = 8;
-constexpr int DEC = 10;
-constexpr int HEX = 16;
 // Arduino type aliases
 using byte = uint8_t;
 #define boolean bool
@@ -121,46 +107,31 @@ inline int analogRead(uint8_t pin) {
 }
 
 // Mock WiFi types
-typedef int WiFiEvent_t;
 typedef int WiFiEventInfo_t;
 
-// Mock WiFi functions
-inline void onWifiConnect(WiFiEvent_t event, WiFiEventInfo_t info) {
-  (void)event;
-  (void)info;
-}
-
-inline void onWifiDisconnect(WiFiEvent_t event, WiFiEventInfo_t info) {
-  (void)event;
-  (void)info;
-}
-
 unsigned long micros();
-uint16_t analogRead(uint8_t pin);
 
 // Can be previously declared as a macro in stupid eModbus
 #undef millis
 unsigned long millis();
 
-void delay(unsigned long ms);
-void delayMicroseconds(unsigned long us);
+void delayMicroseconds(uint32_t us);
 
 int max(int a, int b);
 int min(int a, int b);
 
-bool ledcAttachChannel(uint8_t pin, uint32_t freq, uint8_t resolution, int8_t channel);
+bool ledcAttachChannel(uint8_t pin, uint32_t freq, uint8_t resolution, uint8_t channel);
 bool ledcWrite(uint8_t pin, uint32_t duty);
 
-class ESPClass {
+class EspClass {
  public:
   size_t getFlashChipSize() {
     // This is a placeholder for the actual implementation
     // that retrieves the flash chip size.
     return 4 * 1024 * 1024;  // Example: returning 4MB
   }
+  void restart();
 };
-
-extern ESPClass ESP;
 
 typedef int esp_err_t;
 
@@ -202,11 +173,6 @@ void *memcpy_P (void *, const void *, size_t);
 #define sprintf_P sprintf
 
 char* strndup(const char* str, size_t size);
-
-class EspClass {
- public:
-  void restart();
-};
 
 extern EspClass ESP;
 

@@ -7,11 +7,14 @@
 typedef int BaseType_t;
 typedef unsigned int UBaseType_t;
 
+const BaseType_t tskNO_AFFINITY = -1;
+
 struct tskTaskControlBlock;
 typedef struct tskTaskControlBlock* TaskHandle_t;
 
 typedef void (*TaskFunction_t)(void*);
 
+extern "C" {
 BaseType_t xTaskCreatePinnedToCore(TaskFunction_t pxTaskCode, const char* const pcName, const uint32_t ulStackDepth,
                                    void* const pvParameters, UBaseType_t uxPriority, TaskHandle_t* const pxCreatedTask,
                                    const BaseType_t xCoreID);
@@ -23,6 +26,9 @@ BaseType_t xTaskCreateUniversal(TaskFunction_t pxTaskCode, const char* const pcN
 BaseType_t xTaskCreate(TaskFunction_t pxTaskCode, const char* const pcName, const uint16_t usStackDepth,
                        void* const pvParameters, UBaseType_t uxPriority, TaskHandle_t* const pxCreatedTask);
 
+void vTaskDelete(TaskHandle_t xTaskToDelete);
+}
+
 #define CONFIG_FREERTOS_HZ 1000
 #define configTICK_RATE_HZ CONFIG_FREERTOS_HZ
 
@@ -32,16 +38,11 @@ BaseType_t xTaskCreate(TaskFunction_t pxTaskCode, const char* const pcName, cons
 #define pdPASS (pdTRUE)
 #define pdFAIL (pdFALSE)
 
-/*#ifndef pdMS_TO_TICKS
-#define pdMS_TO_TICKS(xTimeInMs) (std::chrono::milliseconds(xTimeInMs))
-#endif*/
 #define pdMS_TO_TICKS(xTimeInMs) (xTimeInMs)
 
 #define portTICK_PERIOD_MS ((TickType_t)1000 / configTICK_RATE_HZ)
 
 #define portMAX_DELAY (TickType_t)0xffffffffUL
-
-void vTaskDelete(TaskHandle_t xTaskToDelete);
 
 typedef void (*TaskFunction_t)(void*);
 
@@ -66,8 +67,6 @@ void vTaskDelay(const TickType_t xTicksToDelay);
   do {                                                             \
     (void)xTaskDelayUntil((pxPreviousWakeTime), (xTimeIncrement)); \
   } while (0)
-
-#define tskNO_AFFINITY ((BaseType_t)0x7FFFFFFF)
 
 inline void taskYIELD(void) {}
 

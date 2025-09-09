@@ -146,8 +146,6 @@ class String {
     return data.empty() && s2.data.empty();
   }
 
-  bool operator==(const String& rhs) const { return data == rhs.data; }
-
   bool startsWith(const String& prefix) const { return data.rfind(prefix.data, 0) == 0; }
 
   bool startsWith(const char* prefix) const {

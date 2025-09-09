@@ -102,6 +102,8 @@ class WiFiClass {
     return WL_CONNECTED;
   }
 
+  void config(IPAddress local_ip, IPAddress gateway, IPAddress subnet) {}
+
   const char* getHostname();
 
   wl_status_t status() { return WL_CONNECTED; }

@@ -14,7 +14,6 @@ volatile CAN_Configuration can_config = {.battery = CAN_Interface::CAN_NATIVE,
                                          .charger = CAN_Interface::CAN_NATIVE,
                                          .shunt = CAN_Interface::CAN_NATIVE};
 
-
 #include "esp_system.h"
 
 int max(int a, int b) {
@@ -155,22 +154,6 @@ void log_printf(const char* format, ...) {
   }
 
   std::clog << buffer.data();
-}
-
-unsigned short makeWord(unsigned char high, unsigned char low) {
-  return (static_cast<unsigned short>(high) << 8) | low;
-}
-
-unsigned short analogRead(unsigned char) {
-  return 0;
-}
-
-long random(long min, long max) {
-  return min + (std::rand() % (max - min + 1));
-}
-
-void randomSeed(unsigned long seed) {
-  std::srand(static_cast<unsigned int>(seed));
 }
 
 esp_err_t esp_task_wdt_init(const esp_task_wdt_config_t* config) {

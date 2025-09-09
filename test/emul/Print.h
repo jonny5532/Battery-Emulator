@@ -7,13 +7,13 @@
 #include <stdio.h>
 #include <string.h>
 
+// Arduino base constants for print formatting
+constexpr int BIN = 2;
+constexpr int OCT = 8;
+constexpr int DEC = 10;
+constexpr int HEX = 16;
+
 // Minimal copy of Arduino Print class
-
-#define DEC 10
-#define HEX 16
-#define OCT 8
-#define BIN 2
-
 class Print {
  public:
   virtual void flush() {}
@@ -44,8 +44,6 @@ class Print {
   size_t printf(const char* format, ...);
   size_t println(const char[]);
   size_t println(void);
-
-  virtual void flush() {}
 
  private:
   size_t printNumber(unsigned long n, uint8_t base);
