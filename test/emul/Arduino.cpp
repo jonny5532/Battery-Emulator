@@ -85,7 +85,8 @@ esp_err_t esp_task_wdt_reset(void) {
 
 void EspClass::restart() {
   // Simulate a restart by throwing an exception
-  throw std::runtime_error("Simulated restart");
+  //throw std::runtime_error("Simulated restart");
+  exit(0);
 }
 
 int strcasecmp(const char* s1, const char* s2) {

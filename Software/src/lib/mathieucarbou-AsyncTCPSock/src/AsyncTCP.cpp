@@ -1244,6 +1244,12 @@ void AsyncServer::begin()
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) return;
 
+    #ifdef HW_PC
+    // Allow reboots to reuse the same port
+    int optval = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
+    #endif
+
     struct sockaddr_in server;
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = (uint32_t) _addr;
