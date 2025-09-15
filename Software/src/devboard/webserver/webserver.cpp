@@ -259,7 +259,9 @@ void init_webserver() {
   if (datalayer.system.info.web_logging_active || datalayer.system.info.SD_logging_active) {
     // Route for going to debug logging web page
     server.on("/log", HTTP_GET, [](AsyncWebServerRequest* request) {
-      AsyncWebServerResponse* response = request->beginResponse(200, "text/html", debug_logger_processor());
+      String str;
+      debug_logger_processor(str);
+      AsyncWebServerResponse* response = request->beginResponse(200, "text/html", str);
       request->send(response);
     });
   }
@@ -363,9 +365,9 @@ void init_webserver() {
   }
 
   // Route for going to cellmonitor web page
-  def_route_with_auth("/cellmonitor", server, HTTP_GET, [](AsyncWebServerRequest* request) {
-    request->send(200, "text/html", index_html, cellmonitor_processor);
-  });
+  // def_route_with_auth("/cellmonitor", server, HTTP_GET, [](AsyncWebServerRequest* request) {
+  //   request->send(200, "text/html", index_html, cellmonitor_processor);
+  // });
 
   // Route for going to event log web page
   def_route_with_auth("/events", server, HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -963,6 +965,8 @@ String processor(const String& var) {
 #endif  // HW_STARK
     content += " @ " + String(datalayer.system.info.CPU_temperature, 1) + " &deg;C</h4>";
     content += "<h4>Uptime: " + get_uptime() + "</h4>";
+    content +=
+        "<h4>Free heap: " + String(ESP.getFreeHeap()) + ", max alloc: " + String(ESP.getMaxAllocHeap()) + "</h4>";
     if (datalayer.system.info.performance_measurement_active) {
       // Load information
       content += "<h4>Core task max load: " + String(datalayer.system.status.core_task_max_us) + " us</h4>";

@@ -32,14 +32,14 @@ char* strnchr(const char* s, int c, size_t n) {
   return NULL;
 }
 
-String debug_logger_processor(void) {
-  String content = String();
+void debug_logger_processor(String& content) {
+  //String content = String();
   // Reserve enough space for the content to avoid reallocations.
   if (!content.reserve(1000 + sizeof(datalayer.system.info.logged_can_messages))) {
     if (content.reserve(15)) {
       content += "Out of memory.";
     }
-    return content;
+    return;
   }
   content += index_html_header;
   // Page format
@@ -104,5 +104,5 @@ String debug_logger_processor(void) {
   content += "function goToMainPage() { window.location.href = '/'; }";
   content += "</script>";
   content += index_html_footer;
-  return content;
+  return;
 }
