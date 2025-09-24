@@ -33,6 +33,7 @@ jobs:
       with:
         # Fetch a bunch of commits to pick up the most recent tag
         fetch-depth: 100
+        fetch-tags: true
 
     - uses: actions/cache@v4
       with:
