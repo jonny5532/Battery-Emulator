@@ -43,6 +43,12 @@ jobs:
         python-version: '3.11'
     - name: Install PlatformIO Core
       run: pip install --upgrade platformio
+    
+    - name: Set version
+      run: |
+           ver=$(git describe --tags --always)
+           stripped=${ver#"v"}
+           sed -i 's/const char\* version_number = "[^"]*";/const char\* version_number = "'$stripped'";/' Software/Software.cpp
 
     - name: Build image for Lilygo
       run: pio run -e lilygo_330
