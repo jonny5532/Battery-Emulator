@@ -30,6 +30,9 @@ jobs:
     steps:
     - uses: actions/checkout@v5
       name: Checkout code
+      with:
+        # Fetch a bunch of commits to pick up the most recent tag
+        fetch-depth: 100
 
     - uses: actions/cache@v4
       with:
@@ -44,11 +47,11 @@ jobs:
     - name: Install PlatformIO Core
       run: pip install --upgrade platformio
     
-    - name: Set version
+    - name: Set version number from git tag
       run: |
            ver=$(git describe --tags --always)
            stripped=${ver#"v"}
-           sed -i 's/const char\* version_number = "[^"]*";/const char\* version_number = "'$stripped'";/' Software/Software.cpp
+           sed -i 's/const char\* version_number = "[^"]*";/const char\* version_number = "'"$stripped"'";/' Software/Software.cpp
 
     - name: Build image for Lilygo
       run: pio run -e lilygo_330
