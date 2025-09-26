@@ -121,7 +121,7 @@ const char* name_for_button_type(STOP_BUTTON_BEHAVIOR behavior) {
   }
 }
 
-String settings_processor(const String& var, BatteryEmulatorSettingsStore& settings) {
+String raw_settings_processor(const String& var, BatteryEmulatorSettingsStore& settings) {
 
   if (var == "HOSTNAME") {
     return settings.getString("HOSTNAME");
@@ -698,6 +698,37 @@ String settings_processor(const String& var, BatteryEmulatorSettingsStore& setti
   }
 
   return String();
+}
+
+String settings_processor(const String& var, BatteryEmulatorSettingsStore& settings) {
+  String out = raw_settings_processor(var, settings);
+  // Escape any HTML special characters to prevent XSS
+  String ret;
+  ret.reserve(out.length() * 2);  // Reserve enough space to avoid multiple allocations
+  for (size_t i = 0; i < out.length(); i++) {
+    char c = out.charAt(i);
+    switch (c) {
+      case '&':
+        ret += "&amp;";
+        break;
+      case '<':
+        ret += "&lt;";
+        break;
+      case '>':
+        ret += "&gt;";
+        break;
+      case '"':
+        ret += "&quot;";
+        break;
+      case '\'':
+        ret += "&#39;";
+        break;
+      default:
+        ret += c;
+        break;
+    }
+  }
+  return ret;
 }
 
 const char* getCANInterfaceName(CAN_Interface interface) {
