@@ -1,4 +1,4 @@
-name: 🔋 Compile Common Image for Lilygo T-CAN
+name: 🔋 Compile Common Image
 
 on:
   # The workflow is run when a commit is pushed or for a
