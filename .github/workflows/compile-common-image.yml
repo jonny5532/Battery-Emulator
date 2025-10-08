@@ -1,4 +1,4 @@
-name: 🔋 Compile Common Image for Stark CMR
+name: 🔋 Compile Common Image for Lilygo T-CAN
 
 on:
   # The workflow is run when a commit is pushed or for a
@@ -44,11 +44,24 @@ jobs:
     - name: Install PlatformIO Core
       run: pip install --upgrade platformio
 
+    - name: Build image for LilyGo T-CAN485
+      run: pio run -e lilygo_330
+
+    - name: Build image for LilyGo T-2CAN
+      run: pio run -e lilygo_2CAN_330
+
     - name: Build image for Stark CMR
       run: pio run -e stark_330
+
+    - name: Rename images
+      run: |
+        mkdir output
+        mv .pio/build/lilygo_330/firmware.bin output/firmware_${GITHUB_SHA::6}_LilygoT-CAN485.ota.bin
+        mv .pio/build/lilygo_2CAN_330/firmware.bin output/firmware_${GITHUB_SHA::6}_LilygoT-2CAN.ota.bin
+        mv .pio/build/stark_330/firmware.bin output/firmware_${GITHUB_SHA::6}_StarkCMR.ota.bin
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: battery-emulator-stark.bin
-        path: .pio/build/stark_330/firmware.bin
+        name: firmware_${GITHUB_SHA::6}
+        path: output/*.bin
