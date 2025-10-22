@@ -93,7 +93,7 @@ void connectivity_loop(void*) {
   xTaskCreateUniversal(tiny_web_server_loop, "TinyWebServer_loop", 6000, &tinyWebServer, TASK_CONNECTIVITY_PRIO, NULL,
                        CONFIG_ASYNC_TCP_RUNNING_CORE);
 
-  init_webserver();
+  //init_webserver();
 
   if (mdns_enabled) {
     init_mDNS();
@@ -103,7 +103,7 @@ void connectivity_loop(void*) {
     START_TIME_MEASUREMENT(wifi);
     wifi_monitor();
 
-    ota_monitor();
+    //ota_monitor();
 
     END_TIME_MEASUREMENT_MAX(wifi, datalayer.system.status.wifi_task_10s_max_us);
 
@@ -427,7 +427,7 @@ void core_loop(void*) {
     END_TIME_MEASUREMENT_MAX(comm, datalayer.system.status.time_comm_us);
 
     START_TIME_MEASUREMENT(ota);
-    ElegantOTA.loop();
+    //ElegantOTA.loop();
     END_TIME_MEASUREMENT_MAX(ota, datalayer.system.status.time_ota_us);
 
     // Process
