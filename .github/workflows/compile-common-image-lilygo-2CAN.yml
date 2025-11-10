@@ -39,7 +39,7 @@ jobs:
         key: ${{ runner.os }}-pio
 
     - name: ls stuff
-      run: ls -lR ~/
+      run: ls -alR ~/
     
     - uses: actions/setup-python@v6
       with:
