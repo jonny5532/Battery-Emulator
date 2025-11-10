@@ -38,6 +38,9 @@ jobs:
           ~/.platformio/.cache
         key: ${{ runner.os }}-pio
 
+    - name: ls stuff
+      run: ls -lR ~/.platformio
+
     - uses: actions/setup-python@v6
       with:
         python-version: '3.11'
