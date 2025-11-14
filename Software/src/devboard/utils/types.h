@@ -18,6 +18,11 @@ enum class comm_interface {
   CanFdNative = 4,
   CanAddonMcp2515 = 5,
   CanFdAddonMcp2518 = 6,
+#if defined(HW_3LB)
+  CanFdAddonMcp2517_1 = 7,  // MCP2517FD U5 (CAN2)
+  CanFdAddonMcp2517_2 = 8,  // MCP2517FD U3 (CAN3)
+  CanFdNativeAsCan1 = 9,    // Select this to treat MCP2517 U5 as native CAN1 (stored as selection)
+#endif
   Highest
 };
 
@@ -71,8 +76,16 @@ enum CAN_Interface {
   CANFD_ADDON_MCP2518 = 3,
 
   // No CAN interface
-  NO_CAN_INTERFACE = 4
+  NO_CAN_INTERFACE = 4,
+  // MCP2517FD (3LB specific)
+  CANFD_ADDON_MCP2517_1 = 5,
+  CANFD_ADDON_MCP2517_2 = 6
 };
+
+// Convenience alias: point virtual CANFD_NATIVE_CAN1 to MCP2517 U5 on this board
+#ifndef CANFD_NATIVE_CAN1
+#define CANFD_NATIVE_CAN1 CANFD_ADDON_MCP2517_1
+#endif
 
 extern const char* getCANInterfaceName(CAN_Interface interface);
 

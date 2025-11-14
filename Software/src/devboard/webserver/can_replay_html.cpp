@@ -37,12 +37,15 @@ String can_replay_processor(void) {
              (datalayer.system.info.can_replay_interface == CAN_NATIVE ? "selected" : "") + ">CAN Native</option>";
   content += "<option value='" + String(CANFD_NATIVE) + "' " +
              (datalayer.system.info.can_replay_interface == CANFD_NATIVE ? "selected" : "") + ">CANFD Native</option>";
-  content += "<option value='" + String(CAN_ADDON_MCP2515) + "' " +
-             (datalayer.system.info.can_replay_interface == CAN_ADDON_MCP2515 ? "selected" : "") +
-             ">CAN Addon MCP2515</option>";
-  content += "<option value='" + String(CANFD_ADDON_MCP2518) + "' " +
-             (datalayer.system.info.can_replay_interface == CANFD_ADDON_MCP2518 ? "selected" : "") +
-             ">CANFD Addon MCP2518</option>";
+  // Note: MCP2515 / MCP2518 options removed for 3LB build - use MCP2517FD U5/U3 add-ons instead
+
+  // 3LB-specific CAN-FD add-on interfaces (MCP2517 U5 and U3)
+  content += "<option value='" + String(CANFD_ADDON_MCP2517_1) + "' " +
+             (datalayer.system.info.can_replay_interface == CANFD_ADDON_MCP2517_1 ? "selected" : "") +
+             ">CANFD Addon MCP2517 U5 (CAN2)</option>";
+  content += "<option value='" + String(CANFD_ADDON_MCP2517_2) + "' " +
+             (datalayer.system.info.can_replay_interface == CANFD_ADDON_MCP2517_2 ? "selected" : "") +
+             ">CANFD Addon MCP2517 U3 (CAN3)</option>";
 
   content += "</select>";
 

@@ -56,6 +56,16 @@ SPIClass SPI2517;
 uint8_t user_selected_canfd_addon_crystal_frequency_mhz = 0;
 ACAN2517FD* canfd;
 ACAN2517FDSettings* settings2517;
+// 3LB: additional MCP2517FD instances (CAN2 U5, CAN3 U3)
+#ifdef HW_3LB
+SPIClass SPI2517_shared(VSPI);  // Both MCP2517FD chips share same SPI bus
+ACAN2517FD* canfd_2 = nullptr;
+ACAN2517FD* canfd_3 = nullptr;
+ACAN2517FDSettings* settings2517_2 = nullptr;
+ACAN2517FDSettings* settings2517_3 = nullptr;
+volatile bool send_ok_2517_2 = false;
+volatile bool send_ok_2517_3 = false;
+#endif
 bool use_canfd_as_can = false;
 bool native_can_initialized = false;
 //CAN logging filter settings
@@ -225,6 +235,68 @@ bool init_CAN() {
     }
   }
 
+  // 3LB: initialize CAN2 (MCP2517FD U5) and CAN3 (MCP2517FD U3) if registered
+#ifdef HW_3LB
+  auto it2 = can_receivers.find(CANFD_ADDON_MCP2517_1);
+  auto it3 = can_receivers.find(CANFD_ADDON_MCP2517_2);
+
+  // Initialize shared SPI bus once if either CAN2 or CAN3 is registered
+  if (it2 != can_receivers.end() || it3 != can_receivers.end()) {
+    logging.println("Initializing shared SPI for 3LB MCP2517FD...");
+    SPI2517_shared.begin(esp32hal->MCP2517_2_SCK(), esp32hal->MCP2517_2_SDO(), esp32hal->MCP2517_2_SDI());
+    logging.printf("SPI pins: SCK=%d SDO=%d SDI=%d\n", esp32hal->MCP2517_2_SCK(), esp32hal->MCP2517_2_SDO(),
+                   esp32hal->MCP2517_2_SDI());
+  }
+
+  // Initialize CAN2 (U5) - with delay for GPIO5 strapping pin to stabilize
+  if (it2 != can_receivers.end()) {
+    delay(100);  // GPIO5 is strapping pin, needs time to stabilize after boot
+    pinMode(esp32hal->MCP2517_2_CS(), OUTPUT);
+    digitalWrite(esp32hal->MCP2517_2_CS(), HIGH);  // Explicitly set CS high before init
+    delay(50);
+
+    // Try manual SPI reset sequence for MCP2517FD
+    digitalWrite(esp32hal->MCP2517_2_CS(), LOW);
+    SPI2517_shared.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+    SPI2517_shared.transfer(0x00);  // RESET instruction
+    SPI2517_shared.transfer(0x00);
+    SPI2517_shared.endTransaction();
+    digitalWrite(esp32hal->MCP2517_2_CS(), HIGH);
+    delay(50);
+
+    const uint32_t speed_kbps = static_cast<uint32_t>(it2->second.speed);
+    logging.printf("Creating CAN2 MCP2517FD: CS=%d INT=%d\n", esp32hal->MCP2517_2_CS(), esp32hal->MCP2517_2_INT());
+    canfd_2 = new ACAN2517FD(esp32hal->MCP2517_2_CS(), SPI2517_shared, esp32hal->MCP2517_2_INT());
+
+    settings2517_2 = new ACAN2517FDSettings(quartz_fd_frequency, speed_kbps * 1000UL, DataBitRateFactor::x4);
+    settings2517_2->mRequestedMode = use_canfd_as_can ? ACAN2517FDSettings::Normal20B : ACAN2517FDSettings::NormalFD;
+
+    logging.println("Calling canfd_2->begin()...");
+    const uint32_t err2 = canfd_2->begin(*settings2517_2, [] { canfd_2->isr(); });
+    canfd_2->poll();
+    if (err2)
+      logging.printf("CAN2 MCP2517FD error 0x%lX\n", err2);
+    else
+      logging.println("CAN2 MCP2517FD OK");
+  }
+
+  // Initialize CAN3 (U3)
+  if (it3 != can_receivers.end()) {
+    const uint32_t speed_kbps = static_cast<uint32_t>(it3->second.speed);
+    canfd_3 = new ACAN2517FD(esp32hal->MCP2517_3_CS(), SPI2517_shared, esp32hal->MCP2517_3_INT());
+
+    settings2517_3 = new ACAN2517FDSettings(quartz_fd_frequency, speed_kbps * 1000UL, DataBitRateFactor::x4);
+    settings2517_3->mRequestedMode = use_canfd_as_can ? ACAN2517FDSettings::Normal20B : ACAN2517FDSettings::NormalFD;
+
+    const uint32_t err3 = canfd_3->begin(*settings2517_3, [] { canfd_3->isr(); });
+    canfd_3->poll();
+    if (err3)
+      logging.printf("CAN3 MCP2517FD error 0x%lX\n", err3);
+    else
+      logging.println("CAN3 MCP2517FD OK");
+  }
+#endif
+
   return true;
 }
 
@@ -237,6 +309,22 @@ void transmit_can_frame_to_interface(const CAN_frame* tx_frame, CAN_Interface in
   if (datalayer.system.info.CAN_SD_logging_active) {
     add_can_frame_to_buffer(*tx_frame, frameDirection(MSG_TX));
   }
+
+  // If compiled with USE_CANFD_INTERFACE_AS_CLASSIC_CAN, treat any call that
+  // wants to send to CAN_NATIVE as a send to the MCP2517FD U5 (CANFD_ADDON_MCP2517_1).
+  // This makes modules that call CAN_NATIVE operate over the selected FD addon.
+  // Runtime-controlled mapping: if user enabled mapping in settings, treat CAN_NATIVE as MCP2517 U5
+  // Fall back to compile-time define if present.
+#if defined(USE_CANFD_INTERFACE_AS_CLASSIC_CAN)
+  if (interface == CAN_NATIVE) {
+    interface = CANFD_ADDON_MCP2517_1;
+  }
+#else
+  extern bool user_selected_canfd_native_to_can1;  // from comm_nvm.cpp
+  if (interface == CAN_NATIVE && user_selected_canfd_native_to_can1) {
+    interface = CANFD_ADDON_MCP2517_1;
+  }
+#endif
 
   switch (interface) {
     case CAN_NATIVE: {
@@ -289,6 +377,34 @@ void transmit_can_frame_to_interface(const CAN_frame* tx_frame, CAN_Interface in
         datalayer.system.info.can_2518_send_fail = true;
       }
     } break;
+#ifdef HW_3LB
+    case CANFD_ADDON_MCP2517_1: {
+      if (!canfd_2)
+        break;
+      CANFDMessage frame17;
+      frame17.type = tx_frame->FD ? CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH : CANFDMessage::CAN_DATA;
+      frame17.id = tx_frame->ID;
+      frame17.ext = tx_frame->ext_ID;
+      frame17.len = tx_frame->DLC;
+      memcpy(frame17.data, tx_frame->data.u8, frame17.len);
+      send_ok_2517_2 = canfd_2->tryToSend(frame17);
+      if (!send_ok_2517_2)
+        datalayer.system.info.can_2518_send_fail = true;
+    } break;
+    case CANFD_ADDON_MCP2517_2: {
+      if (!canfd_3)
+        break;
+      CANFDMessage frame17b;
+      frame17b.type = tx_frame->FD ? CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH : CANFDMessage::CAN_DATA;
+      frame17b.id = tx_frame->ID;
+      frame17b.ext = tx_frame->ext_ID;
+      frame17b.len = tx_frame->DLC;
+      memcpy(frame17b.data, tx_frame->data.u8, frame17b.len);
+      send_ok_2517_3 = canfd_3->tryToSend(frame17b);
+      if (!send_ok_2517_3)
+        datalayer.system.info.can_2518_send_fail = true;
+    } break;
+#endif
     default:
       // Invalid interface sent with function call. TODO: Raise event that coders messed up
       break;
@@ -308,6 +424,64 @@ void receive_can() {
   if (canfd) {
     receive_frame_canfd_addon();  // Receive CAN-FD messages.
   }
+
+  // 3LB: check additional CAN-FD interfaces (MCP2517 U5 -> CAN2)
+#ifdef HW_3LB
+  if (canfd_2) {
+    CANFDMessage frame;
+    while (canfd_2->available()) {
+      canfd_2->receive(frame);
+      CAN_frame rx_frame;
+      rx_frame.ID = frame.id;
+      rx_frame.ext_ID = frame.ext;
+      rx_frame.DLC = frame.len;
+      memcpy(rx_frame.data.u8, frame.data, std::min(rx_frame.DLC, (uint8_t)64));
+
+      // map to MCP2517 U5 interface
+      map_can_frame_to_variable(&rx_frame, CANFD_ADDON_MCP2517_1);
+      // also provide a copy to CANFD_NATIVE for tooling compatibility
+      map_can_frame_to_variable(&rx_frame, CANFD_NATIVE);
+      // If compiled to treat CAN-FD as classic CAN, forward the FD frame to CAN_NATIVE
+#if defined(USE_CANFD_INTERFACE_AS_CLASSIC_CAN)
+      map_can_frame_to_variable(&rx_frame, CAN_NATIVE);
+#else
+      extern bool user_selected_canfd_native_to_can1;  // from comm_nvm.cpp
+      if (user_selected_canfd_native_to_can1) {
+        map_can_frame_to_variable(&rx_frame, CAN_NATIVE);
+      }
+#endif
+    }
+  }
+#endif
+
+  // 3LB: check CAN3 (MCP2517 U3 -> CAN3)
+#ifdef HW_3LB
+  if (canfd_3) {
+    CANFDMessage frame;
+    while (canfd_3->available()) {
+      canfd_3->receive(frame);
+      CAN_frame rx_frame;
+      rx_frame.ID = frame.id;
+      rx_frame.ext_ID = frame.ext;
+      rx_frame.DLC = frame.len;
+      memcpy(rx_frame.data.u8, frame.data, std::min(rx_frame.DLC, (uint8_t)64));
+
+      // map to MCP2517 U3 interface
+      map_can_frame_to_variable(&rx_frame, CANFD_ADDON_MCP2517_2);
+      // also provide a copy to CANFD_NATIVE for tooling compatibility
+      map_can_frame_to_variable(&rx_frame, CANFD_NATIVE);
+      // If compiled to treat CAN-FD as classic CAN, forward the FD frame to CAN_NATIVE
+#if defined(USE_CANFD_INTERFACE_AS_CLASSIC_CAN)
+      map_can_frame_to_variable(&rx_frame, CAN_NATIVE);
+#else
+      extern bool user_selected_canfd_native_to_can1;  // from comm_nvm.cpp
+      if (user_selected_canfd_native_to_can1) {
+        map_can_frame_to_variable(&rx_frame, CAN_NATIVE);
+      }
+#endif
+    }
+  }
+#endif
 }
 
 void receive_frame_can_native() {  // This section checks if we have a complete CAN message incoming on native CAN port
@@ -363,6 +537,10 @@ void receive_frame_canfd_addon() {  // This section checks if we have a complete
     //message incoming, pass it on to the handler
     map_can_frame_to_variable(&rx_frame, CANFD_ADDON_MCP2518);
     map_can_frame_to_variable(&rx_frame, CANFD_NATIVE);
+    // If compiled to treat CAN-FD as classic CAN, forward the FD frame to CAN_NATIVE
+#if defined(USE_CANFD_INTERFACE_AS_CLASSIC_CAN)
+    map_can_frame_to_variable(&rx_frame, CAN_NATIVE);
+#endif
   }
 }
 
@@ -474,6 +652,18 @@ void stop_can() {
     canfd->end();
     SPI2517.end();
   }
+#ifdef HW_3LB
+  if (canfd_2) {
+    canfd_2->end();
+  }
+  if (canfd_3) {
+    canfd_3->end();
+  }
+  // End shared SPI bus once after both controllers stopped
+  if (canfd_2 || canfd_3) {
+    SPI2517_shared.end();
+  }
+#endif
 }
 
 void restart_can() {
@@ -490,6 +680,18 @@ void restart_can() {
     SPI2517.begin();
     canfd->begin(*settings2517, [] { can2515->isr(); });
   }
+#ifdef HW_3LB
+  // Restart shared SPI bus once before both controllers
+  if (canfd_2 || canfd_3) {
+    SPI2517_shared.begin();
+  }
+  if (canfd_2) {
+    canfd_2->begin(*settings2517_2, [] { canfd_2->isr(); });
+  }
+  if (canfd_3) {
+    canfd_3->begin(*settings2517_3, [] { canfd_3->isr(); });
+  }
+#endif
 }
 
 // Initialize the native CAN interface with the given speed and pins.

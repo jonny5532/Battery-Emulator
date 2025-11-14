@@ -90,6 +90,9 @@ class LilyGoHal : public Esp32Hal {
         return "CAN (MCP2515 add-on)";
       case comm_interface::CanFdAddonMcp2518:
         return "CAN FD (MCP2518 add-on)";
+#if defined(HW_3LB)
+        // Removed 3LB-specific interfaces for LilyGo builds
+#endif
       case comm_interface::Modbus:
         return "Modbus";
       case comm_interface::RS485:
