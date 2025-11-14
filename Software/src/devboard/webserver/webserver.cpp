@@ -395,11 +395,11 @@ void init_webserver() {
   };
 
   const char* boolSettingNames[] = {
-      "DBLBTR",       "CNTCTRL",      "CNTCTRLDBL",    "PWMCNTCTRL",  "PERBMSRESET", "SDLOGENABLED",
-      "STATICIP",     "REMBMSRESET",  "EXTPRECHARGE",  "USBENABLED",  "CANLOGUSB",   "WEBENABLED",
-      "CANFDASCAN",   "CANLOGSD",     "WIFIAPENABLED", "MQTTENABLED", "NOINVDISC",   "HADISC",
-      "MQTTTOPICS",   "MQTTCELLV",    "INVICNT",       "GTWRHD",      "DIGITALHVIL", "PERFPROFILE",
-      "INTERLOCKREQ", "SOCESTIMATED", "PYLONOFFSET",   "PYLONORDER",  "DEYEBYD",
+      "DBLBTR",      "CNTCTRL",       "CNTCTRLDBL",   "PWMCNTCTRL",    "PERBMSRESET", "SDLOGENABLED",
+      "STATICIP",    "REMBMSRESET",   "EXTPRECHARGE", "USBENABLED",    "CANLOGUSB",   "WEBENABLED",
+      "CANFDASCAN",  "CANFDNAT2CAN1", "CANLOGSD",     "WIFIAPENABLED", "MQTTENABLED", "NOINVDISC",
+      "HADISC",      "MQTTTOPICS",    "MQTTCELLV",    "INVICNT",       "GTWRHD",      "DIGITALHVIL",
+      "PERFPROFILE", "INTERLOCKREQ",  "SOCESTIMATED", "PYLONOFFSET",   "PYLONORDER",  "DEYEBYD",
   };
 
   // Handles the form POST from UI to save settings of the common image
@@ -607,6 +607,32 @@ void init_webserver() {
       if (boolSetting.existingValue != boolSetting.newValue) {
         settings.saveBool(boolSetting.name, boolSetting.newValue);
       }
+    }
+
+    // Determine whether any of the interface dropdowns was set to the special
+    // option 'CanFdNativeAsCan1' (stored as an integer value). If so, persist
+    // the equivalent boolean setting and require reboot to apply mapping.
+    bool mappingSelected = false;
+#if defined(HW_3LB)
+    const char* interfaceKeys[] = {"BATTCOMM", "BATT2COMM", "INVCOMM", "CHGCOMM", "SHUNTCOMM"};
+    for (auto key : interfaceKeys) {
+      if (settings.getUInt(key, 0) == static_cast<unsigned int>(comm_interface::CanFdNativeAsCan1)) {
+        mappingSelected = true;
+        break;
+      }
+    }
+#endif
+
+    // Persist the mapping flag so it will be read on next boot.
+    settings.saveBool("CANFDNAT2CAN1", mappingSelected);
+
+    // Do not apply the mapping immediately; a reboot is required for the setting to take effect.
+    if (mappingSelected) {
+      logging.println("CANFDNAT2CAN1 selected via dropdown. Reboot required to apply MCP2517->CAN_NATIVE mapping.");
+    } else {
+      logging.println(
+          "CANFDNAT2CAN1 not selected. Reboot required to restore CAN_NATIVE to ESP32 native port if previously "
+          "remapped.");
     }
 
     settingsUpdated = settings.were_settings_updated();

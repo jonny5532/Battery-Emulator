@@ -1,7 +1,26 @@
 #include "comm_contactorcontrol.h"
+#include "../../battery/BATTERIES.h"
+#include "../../communication/can/CanReceiver.h"
 #include "../../devboard/hal/hal.h"
+#include "../../devboard/mqtt/mqtt.h"
 #include "../../devboard/safety/safety.h"
 #include "../../inverter/INVERTERS.h"
+
+#ifdef HW_3LB
+#include <Adafruit_MCP23X17.h>
+extern Adafruit_MCP23X17 mcp;            // ekspander I²C MCP23017
+extern bool is_mcp_pin(gpio_num_t pin);  // deklaracja z hal.cpp
+#else
+// Provide lightweight stubs so non-3LB boards can compile this file without changes.
+struct DummyMCP {
+  void pinMode(uint8_t, uint8_t) {}
+  void digitalWrite(uint8_t, uint8_t) {}
+};
+static DummyMCP mcp;
+static inline bool is_mcp_pin(gpio_num_t) {
+  return false;
+}
+#endif
 
 // TODO: Ensure valid values at run-time
 // User can update all these values via Settings page
@@ -49,17 +68,31 @@ const unsigned long powerRemovalInterval = 24 * 60 * 60 * 1000;  // 24 hours in 
 const unsigned long bmsWarmupDuration = 3000;
 
 void set(uint8_t pin, bool direction, uint32_t pwm_freq = 0xFFFF) {
+#ifdef HW_3LB
+  // 3LB – obsługa MCP23017
+  if (is_mcp_pin((gpio_num_t)pin)) {
+    // MCP nie ma PWM, więc traktujemy to binarnie: HIGH/LOW
+    if (pwm_contactor_control && pwm_freq != 0xFFFF) {
+      // symulacja PWM: dla uproszczenia używamy HIGH, można dodać softPWM jeśli potrzebne
+      DEBUG_PRINTF("mcp.digitalWrite (PWM-sim) pin=%d val=%d\n", pin, (pwm_freq > 0) ? HIGH : LOW);
+      mcp.digitalWrite(pin, (pwm_freq > 0) ? HIGH : LOW);
+    } else {
+      DEBUG_PRINTF("mcp.digitalWrite pin=%d val=%d\n", pin, direction ? HIGH : LOW);
+      mcp.digitalWrite(pin, direction ? HIGH : LOW);
+    }
+    return;
+  }
+#endif
+
+  // Standardowa obsługa GPIO (dla wszystkich innych płytek)
   if (pwm_contactor_control) {
     if (pwm_freq != 0xFFFF) {
       ledcWrite(pin, pwm_freq);
       return;
     }
   }
-  if (direction == 1) {
-    digitalWrite(pin, HIGH);
-  } else {  // 0
-    digitalWrite(pin, LOW);
-  }
+
+  digitalWrite(pin, direction ? HIGH : LOW);
 }
 
 // Initialization functions
@@ -79,20 +112,52 @@ bool init_contactors() {
     }
 
     if (pwm_contactor_control) {
-      // Setup PWM Channel Frequency and Resolution
-      ledcAttachChannel(posPin, pwm_frequency, PWM_RESOLUTION, PWM_Positive_Channel);
-      ledcAttachChannel(negPin, pwm_frequency, PWM_RESOLUTION, PWM_Negative_Channel);
-      // Set all pins OFF (0% PWM)
-      ledcWrite(posPin, PWM_OFF_DUTY);
-      ledcWrite(negPin, PWM_OFF_DUTY);
-    } else {  //Normal CONTACTOR_CONTROL
-      pinMode(posPin, OUTPUT);
-      set(posPin, OFF);
-      pinMode(negPin, OUTPUT);
-      set(negPin, OFF);
-    }  // Precharge never has PWM regardless of setting
-    pinMode(precPin, OUTPUT);
-    set(precPin, OFF);
+      // Setup PWM only for MCU pins. MCP expander doesn't support PWM.
+      if (!is_mcp_pin(posPin)) {
+        ledcAttachChannel(posPin, pwm_frequency, PWM_RESOLUTION, PWM_Positive_Channel);
+        ledcWrite(posPin, PWM_OFF_DUTY);
+      } else {
+        // Ensure pin is set as output on MCP
+        DEBUG_PRINTF("init_contactors: MCP posPin=%d set OUTPUT, LOW\n", (int)posPin);
+        mcp.pinMode((uint8_t)posPin, OUTPUT);
+        mcp.digitalWrite((uint8_t)posPin, LOW);
+      }
+
+      if (!is_mcp_pin(negPin)) {
+        ledcAttachChannel(negPin, pwm_frequency, PWM_RESOLUTION, PWM_Negative_Channel);
+        ledcWrite(negPin, PWM_OFF_DUTY);
+      } else {
+        DEBUG_PRINTF("init_contactors: MCP negPin=%d set OUTPUT, LOW\n", (int)negPin);
+        mcp.pinMode((uint8_t)negPin, OUTPUT);
+        mcp.digitalWrite((uint8_t)negPin, LOW);
+      }
+    } else {  // Normal CONTACTOR_CONTROL
+      if (is_mcp_pin(posPin)) {
+        mcp.pinMode((uint8_t)posPin, OUTPUT);
+        mcp.digitalWrite((uint8_t)posPin, LOW);
+      } else {
+        pinMode(posPin, OUTPUT);
+        set(posPin, OFF);
+      }
+
+      if (is_mcp_pin(negPin)) {
+        mcp.pinMode((uint8_t)negPin, OUTPUT);
+        mcp.digitalWrite((uint8_t)negPin, LOW);
+      } else {
+        pinMode(negPin, OUTPUT);
+        set(negPin, OFF);
+      }
+    }
+
+    // Precharge never has PWM regardless of setting
+    if (is_mcp_pin(precPin)) {
+      DEBUG_PRINTF("init_contactors: MCP precPin=%d set OUTPUT, LOW\n", (int)precPin);
+      mcp.pinMode((uint8_t)precPin, OUTPUT);
+      mcp.digitalWrite((uint8_t)precPin, LOW);
+    } else {
+      pinMode(precPin, OUTPUT);
+      set(precPin, OFF);
+    }
   }
 
   if (contactor_control_enabled_double_battery) {
@@ -102,8 +167,14 @@ bool init_contactors() {
       return false;
     }
 
-    pinMode(second_contactors, OUTPUT);
-    set(second_contactors, OFF);
+    if (is_mcp_pin(second_contactors)) {
+      DEBUG_PRINTF("init_contactors: MCP second_contactors=%d set OUTPUT, LOW\n", (int)second_contactors);
+      mcp.pinMode((uint8_t)second_contactors, OUTPUT);
+      mcp.digitalWrite((uint8_t)second_contactors, LOW);
+    } else {
+      pinMode(second_contactors, OUTPUT);
+      set(second_contactors, OFF);
+    }
   }
 
   // Init BMS contactor
@@ -113,8 +184,14 @@ bool init_contactors() {
       DEBUG_PRINTF("BMS power setup failed\n");
       return false;
     }
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, HIGH);
+    if (is_mcp_pin(pin)) {
+      DEBUG_PRINTF("init_contactors: MCP BMS pin=%d set OUTPUT, HIGH\n", (int)pin);
+      mcp.pinMode((uint8_t)pin, OUTPUT);
+      mcp.digitalWrite((uint8_t)pin, HIGH);
+    } else {
+      pinMode(pin, OUTPUT);
+      digitalWrite(pin, HIGH);
+    }
   }
 
   return true;
@@ -241,14 +318,28 @@ void handle_contactors() {
   }
 }
 
+// Handle contactor logic for the second battery (if present)
 void handle_contactors_battery2() {
-  auto second_contactors = esp32hal->SECOND_BATTERY_CONTACTORS_PIN();
+  // Ensure we actually have a second battery configured
+  if (!battery2) {
+    return;
+  }
 
-  if ((contactorStatus == COMPLETED) && datalayer.system.status.battery2_allowed_contactor_closing) {
-    set(second_contactors, ON);
+  auto secondPin = esp32hal->SECOND_BATTERY_CONTACTORS_PIN();
+  if (secondPin == GPIO_NUM_NC) {
+    return;  // pin not configured for this HW
+  }
+
+  // Only allow closing if system/inverter/battery permit it
+  bool allowed = datalayer.system.status.battery2_allowed_contactor_closing &&
+                 datalayer.system.status.inverter_allows_contactor_closing &&
+                 !datalayer.system.info.equipment_stop_active && (datalayer.battery2.status.bms_status != FAULT);
+
+  if (allowed) {
+    set(secondPin, ON, pwm_hold_duty);
     datalayer.system.status.contactors_battery2_engaged = true;
-  } else {  // Closing contactors on secondary battery not allowed
-    set(second_contactors, OFF);
+  } else {
+    set(secondPin, OFF, PWM_OFF_DUTY);
     datalayer.system.status.contactors_battery2_engaged = false;
   }
 }

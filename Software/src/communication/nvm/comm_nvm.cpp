@@ -14,6 +14,9 @@
 // Parameters
 Preferences settings;  // Store user settings
 
+// Runtime options exposed from settings
+bool user_selected_canfd_native_to_can1 = false;  // If true, route CAN_NATIVE to MCP2517 U5 at runtime
+
 // Initialization functions
 
 void init_stored_settings() {
@@ -97,6 +100,8 @@ void init_stored_settings() {
   user_selected_inverter_deye_workaround = settings.getBool("DEYEBYD", false);
   user_selected_can_addon_crystal_frequency_mhz = settings.getUInt("CANFREQ", 8);
   user_selected_canfd_addon_crystal_frequency_mhz = settings.getUInt("CANFDFREQ", 40);
+  // Runtime option: treat CAN-FD U5 (MCP2517) as native CAN1 when enabled via web settings
+  user_selected_canfd_native_to_can1 = settings.getBool("CANFDNAT2CAN1", false);
   user_selected_LEAF_interlock_mandatory = settings.getBool("INTERLOCKREQ", false);
   user_selected_use_estimated_SOC = settings.getBool("SOCESTIMATED", false);
   user_selected_tesla_digital_HVIL = settings.getBool("DIGITALHVIL", false);
@@ -110,13 +115,30 @@ void init_stored_settings() {
     auto batt1If = (comm_interface)settings.getUInt(settingName, (int)comm_interface::CanNative);
     switch (batt1If) {
       case comm_interface::CanNative:
+#if defined(USE_CANFD_INTERFACE_AS_CLASSIC_CAN)
+        // If compiled with USE_CANFD_INTERFACE_AS_CLASSIC_CAN, treat native CAN as MCP2517 U5 (CAN1 mapped to FD add-on)
+        return CAN_Interface::CANFD_ADDON_MCP2517_1;
+#else
         return CAN_Interface::CAN_NATIVE;
+#endif
+#if defined(HW_3LB)
+      case comm_interface::CanFdNativeAsCan1:
+        // User selected the special dropdown option: treat MCP2517 U5 as native CAN1 after reboot
+        user_selected_canfd_native_to_can1 = true;
+        return CAN_Interface::CANFD_ADDON_MCP2517_1;
+#endif
       case comm_interface::CanFdNative:
         return CAN_Interface::CANFD_NATIVE;
       case comm_interface::CanAddonMcp2515:
         return CAN_Interface::CAN_ADDON_MCP2515;
       case comm_interface::CanFdAddonMcp2518:
         return CAN_Interface::CANFD_ADDON_MCP2518;
+#if defined(HW_3LB)
+      case comm_interface::CanFdAddonMcp2517_1:
+        return CAN_Interface::CANFD_ADDON_MCP2517_1;
+      case comm_interface::CanFdAddonMcp2517_2:
+        return CAN_Interface::CANFD_ADDON_MCP2517_2;
+#endif
       case comm_interface::RS485:
       case comm_interface::Modbus:
       case comm_interface::Highest:
@@ -235,6 +257,11 @@ void store_settings() {
   }
   if (!settings.putUInt("BMSRESETDUR", datalayer.battery.settings.user_set_bms_reset_duration_ms)) {
     set_event(EVENT_PERSISTENT_SAVE_INFO, 13);
+  }
+
+  // Persist runtime mapping flag for CAN-FD native->CAN1
+  if (!settings.putBool("CANFDNAT2CAN1", user_selected_canfd_native_to_can1)) {
+    set_event(EVENT_PERSISTENT_SAVE_INFO, 14);
   }
 
   settings.end();  // Close preferences handle

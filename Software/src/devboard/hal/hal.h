@@ -122,6 +122,22 @@ class Esp32Hal {
   virtual gpio_num_t MCP2517_CS() { return GPIO_NUM_NC; }
   virtual gpio_num_t MCP2517_INT() { return GPIO_NUM_NC; }
 
+#if defined(HW_3LB)
+  // Dodatkowe piny dla drugiego MCP2517FD (CAN2 - U5)
+  virtual gpio_num_t MCP2517_2_SCK() { return GPIO_NUM_NC; }
+  virtual gpio_num_t MCP2517_2_SDI() { return GPIO_NUM_NC; }
+  virtual gpio_num_t MCP2517_2_SDO() { return GPIO_NUM_NC; }
+  virtual gpio_num_t MCP2517_2_CS() { return GPIO_NUM_NC; }
+  virtual gpio_num_t MCP2517_2_INT() { return GPIO_NUM_NC; }
+
+  // Dodatkowe piny dla trzeciego MCP2517FD (CAN3 - U3)
+  virtual gpio_num_t MCP2517_3_SCK() { return GPIO_NUM_NC; }
+  virtual gpio_num_t MCP2517_3_SDI() { return GPIO_NUM_NC; }
+  virtual gpio_num_t MCP2517_3_SDO() { return GPIO_NUM_NC; }
+  virtual gpio_num_t MCP2517_3_CS() { return GPIO_NUM_NC; }
+  virtual gpio_num_t MCP2517_3_INT() { return GPIO_NUM_NC; }
+#endif
+
   // CHAdeMO support pin dependencies
   virtual gpio_num_t CHADEMO_PIN_2() { return GPIO_NUM_NC; }
   virtual gpio_num_t CHADEMO_PIN_10() { return GPIO_NUM_NC; }
@@ -179,6 +195,10 @@ class Esp32Hal {
         return "CAN (MCP2515 add-on)";
       case comm_interface::CanFdAddonMcp2518:
         return "CAN FD (MCP2518 add-on)";
+#if defined(HW_3LB)
+      case comm_interface::CanFdNativeAsCan1:
+        return "CAN-FD U5 (MCP2517) as Native CAN1 (CANFDNAT2CAN1)";
+#endif
       default:
         return nullptr;
     }
@@ -203,4 +223,11 @@ extern Esp32Hal* esp32hal;
 
 void init_hal();
 
+#endif
+
+#if defined(HW_3LB)
+bool is_mcp_pin(gpio_num_t pin);  // deklaracja
+// Udostępnij instancję MCP23017 innym modułom (np. contactor control)
+#include <Adafruit_MCP23X17.h>
+extern Adafruit_MCP23X17 mcp;
 #endif
