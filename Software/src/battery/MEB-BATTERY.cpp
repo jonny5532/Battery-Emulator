@@ -955,7 +955,7 @@ void MebBattery::transmit_can(unsigned long currentMillis) {
            (datalayer.battery.status.voltage_dV > 200 && datalayer_extended.meb.BMS_voltage_intermediate_dV > 0 &&
             labs(((int32_t)datalayer.battery.status.voltage_dV) -
                  ((int32_t)datalayer_extended.meb.BMS_voltage_intermediate_dV)) < 200))))) {
-      hv_requested = true;
+      if(datalayer.battery.status.real_bms_status != BMS_ACTIVE) hv_requested=true;
       datalayer.system.info.start_precharging = false;
       if (MEB_503.data.u8[3] == BMS_TARGET_HV_OFF) {
         logging.printf("MEB: Requesting HV\n");
