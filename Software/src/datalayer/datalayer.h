@@ -265,6 +265,15 @@ struct DATALAYER_SYSTEM_INFO_TYPE {
   /** ESP32 main CPU temperature, for displaying on webserver and for safeties */
   float CPU_temperature = 0;
 
+  /* uint32_t, number of CAN messages successfully received */
+  uint32_t can_receive_count = 0;
+  /* uint32_t, number of CAN receive errors */
+  uint32_t can_receive_errors = 0;
+  uint32_t can_2515_receive_count = 0;
+  uint32_t can_2515_receive_errors = 0;
+  uint32_t can_2518_receive_count = 0;
+  uint32_t can_2518_receive_errors = 0;
+
   /** uint8_t, enumeration which CAN interface should be used for log playback */
   uint8_t can_replay_interface = CAN_NATIVE;
 

@@ -298,6 +298,17 @@ class ACAN_ESP32 {
 
   // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
+  // BE additions
+
+  private: uint8_t lastRxErrorCount = 0 ;
+
+  // Returns the number of receive errors since the last call to this method
+  public: uint8_t receiveErrorsSince (void) {
+    const uint8_t currentRxErrorCount = uint8_t (TWAI_RX_ERR_CNT_REG () & 0xFF) ;
+    uint8_t errorsSince = currentRxErrorCount - lastRxErrorCount ;
+    lastRxErrorCount = currentRxErrorCount ;
+    return errorsSince ;
+  } ;
 } ;
 
 //------------------------------------------------------------------------------

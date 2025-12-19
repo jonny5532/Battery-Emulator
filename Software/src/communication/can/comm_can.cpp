@@ -337,8 +337,17 @@ void receive_frame_can_native() {  // This section checks if we have a complete 
 
       //message incoming, pass it on to the handler
       map_can_frame_to_variable(&rx_frame, CAN_NATIVE);
+
+      datalayer.system.info.can_receive_count++;
+      if (datalayer.system.info.can_receive_count == 0) {
+        // Overflowed, reset error count
+        datalayer.system.info.can_receive_errors = 0;
+      }
     }
   }
+
+  // This is quick, so we can do it every time
+  datalayer.system.info.can_receive_errors += ACAN_ESP32::can.receiveErrorsSince();
 }
 
 void receive_frame_can_addon() {  // This section checks if we have a complete CAN message incoming on add-on CAN port
@@ -357,6 +366,22 @@ void receive_frame_can_addon() {  // This section checks if we have a complete C
 
     //message incoming, pass it on to the handler
     map_can_frame_to_variable(&rx_frame, CAN_ADDON_MCP2515);
+
+    datalayer.system.info.can_2515_receive_count++;
+    if (datalayer.system.info.can_2515_receive_count == 0) {
+      // Overflowed, reset error count
+      datalayer.system.info.can_2515_receive_errors = 0;
+    }
+  }
+
+  static uint8_t cycle = 0;
+  static uint8_t last_errors = 0;
+  // Only check every 51 cycles since this needs an SPI transaction
+  if (cycle++ >= 51) {
+    cycle = 0;
+    uint8_t current_errors = can2515->receiveErrorCounter();
+    datalayer.system.info.can_2515_receive_errors += (uint8_t)(current_errors - last_errors);
+    last_errors = current_errors;
   }
 }
 
@@ -374,6 +399,23 @@ void receive_frame_canfd_addon() {  // This section checks if we have a complete
     //message incoming, pass it on to the handler
     map_can_frame_to_variable(&rx_frame, CANFD_ADDON_MCP2518);
     map_can_frame_to_variable(&rx_frame, CANFD_NATIVE);
+
+    datalayer.system.info.can_2518_receive_count++;
+    if (datalayer.system.info.can_2518_receive_count == 0) {
+      // Overflowed, reset error count
+      datalayer.system.info.can_2518_receive_errors = 0;
+    }
+  }
+
+  static uint8_t cycle = 0;
+  static uint8_t last_errors = 0;
+  // Only check every 57 cycles since this needs an SPI transaction
+  if (cycle++ >= 57) {
+    cycle = 0;
+    // REC is in the lower byte, TEC in the upper byte
+    uint8_t current_errors = canfd->errorCounters() & 0xFF;
+    datalayer.system.info.can_2518_receive_errors += (uint8_t)(current_errors - last_errors);
+    last_errors = current_errors;
   }
 }
 
