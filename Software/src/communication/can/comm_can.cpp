@@ -24,6 +24,13 @@
 #define SPI2517_BUS HSPI
 #endif
 
+static uint32_t init_native_can(CAN_Speed speed, gpio_num_t tx_pin, gpio_num_t rx_pin);
+static void map_can_frame_to_variable(CAN_frame* rx_frame, CAN_Interface interface);
+static void receive_frame_can_addon();
+static void receive_frame_can_native();
+static void receive_frame_canfd_addon();
+static void print_can_frame(CAN_frame frame, CAN_Interface interface, frameDirection msgDir);
+
 volatile CAN_Configuration can_config = {.battery = CAN_NATIVE,
                                          .inverter = CAN_NATIVE,
                                          .battery_double = CAN_ADDON_MCP2515,
@@ -38,39 +45,35 @@ struct CanReceiverRegistration {
 
 static std::multimap<CAN_Interface, CanReceiverRegistration> can_receivers;
 
-volatile bool send_ok_native = 0;
-volatile bool send_ok_2515 = 0;
-volatile bool send_ok_2518 = 0;
+static volatile bool send_ok_native = 0;
+static volatile bool send_ok_2515 = 0;
+static volatile bool send_ok_2518 = 0;
 
-void map_can_frame_to_variable(CAN_frame* rx_frame, CAN_Interface interface);
+static ACAN_ESP32_Settings* settingsespcan = nullptr;
+
+static uint32_t QUARTZ_FREQUENCY;
+static SPIClass SPI2515(SPI2515_BUS);
+uint8_t user_selected_can_addon_crystal_frequency_mhz = 0;
+
+static ACAN2515* can2515;
+static ACAN2515Settings* settings2515;
+
+static ACAN2515_Buffer16 gBuffer;
+
+static ACAN2517FDSettings::Oscillator quartz_fd_frequency;
+static SPIClass SPI2517(SPI2517_BUS);
+uint8_t user_selected_canfd_addon_crystal_frequency_mhz = 0;
+static ACAN2517FD* canfd;
+static ACAN2517FDSettings* settings2517;
+bool use_canfd_as_can = false;
+bool native_can_initialized = false;
+//CAN logging filter settings
+uint16_t user_selected_CAN_ID_cutoff_filter = 0;  //Messages below this ID will not be logged in webserver
 
 void register_can_receiver(CanReceiver* receiver, CAN_Interface interface, CAN_Speed speed) {
   can_receivers.insert({interface, {receiver, speed}});
   DEBUG_PRINTF("CAN receiver registered, total: %d\n", can_receivers.size());
 }
-
-uint32_t init_native_can(CAN_Speed speed, gpio_num_t tx_pin, gpio_num_t rx_pin);
-
-ACAN_ESP32_Settings* settingsespcan = nullptr;
-
-static uint32_t QUARTZ_FREQUENCY;
-SPIClass SPI2515(SPI2515_BUS);
-uint8_t user_selected_can_addon_crystal_frequency_mhz = 0;
-
-ACAN2515* can2515;
-ACAN2515Settings* settings2515;
-
-static ACAN2515_Buffer16 gBuffer;
-
-static ACAN2517FDSettings::Oscillator quartz_fd_frequency;
-SPIClass SPI2517(SPI2517_BUS);
-uint8_t user_selected_canfd_addon_crystal_frequency_mhz = 0;
-ACAN2517FD* canfd;
-ACAN2517FDSettings* settings2517;
-bool use_canfd_as_can = false;
-bool native_can_initialized = false;
-//CAN logging filter settings
-uint16_t user_selected_CAN_ID_cutoff_filter = 0;  //Messages below this ID will not be logged in webserver
 
 bool init_CAN() {
 
@@ -321,7 +324,8 @@ void receive_can() {
   }
 }
 
-void receive_frame_can_native() {  // This section checks if we have a complete CAN message incoming on native CAN port
+static void
+receive_frame_can_native() {  // This section checks if we have a complete CAN message incoming on native CAN port
   CANMessage frame;
 
   if (ACAN_ESP32::can.available()) {
@@ -341,9 +345,10 @@ void receive_frame_can_native() {  // This section checks if we have a complete 
   }
 }
 
-void receive_frame_can_addon() {  // This section checks if we have a complete CAN message incoming on add-on CAN port
-  CAN_frame rx_frame;             // Struct with our CAN format
-  CANMessage MCP2515frame;        // Struct with ACAN2515 library format, needed to use the MCP2515 library
+static void
+receive_frame_can_addon() {  // This section checks if we have a complete CAN message incoming on add-on CAN port
+  CAN_frame rx_frame;        // Struct with our CAN format
+  CANMessage MCP2515frame;   // Struct with ACAN2515 library format, needed to use the MCP2515 library
 
   if (can2515->available()) {
     can2515->receive(MCP2515frame);
@@ -360,7 +365,7 @@ void receive_frame_can_addon() {  // This section checks if we have a complete C
   }
 }
 
-void receive_frame_canfd_addon() {  // This section checks if we have a complete CAN-FD message incoming
+static void receive_frame_canfd_addon() {  // This section checks if we have a complete CAN-FD message incoming
   CANFDMessage MCP2518frame;
   int count = 0;
   while (canfd->available() && count++ < 16) {
@@ -378,7 +383,7 @@ void receive_frame_canfd_addon() {  // This section checks if we have a complete
 }
 
 // Support functions
-void print_can_frame(CAN_frame frame, CAN_Interface interface, frameDirection msgDir) {
+static void print_can_frame(CAN_frame frame, CAN_Interface interface, frameDirection msgDir) {
 
   if (datalayer.system.info.CAN_usb_logging_active) {
     uint8_t i = 0;
@@ -506,7 +511,7 @@ void restart_can() {
 // Initialize the native CAN interface with the given speed and pins.
 // This can be called repeatedly to change the interface speed (as some
 // batteries require).
-uint32_t init_native_can(CAN_Speed speed, gpio_num_t tx_pin, gpio_num_t rx_pin) {
+static uint32_t init_native_can(CAN_Speed speed, gpio_num_t tx_pin, gpio_num_t rx_pin) {
 
   // TODO: check whether this is necessary? It seems to help with
   // reinitialization.
