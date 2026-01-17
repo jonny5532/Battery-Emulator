@@ -290,6 +290,8 @@ struct DATALAYER_SYSTEM_INFO_TYPE {
   bool can_2515_send_fail = false;
   /** bool, MCP2518 CANFD failed to send flag */
   bool can_2518_send_fail = false;
+  /** bool, Second MCP2518 CANFD failed to send flag */
+  bool can_2518_2_send_fail = false;
   /** bool, determines if detailed performance measurement should be shown on webserver */
   bool performance_measurement_active = false;
   bool equipment_stop_active = false;  //Has user enabled equipment stop?

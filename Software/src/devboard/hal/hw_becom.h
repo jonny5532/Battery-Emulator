@@ -74,11 +74,13 @@ class BEComHal : public Esp32Hal {
       case comm_interface::CanNative:
         return "Inverter CAN (Native)";
       case comm_interface::CanFdNative:
-        return "Battery CANFD (Native)";
+        return "";
       case comm_interface::CanAddonMcp2515:
         return "";
       case comm_interface::CanFdAddonMcp2518:
-        return "CAN FD (MCP2518 add-on)";
+        return "Battery CAN FD (MCP2518)";
+      case comm_interface::CanFdAddonMcp2518_2:
+        return "Battery CAN2 FD (MCP2518)";
       case comm_interface::Modbus:
         return "Modbus";
       case comm_interface::RS485:

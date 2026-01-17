@@ -57,6 +57,12 @@ void update_machineryprotection() {
   } else {
     clear_event(EVENT_CANFD_BUFFER_FULL);
   }
+  if (datalayer.system.info.can_2518_2_send_fail) {
+    set_event(EVENT_CANFD_2_BUFFER_FULL, 0);
+    datalayer.system.info.can_2518_2_send_fail = false;
+  } else {
+    clear_event(EVENT_CANFD_2_BUFFER_FULL);
+  }
 
   // Start checking that the battery is within reason. Incase we see any funny business, raise an event!
   // Don't check any battery issues if battery is not configured

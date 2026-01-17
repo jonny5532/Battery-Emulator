@@ -30,8 +30,10 @@ void init_events(void) {
   }
 
   events.entries[EVENT_CANMCP2517FD_INIT_FAILURE].level = EVENT_LEVEL_WARNING;
+  events.entries[EVENT_CANMCP2517FD_2_INIT_FAILURE].level = EVENT_LEVEL_WARNING;
   events.entries[EVENT_CANMCP2515_INIT_FAILURE].level = EVENT_LEVEL_WARNING;
   events.entries[EVENT_CANFD_BUFFER_FULL].level = EVENT_LEVEL_WARNING;
+  events.entries[EVENT_CANFD_2_BUFFER_FULL].level = EVENT_LEVEL_WARNING;
   events.entries[EVENT_CAN_BUFFER_FULL].level = EVENT_LEVEL_WARNING;
   events.entries[EVENT_TASK_OVERRUN].level = EVENT_LEVEL_INFO;
   events.entries[EVENT_THERMAL_RUNAWAY].level = EVENT_LEVEL_ERROR;
@@ -173,10 +175,14 @@ String get_event_message_string(EVENTS_ENUM_TYPE event) {
   switch (event) {
     case EVENT_CANMCP2517FD_INIT_FAILURE:
       return "CAN-FD initialization failed. Check hardware or bitrate settings";
+    case EVENT_CANMCP2517FD_2_INIT_FAILURE:
+      return "CAN-FD #2 initialization failed. Check hardware or bitrate settings";
     case EVENT_CANMCP2515_INIT_FAILURE:
       return "CAN-MCP addon initialization failed. Check hardware";
     case EVENT_CANFD_BUFFER_FULL:
       return "MCP2518FD message failed to send. Buffer full or no one on the bus to ACK the message!";
+    case EVENT_CANFD_2_BUFFER_FULL:
+      return "MCP2518FD #2 message failed to send. Buffer full or no one on the bus to ACK the message!";
     case EVENT_CAN_BUFFER_FULL:
       return "MCP2515 message failed to send. Buffer full or no one on the bus to ACK the message!";
     case EVENT_TASK_OVERRUN:
