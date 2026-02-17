@@ -3,7 +3,7 @@ import { useState } from "preact/hooks";
 // console.log(signal);
 
 import { Button } from "./components/button.tsx";
-import { Show, Form, selectField, checkboxField, ipField, textPatternField } from "./components/forms.tsx";
+import { Show, Form, selectField, checkboxField, ipField, textPatternField, passwordField } from "./components/forms.tsx";
 
 import { useGetApi } from "./utils/api.tsx";
 import { reboot } from "./utils/reboot.tsx";
@@ -18,7 +18,7 @@ const INTERFACES = {
 };
 
 export function Settings() {
-    const settings = useGetApi('/api/settings');
+    const settings = useGetApi('/api/internal/settings');
     const [savedSettings, setSavedSettings] = useState<any>(null);
     const [current, setCurrent] = useState<{[index: string]:string}>({});
 
@@ -47,7 +47,7 @@ export function Settings() {
         splitIp(data, 'GATEWAY');
         splitIp(data, 'SUBNET');
 
-        const r = await fetch(import.meta.env.VITE_API_BASE + '/api/settings', {
+        const r = await fetch(import.meta.env.VITE_API_BASE + '/api/internal/settings', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -263,7 +263,7 @@ export function Settings() {
             </div>
             <div class="form-row">
                 <label>WiFi password</label>
-                <input type="text" name="PASSWORD" pattern="[ -~]{8,63}" title="at least 8 printable ASCII characters" />
+                <input type="password" name="PASSWORD" pattern="[ -~]{8,63}" title="at least 8 printable ASCII characters" placeholder="unchanged" />
             </div>
             { checkboxField("Enable WiFi access point", "WIFIAPENABLED") }
             <Show indent={true} when={merged.WIFIAPENABLED}>
@@ -273,7 +273,7 @@ export function Settings() {
                 </div>
                 <div class="form-row">
                     <label>WiFi access point password</label>
-                    <input type="text" name="APPASSWORD" pattern="[ -~]{8,63}" title="at least 8 printable ASCII characters" />
+                    <input type="password" name="APPASSWORD" pattern="[ -~]{8,63}" title="at least 8 printable ASCII characters" placeholder="unchanged" />
                 </div>
                 <div class="form-row">
                     <label>WiFi channel (0 for automatic)</label>
@@ -296,7 +296,7 @@ export function Settings() {
                 { textPatternField("MQTT server", "MQTTSERVER", "") }
                 { textPatternField("MQTT port", "MQTTPORT", "[0-9]+") }
                 { textPatternField("MQTT user", "MQTTUSER", "") }
-                { textPatternField("MQTT password", "MQTTPASSWORD", "") }
+                { passwordField("MQTT password", "MQTTPASSWORD") }
                 { textPatternField("MQTT timeout (ms)", "MQTTTIMEOUT", "[0-9]+") }
                 { checkboxField("Send all cell voltages via MQTT", "MQTTCELLV") }
                 { checkboxField("Remote BMS reset via MQTT allowed", "REMBMSRESET") }

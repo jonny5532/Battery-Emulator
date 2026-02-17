@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <list>
 #include "HardwareSerial.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
@@ -95,9 +96,7 @@ void connectivity_loop(void*) {
   init_WiFi();
 
   xTaskCreateUniversal(tiny_web_server_loop, "TinyWebServer_loop", 6000, &tinyWebServer, TASK_CONNECTIVITY_PRIO, NULL,
-                       CONFIG_ASYNC_TCP_RUNNING_CORE);
-
-  //init_webserver();
+                       esp32hal->WIFICORE());
 
   if (mdns_enabled) {
     init_mDNS();
@@ -110,8 +109,6 @@ void connectivity_loop(void*) {
     wifi_monitor();
 
     update_display();
-
-    //ota_monitor();
 
     END_TIME_MEASUREMENT_MAX(wifi, datalayer.system.status.wifi_task_10s_max_us);
 

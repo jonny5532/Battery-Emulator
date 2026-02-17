@@ -104,10 +104,6 @@ export function App() {
             <Link href="/log">System Log</Link>
             <Link href="/ota">OTA upgrade</Link>
             <a href="#" onClick={handlePause} class="button" style="margin: auto 0 0.75rem; background-color: #bf7c13; color: #ffffff;">{ status?.pause ? "Resume" : "Pause" }</a>
-            <label class="toggle">
-              <input type="checkbox" onChange={ handlePause } />
-              Pause
-            </label>
             <a href="#" onClick={handleEStop} class="button" style="margin: 0 0 0.75rem; background-color: #b50909; color: #ffffff;">Open contactors</a>
             <Button onClick={handleReboot} style={{"background-color": "#434343", "color": "#ffffff", "border-radius": "0 8px 8px 0"}}>Reboot emulator</Button>
           </div>

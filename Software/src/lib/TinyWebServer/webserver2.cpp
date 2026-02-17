@@ -7,9 +7,7 @@
 #include <src/devboard/hal/hal.h>
 #include <src/devboard/safety/safety.h>
 #include <src/devboard/utils/millis64.h>
-#include <src/devboard/webserver/index_html.h>
 #include <src/inverter/INVERTERS.h>
-#include <src/lib/ayushsharma82-ElegantOTA/src/elop.h>
 #include <src/lib/bblanchon-ArduinoJson/ArduinoJson.h>
 
 #include "esp_task_wdt.h"
@@ -125,7 +123,23 @@ TwsRoute eOtaUploadHandler("/ota/upload",
 OtaUpload eOtaUpload(&eOtaUploadHandler);
 
 extern const char* version_number;
-const char common_javascript[] = COMMON_JAVASCRIPT;
+const char common_javascript[] = R"rawliteral(
+<script>
+function askReboot() {
+  if (window.confirm('Are you sure you want to reboot the emulator? NOTE: If emulator is handling contactors, they will open during reboot!')) {
+    reboot();
+  }
+}
+function reboot() {
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', '/reboot', true);
+  xhr.send();
+  setTimeout(function() {
+    window.location = "/";
+  }, 3000);
+}
+</script>
+)rawliteral";
 
 #include "frontend.h"
 const char* HTTP_RESPONSE_GZIP = "HTTP/1.1 200 OK\r\n"
@@ -242,24 +256,25 @@ const FloatToUintSetting FLOAT_TO_UINT_SETTINGS[] = {
 struct StringSetting {
     const char* name;
     uint8_t max_length;
+    bool secret;  // secret fields are write-only (not returned in GET)
 };
 
 const StringSetting STRING_SETTINGS[] = {
-    // Name, max length
-    {"SSID", 32},
-    {"PASSWORD", 64},
-    {"APNAME", 64},
-    {"APPASSWORD", 64},
-    {"HOSTNAME", 64},
-    {"MQTTSERVER", 64},
-    {"MQTTUSER", 64},
-    {"MQTTPASSWORD", 64},
-    {"MQTTTOPIC", 64},
-    {"MQTTTIMEOUT", 64},
-    {"MQTTOBJIDPREFIX", 64},
-    {"MQTTDEVICENAME", 64},
-    {"HADEVICEID", 64},
-    {nullptr, 0},
+    // Name, max length, secret
+    {"SSID", 32, false},
+    {"PASSWORD", 64, true},
+    {"APNAME", 64, false},
+    {"APPASSWORD", 64, true},
+    {"HOSTNAME", 64, false},
+    {"MQTTSERVER", 64, false},
+    {"MQTTUSER", 64, false},
+    {"MQTTPASSWORD", 64, true},
+    {"MQTTTOPIC", 64, false},
+    {"MQTTTIMEOUT", 64, false},
+    {"MQTTOBJIDPREFIX", 64, false},
+    {"MQTTDEVICENAME", 64, false},
+    {"HADEVICEID", 64, false},
+    {nullptr, 0, false},
 };
 
 const char* BOOL_SETTINGS[] = {
@@ -338,7 +353,7 @@ public:
 };
 
 
-TwsRoute settingsHandler("/api/settings", new TwsJsonGetFunc([](TwsRequest& request, JsonDocument& doc) {
+TwsRoute settingsHandler("/api/internal/settings", new TwsJsonGetFunc([](TwsRequest& request, JsonDocument& doc) {
     BatteryEmulatorSettingsStore settings;
 
     JsonArray bats = doc["batteries"].to<JsonArray>();
@@ -360,7 +375,9 @@ TwsRoute settingsHandler("/api/settings", new TwsJsonGetFunc([](TwsRequest& requ
         sets[FLOAT_TO_UINT_SETTINGS[i].name] = settings.getUInt(FLOAT_TO_UINT_SETTINGS[i].name, 0) / FLOAT_TO_UINT_SETTINGS[i].scale;
     }
     for(int i=0;STRING_SETTINGS[i].name!=nullptr;i++) {
-        sets[STRING_SETTINGS[i].name] = settings.getString(STRING_SETTINGS[i].name).c_str();
+        if(!STRING_SETTINGS[i].secret) {
+            sets[STRING_SETTINGS[i].name] = settings.getString(STRING_SETTINGS[i].name).c_str();
+        }
     }
     for(int i=0;BOOL_SETTINGS[i]!=nullptr;i++) {
         sets[BOOL_SETTINGS[i]] = settings.getBool(BOOL_SETTINGS[i], false);
@@ -418,6 +435,10 @@ TwsPostBufferingRequestHandler settingsPostHandler(&settingsHandler, [](TwsReque
         for(int i=0;STRING_SETTINGS[i].name!=nullptr;i++) {
             if(doc[STRING_SETTINGS[i].name].is<const char*>()) {
                 const char *val = doc[STRING_SETTINGS[i].name].as<const char*>();
+                // Skip empty secret fields (password unchanged)
+                if(STRING_SETTINGS[i].secret && strlen(val) == 0) {
+                    continue;
+                }
                 if(strlen(val) > STRING_SETTINGS[i].max_length) {
                     errors[STRING_SETTINGS[i].name] = "Value too long.";
                 } else if(attempt==1) {
@@ -934,6 +955,14 @@ TwsRoute *default_handlers[] = {
             ev["data"] = event_pointer->data;
             ev["message"] = get_event_message_string(event_handle);
         }
+    })),
+    new TwsRoute("/api/events/clear", new TwsRequestHandlerFunc([](TwsRequest& request) {
+        if(!request.is_post()) {
+            request.write_fully(HTTP_405);
+            return;
+        }
+        reset_all_events();
+        request.write_fully(HTTP_204);
     })),
     new TwsRoute("/api/log", new TwsRequestHandlerFunc([](TwsRequest& request) {
         request.write_fully("HTTP/1.1 200 OK\r\n"
