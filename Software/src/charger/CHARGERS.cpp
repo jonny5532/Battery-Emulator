@@ -2,6 +2,9 @@
 #include <vector>
 #include "CanCharger.h"
 
+#include "CHEVY-VOLT-CHARGER.h"
+#include "NISSAN-LEAF-CHARGER.h"
+
 CanCharger* charger = nullptr;
 
 ChargerType user_selected_charger_type = ChargerType::None;

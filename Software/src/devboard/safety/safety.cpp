@@ -1,9 +1,11 @@
 #include "safety.h"
+#include <Arduino.h>
 #include "../../battery/BATTERIES.h"
 #include "../../charger/CHARGERS.h"
 #include "../../datalayer/datalayer.h"
 #include "../../inverter/INVERTERS.h"
 #include "../utils/events.h"
+#include "../utils/logging.h"
 
 static uint16_t cell_deviation_mV = 0;
 static uint8_t charge_limit_failures = 0;
