@@ -686,4 +686,9 @@ void setup() {
 }
 
 // Loop empty, all functionality runs in tasks
-void loop() {}
+void loop() {
+  // Remove watchdog timer
+  esp_task_wdt_delete(NULL);
+  // Delete loop task
+  vTaskDelete(NULL);
+}
