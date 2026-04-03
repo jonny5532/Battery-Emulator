@@ -54,6 +54,7 @@ class LilyGoHal : public Esp32Hal {
     if (user_selected_gpioopt2 == GPIOOPT2::DEFAULT_OPT_BMS_POWER_18) {
       return GPIO_NUM_18;
     }  //Else user_selected_gpioopt2 == GPIOOPT2::BMS_POWER_25
+    return GPIO_NUM_32;
     return GPIO_NUM_25;
   }
   virtual gpio_num_t SECOND_BATTERY_CONTACTORS_PIN() { return GPIO_NUM_15; }
