@@ -4,13 +4,13 @@
 #include "../datalayer/datalayer.h"
 #include "../datalayer/datalayer_extended.h"
 #include "CMFA-EV-HTML.h"
-#include "CanBattery.h"
+#include "UdsCanBattery.h"
 
-class CmfaEvBattery : public CanBattery {
+class CmfaEvBattery : public UdsCanBattery {
  public:
   // Use this constructor for the second battery.
   CmfaEvBattery(DATALAYER_BATTERY_TYPE* datalayer_ptr, DATALAYER_INFO_CMFAEV* extended, CAN_Interface targetCan)
-      : CanBattery(targetCan) {
+      : UdsCanBattery(targetCan) {
     datalayer_battery = datalayer_ptr;
     allows_contactor_closing = nullptr;
     datalayer_cmfa = extended;
@@ -25,13 +25,15 @@ class CmfaEvBattery : public CanBattery {
     datalayer_cmfa = &datalayer_extended.CMFAEV;
   }
 
+  bool supports_read_DTC() { return true; }
   bool supports_reset_DTC() { return true; }
-  void reset_DTC() { UserRequestDTCclear = true; }
 
   virtual void setup(void);
   virtual void handle_incoming_can_frame(CAN_frame rx_frame);
   virtual void update_values();
   virtual void transmit_can(unsigned long currentMillis);
+  virtual uint32_t handle_pid(uint16_t pid, uint32_t value, const uint8_t* data, uint16_t length,
+                              UdsStatus status) override;
   static constexpr const char* Name = "CMFA platform, 27 kWh battery";
 
   BatteryHtmlRenderer& get_status_renderer() { return renderer; }
@@ -44,8 +46,6 @@ class CmfaEvBattery : public CanBattery {
 
   // If not null, this battery decides when the contactor can be closed and writes the value here.
   bool* allows_contactor_closing;
-
-  bool UserRequestDTCclear = false;
 
   uint16_t rescale_raw_SOC(uint32_t raw_SOC);
 
@@ -186,16 +186,7 @@ class CmfaEvBattery : public CanBattery {
                         .DLC = 8,
                         .ID = 0x79B,
                         .data = {0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-  CAN_frame CMFA_POLLING_FRAME = {.FD = false,
-                                  .ext_ID = false,
-                                  .DLC = 8,
-                                  .ID = 0x79B,
-                                  .data = {0x03, 0x22, 0x90, 0x01, 0x00, 0x00, 0x00, 0x00}};
-  CAN_frame CMFA_CLEAR_DTC = {.FD = false,
-                              .ext_ID = false,
-                              .DLC = 8,
-                              .ID = 0x79B,
-                              .data = {0x04, 0x14, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00}};
+
   bool end_of_charge = false;
   bool interlock_flag = false;
   uint16_t soc_z = 0;
@@ -218,8 +209,6 @@ class CmfaEvBattery : public CanBattery {
   uint64_t cumulative_energy_when_charging = 0;
   uint64_t cumulative_energy_in_regen = 0;
   uint16_t soh_average = 10000;
-  uint32_t poll_pid = PID_POLL_SOH_AVERAGE;
-  uint16_t pid_reply = 0;
 
   uint8_t counter_10ms = 0;
   uint8_t content_125[16] = {0x07, 0x0C, 0x01, 0x06, 0x0B, 0x00, 0x05, 0x0A,
