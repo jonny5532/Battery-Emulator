@@ -72,6 +72,7 @@ class String {
   // Arduino-like methods (example)
   int length() const { return static_cast<int>(data.length()); }
   const char* c_str() const { return data.c_str(); }
+  void reserve(size_t size) { data.reserve(size); }
 
   // Arduino String::reserve returns bool; pre-allocates capacity.
   bool reserve(unsigned int size) {
