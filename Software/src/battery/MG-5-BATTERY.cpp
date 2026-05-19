@@ -213,17 +213,11 @@ void Mg5Battery::
 }
 
 void Mg5Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
-  // We start polling with UDS ID 0x7DF, the generic broadcast one. Our first
-  // reply will indicate what the BMS-specific one is, which we switch to.
-  if (uds_address == 0x7DF && rx_frame.ID == 0x789) {
-    uds_address = 0x781;
-    logging.println("MG5: Detected UDS address 0x781");
-  } else if (uds_address == 0x7DF && rx_frame.ID == 0x7ED) {
-    uds_address = 0x7E5;
-    logging.println("MG5: Detected UDS address 0x7E5");
+  if (handle_incoming_uds_can_frame(rx_frame)) {
+    return;
   }
 
-  uint32_t v, i;
+  uint16_t v, i, cell_id;
 
   switch (rx_frame.ID) {
     case 0x297: {                                                          //BMS state
@@ -311,21 +305,15 @@ void Mg5Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
       // Contains SoCs, voltage, current. Is emitted by both PTCAN and HybridCAN, but
       // There does not seem to be 2 SOC"s present like in MG HS battery, so we just read the meassages from the PTCAN bus
 
-      if ((((rx_frame.data.u8[4] & 0x0F) << 8) | rx_frame.data.u8[5]) != 0) {
-        // 3AC message contains a nonzero voltage (so must have come from PTCAN)
+      v = (((rx_frame.data.u8[4] & 0x0F) << 8) | rx_frame.data.u8[5]);
+      i = (rx_frame.data.u8[6] << 8 | rx_frame.data.u8[7]);
 
-        // Battery voltage
-        v = (((rx_frame.data.u8[4] & 0x0F) << 8) | rx_frame.data.u8[5]);
-        // Current
-        i = (rx_frame.data.u8[6] << 8 | rx_frame.data.u8[7]);
+      if (v > 0 && v < 2400 && i > 16000 && i < 24000) {
+        // 3AC message contains a credible voltage and current (so must have come from PTCAN)
+        // (voltage between 0 and 600V, current between -200A and +200A)
 
-        if (v > 0 && v < 2400 && i > 16000 && i < 24000) {
-          // 3AC message contains a credible voltage and current (so must have come from PTCAN)
-          // (voltage between 0 and 600V, current between -200A and +200A)
-
-          datalayer.battery.status.voltage_dV = (v * 5) / 2;
-          datalayer.battery.status.current_dA = -(i - 20000) / 2;
-        }
+        datalayer.battery.status.voltage_dV = (v * 5) / 2;
+        datalayer.battery.status.current_dA = -(v - 20000) / 2;
 
         // SOC
         soc = (rx_frame.data.u8[2] << 8) | rx_frame.data.u8[3];
