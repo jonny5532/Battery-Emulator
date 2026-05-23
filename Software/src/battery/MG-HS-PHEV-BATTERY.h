@@ -93,7 +93,11 @@ class MgHsPHEVBattery : public UdsCanBattery {
   uint32_t batteryType = 0;
   //uint32_t pidCount = 0;
   bool contactorCloseReset = false;
+  uint8_t eightAcycle = 0;
+  uint8_t warmupCounter = 0;
 
+  unsigned long previousMillis10 = 0;   // will store last time a 10ms CAN Message was send
+  unsigned long previousMillis20 = 0;   // will store last time a 20ms CAN Message was send
   unsigned long previousMillis100 = 0;  // will store last time a 100ms CAN Message was send
   //unsigned long previousMillis2000 = 0;
 

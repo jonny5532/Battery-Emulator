@@ -722,17 +722,25 @@ uint32_t MgHsPHEVBattery::handle_pid(uint16_t pid, uint32_t value, const uint8_t
 //   return 0;  // Continue normal PID cycling
 // }
 
-uint8_t cycle_pos = 0;
-uint8_t EIGHT8_CLOSED_CYCLE[] = {0xB6, 0xB7, 0xB4, 0xB5, 0xB2, 0xB3, 0xB0, 0xB1,
-                                 0xBE, 0xBF, 0xBC, 0xBD, 0xBA, 0xBB, 0xB8, 0xB9};
-uint8_t EIGHT8_OPEN_CYCLE[] = {0x94, 0x95, 0x96, 0x97, 0x90, 0x91, 0x92, 0x93,
-                               0x9c, 0x9d, 0x9e, 0x9f, 0x98, 0x99, 0x9a, 0x9b};
+//uint8_t cycle_pos = 0;
+// uint8_t EIGHT8_CLOSED_CYCLE[] = {0xB6, 0xB7, 0xB4, 0xB5, 0xB2, 0xB3, 0xB0, 0xB1,
+//                                  0xBE, 0xBF, 0xBC, 0xBD, 0xBA, 0xBB, 0xB8, 0xB9};
+// uint8_t EIGHT8_OPEN_CYCLE[] = {0x94, 0x95, 0x96, 0x97, 0x90, 0x91, 0x92, 0x93,
+//                                0x9c, 0x9d, 0x9e, 0x9f, 0x98, 0x99, 0x9a, 0x9b};
+//uint8_t warmup_tick = 0;
 
 void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
   if (datalayer.system.status.bms_reset_status != BMS_RESET_IDLE) {
     // Transmitting towards battery is halted while BMS is being reset
+    previousMillis10 = currentMillis;
+    previousMillis20 = currentMillis;
     previousMillis100 = currentMillis;
     return;
+  }
+
+  static int8_t send_phase = -1;
+  if (++send_phase > 3) {
+    send_phase = 0;
   }
 
   // 1ms passed
@@ -762,9 +770,9 @@ void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
   //   }
   // }
 
-  // Send 100ms CAN Message
-  if (currentMillis - previousMillis100 >= INTERVAL_100_MS) {
-    previousMillis100 = currentMillis;
+  // Send 10ms CAN Message
+  if (currentMillis - previousMillis10 >= INTERVAL_10_MS && send_phase == 0) {
+    previousMillis10 = currentMillis;
 
 #if MG_HS_PHEV_DISABLE_CONTACTORS
     // Leave the contactors open
@@ -780,15 +788,22 @@ void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
       MG_HS_8A.data.u8[5] = 0x00;
       MG_391.data.u8[4] = 0xB0;
       contactorCloseReset = false;
+      warmupCounter = 0;
 
-      MG_HS_8A.data.u8[6] = 0x10 | cycle_pos;
+      MG_HS_8A.data.u8[6] = 0x10 | eightAcycle;
 
     } else {
       // Everything ready, close contactors
       MG_HS_8A.data.u8[5] = 0x02;
       MG_391.data.u8[4] = 0xD0;
 
-      MG_HS_8A.data.u8[6] = 0x30 | cycle_pos;
+      if (warmupCounter < 110) {
+        // Keep the 1 asserted for 110 messages
+        MG_HS_8A.data.u8[6] = 0x10 | eightAcycle;
+        warmupCounter++;
+      } else {
+        MG_HS_8A.data.u8[6] = 0x30 | eightAcycle;
+      }
 
       if (!contactorCloseReset && batteryType == BATTERY_TYPE_MG5) {
         // MG5 requires DTCs clearing to get contactors to close
@@ -801,13 +816,18 @@ void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
     // Basic XOR checksum
     MG_HS_8A.data.u8[7] = (MG_HS_8A.data.u8[0] ^ MG_HS_8A.data.u8[1] ^ MG_HS_8A.data.u8[2] ^ MG_HS_8A.data.u8[3] ^
                            MG_HS_8A.data.u8[4] ^ MG_HS_8A.data.u8[5] ^ MG_HS_8A.data.u8[6]);
-    DEBUG_PRINTF("[MG] 8A ck: %02X %02X %02X\n", MG_HS_8A.data.u8[7], EIGHT8_OPEN_CYCLE[cycle_pos],
-                 EIGHT8_CLOSED_CYCLE[cycle_pos]);
-    cycle_pos = (cycle_pos + 1) & 0xF;
+    eightAcycle = (eightAcycle + 1) & 0xF;
 
     transmit_can_frame(&MG_HS_8A);
+  }
+  if (currentMillis - previousMillis20 >= INTERVAL_20_MS && send_phase == 1) {
+    previousMillis20 = currentMillis;
+
     //transmit_can_frame(&MG_391);
     transmit_can_frame(&MG_HS_1F1);
+  }
+  if (currentMillis - previousMillis100 >= INTERVAL_100_MS && send_phase == 2) {
+    previousMillis100 = currentMillis;
 
     if (resetProgress == SENDING_DIAG) {
       // Enter diag mode
@@ -847,8 +867,10 @@ void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
   //   // }
   // }
 
-  // Send UDS messages too.
-  transmit_uds_can(currentMillis);
+  if (send_phase == 3) {
+    // Send UDS messages too.
+    transmit_uds_can(currentMillis);
+  }
 }
 
 void MgHsPHEVBattery::setup(void) {  // Performs one time setup at startup
