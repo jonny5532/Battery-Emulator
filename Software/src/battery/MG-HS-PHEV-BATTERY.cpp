@@ -782,7 +782,6 @@ void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
       contactorCloseReset = false;
 
       MG_HS_8A.data.u8[6] = 0x10 | cycle_pos;
-      MG_HS_8A.data.u8[7] = EIGHT8_OPEN_CYCLE[cycle_pos];
 
     } else {
       // Everything ready, close contactors
@@ -790,7 +789,6 @@ void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
       MG_391.data.u8[4] = 0xD0;
 
       MG_HS_8A.data.u8[6] = 0x30 | cycle_pos;
-      MG_HS_8A.data.u8[7] = EIGHT8_CLOSED_CYCLE[cycle_pos];
 
       if (!contactorCloseReset && batteryType == BATTERY_TYPE_MG5) {
         // MG5 requires DTCs clearing to get contactors to close
@@ -800,6 +798,11 @@ void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
     }
 #endif  // MG_HS_PHEV_DISABLE_CONTACTORS
 
+    // Basic XOR checksum
+    MG_HS_8A.data.u8[7] = (MG_HS_8A.data.u8[0] ^ MG_HS_8A.data.u8[1] ^ MG_HS_8A.data.u8[2] ^ MG_HS_8A.data.u8[3] ^
+                           MG_HS_8A.data.u8[4] ^ MG_HS_8A.data.u8[5] ^ MG_HS_8A.data.u8[6]);
+    DEBUG_PRINTF("[MG] 8A ck: %02X %02X %02X\n", MG_HS_8A.data.u8[7], EIGHT8_OPEN_CYCLE[cycle_pos],
+                 EIGHT8_CLOSED_CYCLE[cycle_pos]);
     cycle_pos = (cycle_pos + 1) & 0xF;
 
     transmit_can_frame(&MG_HS_8A);
