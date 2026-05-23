@@ -129,11 +129,13 @@ class MgHsPHEVBattery : public UdsCanBattery {
                       .ID = 0x391,
                       .data = {0x10, 0x01, 0xA0, 0x00, 0xD0, 0x00, 0x48, 0x00}};
 
+  // HS is happy with 0e + 7x 00
+  // Trying different for MG5...
   static constexpr CAN_frame MG_HS_1F1 = {.FD = false,
                                           .ext_ID = false,
                                           .DLC = 8,
                                           .ID = 0x1F1,
-                                          .data = {0x0E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+                                          .data = {0x0E, 0x00, 0x00, 0x00, 0x08, 0x72, 0x00, 0x00}};
 
   // Enter UDS extended-diagnostics mode
   CAN_frame MG_HS_UDS_DIAG = {.FD = false,
