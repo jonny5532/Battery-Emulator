@@ -805,7 +805,7 @@ void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
         MG_HS_8A.data.u8[6] = 0x30 | eightAcycle;
       }
 
-      if (!contactorCloseReset && batteryType == BATTERY_TYPE_MG5) {
+      if (!contactorCloseReset && (batteryType == BATTERY_TYPE_MG5 || batteryType == BATTERY_TYPE_MG5_61_NMC)) {
         // MG5 requires DTCs clearing to get contactors to close
         reset_DTC();
         contactorCloseReset = true;
