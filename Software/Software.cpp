@@ -59,6 +59,8 @@ Watchdog mqtt_loop_watchdog;
 
 Logging logging;
 
+void modbus_relays_tick();
+
 static std::list<Transmitter*> transmitters;
 void register_transmitter(Transmitter* transmitter) {
   transmitters.push_back(transmitter);
@@ -525,6 +527,8 @@ void core_loop(void*) {
         transmitter->transmit(currentMillis);
       }
     }
+
+    modbus_relays_tick();
 
     if (datalayer.system.info.performance_measurement_active) {
       END_TIME_MEASUREMENT_MAX(all, datalayer.system.status.core_task_10s_max_us);
