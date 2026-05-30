@@ -627,7 +627,7 @@ void Mg5Battery::transmit_can(unsigned long currentMillis) {
 }
 
 void Mg5Battery::setup(void) {  // Performs one time setup at startup
-  setup_uds(0x781, POLL_BUS_VOLTAGE);
+  setup_uds(0x781, 0, POLL_BUS_VOLTAGE);
   strncpy(datalayer.system.info.battery_protocol, Name, 63);
   datalayer.system.info.battery_protocol[63] = '\0';
   datalayer.system.status.battery_allows_contactor_closing = true;

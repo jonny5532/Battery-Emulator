@@ -370,9 +370,9 @@ void MgHsPHEVBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
   // We start polling with UDS ID 0x7DF, the generic broadcast one. Our first
   // reply will indicate what the BMS-specific one is, which we switch to.
   if (uds_address == 0x7DF && rx_frame.ID == 0x789) {
-    setup_uds(0x781, next_pid);
+    setup_uds(0x781, 0, next_pid);
   } else if (uds_address == 0x7DF && rx_frame.ID == 0x7ED) {
-    setup_uds(0x7E5, next_pid);
+    setup_uds(0x7E5, 0, next_pid);
   }
 
   if (handle_incoming_uds_can_frame(rx_frame)) {
@@ -684,7 +684,7 @@ uint32_t MgHsPHEVBattery::handle_pid(uint16_t pid, uint32_t value, const uint8_t
     case 0xF1AA:
       memcpy(pid_f1aa, data, length > sizeof(pid_f1aa) ? sizeof(pid_f1aa) : length);
       // Finished reading identifiers, start normal polling
-      setup_uds(uds_address, POLL_BATTERY_SOH);
+      setup_uds(uds_address, 0, POLL_BATTERY_SOH);
       break;
   }
   return 0;  // Continue normal PID cycling
@@ -875,7 +875,7 @@ void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
 
 void MgHsPHEVBattery::setup(void) {  // Performs one time setup at startup
   //setup_uds(0x7E5, POLL_BATTERY_VOLTAGE);
-  setup_uds(0x7DF, POLL_BATTERY_TYPE);  // | SHORT_PID);
+  setup_uds(0x7DF, 0, POLL_BATTERY_TYPE);  // | SHORT_PID);
 
   strncpy(datalayer.system.info.battery_protocol, Name, 63);
   datalayer.system.info.battery_protocol[63] = '\0';

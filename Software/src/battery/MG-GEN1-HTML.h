@@ -74,27 +74,7 @@ class MgGen1HtmlRenderer : public BatteryHtmlRenderer {
     ret += buf;
     ret += "<br>";
 
-    auto uds_response = battery.get_uds_response();
-    ret += "<div></div><script>(()=>{var uds = [";
-    for (int i = 0; i < uds_response.first; i++) {
-      snprintf(buf, sizeof(buf), "%u,", uds_response.second[i]);
-      ret += buf;
-    }
-    ret +=
-        "];\n"
-        "var h='<table>';\n"
-        "if(uds[0]==2){\n"
-        "for(let i=2;i<uds.length;i+=4){\n"
-        "  let a=uds[i],b=uds[i+1],s=uds[i+3],f=[];\n"
-        "  [[8,'<b>CONFIRMED</b>'],[4,'Pending'],[32,'FailSinceClear'],[1,'<b>FAIL</b>'],   "
-        "[16,'NotCompSinceClear'],[64,'NotCompThisCycle'],[128,'MIL'],[2,'FailThisCycle']]  "
-        ".map(x=>{if(s&x[0])f.push(x[1])});\n"
-        "  let d='PCBU'[a>>6]+((a>>4)&3).toString(16)+(a&15).toString(16)+(b>>4).toString(16)+(b&15).toString(16);\n"
-        "  h+=`<tr><td><b>${d.toUpperCase()}</b></td><td>${f.join(', ')||'NoFlags'}</td></tr>`;\n"
-        "}}\n"
-        "document.currentScript.previousElementSibling.innerHTML = h+'</table>';\n"
-        "})();</script>\n";
-
+    ret += battery.getDtcScript();
     return ret;
   }
 

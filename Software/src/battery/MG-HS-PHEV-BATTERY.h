@@ -36,12 +36,6 @@ class MgHsPHEVBattery : public UdsCanBattery {
   inline const uint8_t* get_dtcs() { return (const uint8_t*)pid_f1aa; }
   inline int get_uds_address() { return uds_address; }
 
-  //   struct {
-  //     int length;
-  //     uint8_t *data;
-  //   } uds_response;
-  inline std::pair<int, uint8_t*> get_uds_response() { return {gUDSContext.bytes_received, gUDSContext.buffer}; }
-
  private:
   DATALAYER_BATTERY_TYPE* datalayer_battery;
 
