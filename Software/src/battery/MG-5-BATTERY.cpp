@@ -537,6 +537,10 @@ void Mg5Battery::transmit_can(unsigned long currentMillis) {
   // if (currentMillis - previousMillis10 >= INTERVAL_10_MS) {
   //   previousMillis10 = currentMillis;
   // }
+  static int8_t send_phase = -1;
+  if (++send_phase > 3) {
+    send_phase = 0;
+  }
 
   // Send 10ms CAN Message
   if (currentMillis - previousMillis10 >= INTERVAL_10_MS && send_phase == 0) {

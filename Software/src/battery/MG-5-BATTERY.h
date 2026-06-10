@@ -41,6 +41,7 @@ class Mg5Battery : public UdsCanBattery {
   static const uint16_t DERATE_DISCHARGE_BELOW_SOC = 1500;  // in 0.01% units
   static const uint16_t DISCHARGE_MIN_SOC = 1000;
 
+  unsigned long previousMillis10 = 0;
   unsigned long previousMillis100 = 0;  // will store last time a 100ms CAN Message was send
 
   uint16_t cellVoltageValidTime = 0;

@@ -42,25 +42,38 @@ class UdsCanBattery : public CanBattery, public IsoTp {
 
   enum class UdsStatus : uint8_t {
     OK = 0,
-    OK_SHORT,
+    //OK_SHORT,
     TIMEOUT,
     NEGATIVE_RESPONSE,  // The ECU returned an NRC (e.g., 0x7F)
   };
 
+  enum class UdsAction : uint8_t {
+    NONE = 0,
+    READ_DTC,
+    CLEAR_DTC,
+    RESET_BMS,
+  };
+
   void setup_uds(uint16_t uds_address, uint16_t uds_response_address, uint32_t first_pid = 0);
   void transmit_uds_can(unsigned long currentMillis);
+  bool transmit_uds_action();
   bool handle_incoming_uds_can_frame(CAN_frame rx_frame);
+  inline bool is_busy() const { return uds_action_timeout > 0 || uds_action_cooldown > 0; }
+
+  bool perform_uds_action(UdsAction action, uint32_t timeout, uint32_t cooldown);
 
  protected:
   /** Called by the protocol layer when it needs to emit a raw CAN frame. */
-  virtual void on_isotp_can_tx(uint32_t can_id, uint8_t* can_data, uint8_t can_dlc) override;
+  virtual void on_isotp_can_tx(uint32_t can_id, const uint8_t* can_data, uint8_t can_dlc) override;
 
   /** Called when a complete ISO-TP message has been assembled. */
-  virtual void on_isotp_rx_complete(uint8_t* data, int len, isotp_tatype tatype) override;
+  virtual void on_isotp_rx_complete(const uint8_t* data, int len, isotp_tatype tatype) override;
+
+  void on_uds_action_complete(uint8_t sid, const uint8_t* data, uint16_t len);
 
  public:
   // Temporarily pause UDS requests for the specified number of 200ms ticks.
-  void pause_uds(uint16_t ticks_200ms) { uds_busy_timeout = ticks_200ms; }
+  void pause_uds(uint16_t ticks_200ms) { uds_transaction_timeout = ticks_200ms; }
   // If you let UdsCanBattery handle UDS responses, you can override this be
   // passed the PID query responses. The value returned is used as the next PID
   // to query. Return 0 to let the PID cycle continue as normal.
@@ -70,12 +83,11 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   //virtual uint32_t handle_long_pid(uint16_t pid, const uint8_t* data, uint16_t length) { return 0; }
   virtual bool supports_read_DTC();
   virtual bool supports_reset_DTC();
+  virtual bool supports_reset_BMS();
   virtual void read_DTC();
   virtual void reset_DTC();
+  virtual void reset_BMS();
 
-  // void startUDSMultiFrameReception(uint16_t totalLength, uint8_t moduleID);
-  // bool storeUDSPayload(const uint8_t* payload, uint8_t length);
-  // bool isUDSMessageComplete();
   virtual void print_formatted_dtc(uint32_t dtc24, uint8_t status);
 
   // The range of response IDs (addresses) we'll accept UDS responses from.
@@ -84,10 +96,22 @@ class UdsCanBattery : public CanBattery, public IsoTp {
 
   static const uint32_t SHORT_PID = 0x10000;
 
-  uint32_t previousUdsMillis200 = 0;
+  UdsAction pending_action = UdsAction::NONE;
+  uint8_t expected_response_sid = 0;
+
+  uint32_t previousUdsMillis100 = 0;
   uint32_t first_pid = 0;
   uint32_t next_pid = 0;
-  uint16_t uds_busy_timeout = 0;
+  // How many ticks left for the individual UDS transaction to complete, before
+  // we time out and allow new transactions to be started.
+  int16_t uds_transaction_timeout = 0;
+  // How many ticks left for the overall UDS action to complete, which can
+  // include multiple transactions (e.g., security access or retries)
+  int16_t uds_action_timeout = 0;
+  // How long to wait after a UDS action before we allow another one (which
+  // gives time for PID cycles in the interim).
+  int16_t uds_action_cooldown = 0;
+
   // The address we'll send UDS requests to.
   uint16_t uds_address = 0x7DF;
   // The address we require UDS responses to come from, or 0 to accept from any
@@ -95,9 +119,6 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   uint16_t uds_response_address = 0;
   // The address we are currently receiving a UDS response from.
   uint16_t uds_current_response_address = 0;
-
-  bool user_request_read_dtc = false;
-  bool user_request_clear_dtc = false;
 
   // CAN_frame UDS_PID_REQUEST = {.FD = false,
   //                              .ext_ID = false,
@@ -137,7 +158,10 @@ class UdsCanBattery : public CanBattery, public IsoTp {
 
   bool is_requesting_dtc = false;
 
-  void sendUdsRequest(SID service_id, uint8_t d0 = 0, uint8_t d1 = 0, uint8_t d2 = 0, uint8_t d3 = 0);
-  void processUdsMessage(const uint8_t* data, uint16_t len, bool cutShort);
+  void uds_send(SID service_id, const std::string_view data, uint32_t timeout = 0);
+  inline void uds_send(SID service_id, const std::initializer_list<uint8_t> data, uint32_t timeout = 0) {
+    uds_send(service_id, std::string_view((const char*)data.begin(), data.size()), timeout);
+  }
+  void uds_receive(const uint8_t* data, uint16_t len);
   void handleDtcResponse(const uint8_t* data, uint16_t len);
 };

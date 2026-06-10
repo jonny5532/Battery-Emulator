@@ -433,16 +433,24 @@ void MgHsPHEVBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       } else if ((rx_frame.data.u8[0] == 0x02 || rx_frame.data.u8[0] == 0x06) && rx_frame.data.u8[1] == 0x01) {
         // A weird 'stuck' state where the battery won't reconnect
         datalayer.system.status.battery_allows_contactor_closing = false;
-        if (batteryType == BATTERY_TYPE_MG_HS_PHEV && resetProgress == IDLE) {
-          logging.printf("[MG] Stuck, resetting.\n");
-          resetProgress = SENDING_DIAG;
+        if (batteryType == BATTERY_TYPE_MG_HS_PHEV) {  //} && resetProgress == IDLE) {
+          //if(reset_BMS()) {
+          if (!is_busy()) {
+            reset_BMS();
+            logging.printf("[MG] Stuck, resetting.\n");
+          }
+          //resetProgress = SENDING_DIAG;
         }
       } else if (rx_frame.data.u8[1] == 0xf) {
         // A fault state (likely isolation failure)
         datalayer.system.status.battery_allows_contactor_closing = false;
-        if (batteryType == BATTERY_TYPE_MG_HS_PHEV && resetProgress == IDLE) {
-          logging.printf("[MG] Fault, resetting.\n");
-          resetProgress = SENDING_DIAG;
+        if (batteryType == BATTERY_TYPE_MG_HS_PHEV) {  //} && resetProgress == IDLE) {
+          if (!is_busy()) {
+            //if(reset_BMS()) {
+            reset_BMS();
+            logging.printf("[MG] Fault, resetting.\n");
+          }
+          //resetProgress = SENDING_DIAG;
         }
       } else {
         datalayer.system.status.battery_allows_contactor_closing = true;
@@ -642,6 +650,8 @@ uint32_t MgHsPHEVBattery::handle_pid(uint16_t pid, uint32_t value, const uint8_t
       return POLL_BATTERY_SOH;
     case POLL_BATTERY_SOH:  // Battery SoH
       datalayer_battery->status.soh_pptt = value;
+      return 0xb099;  //deliberately invalid PID
+    case 0xb099:
       break;
 
     case POLL_BATTERY_TYPE:  // Battery type
@@ -882,6 +892,7 @@ void MgHsPHEVBattery::setup(void) {  // Performs one time setup at startup
   datalayer.system.status.battery_allows_contactor_closing = false;
   datalayer_battery->info.max_cell_voltage_mV = MAX_CELL_VOLTAGE_MV;
   datalayer_battery->info.min_cell_voltage_mV = MIN_CELL_VOLTAGE_MV;
+  datalayer_battery->info.min_cell_voltage_mV = 3570;
   datalayer_battery->info.number_of_cells = 90;
   // Start off with wide range until we detect the battery type
   datalayer_battery->info.max_design_voltage_dV = ((uint32_t)108 * MAX_CELL_VOLTAGE_MV) / 100;
