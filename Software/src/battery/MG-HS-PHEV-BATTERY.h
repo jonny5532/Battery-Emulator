@@ -95,11 +95,11 @@ class MgHsPHEVBattery : public UdsCanBattery {
   unsigned long previousMillis100 = 0;  // will store last time a 100ms CAN Message was send
   //unsigned long previousMillis2000 = 0;
 
-  static const uint16_t MAX_CHARGE_POWER_W = 3000;
+  static const uint16_t MAX_CHARGE_POWER_W = 11000;
   static const uint16_t CHARGE_TRICKLE_POWER_W = 20;
   static const uint16_t DERATE_CHARGE_ABOVE_SOC = 9000;  // in 0.01% units
 
-  static const uint16_t MAX_DISCHARGE_POWER_W = 4000;
+  static const uint16_t MAX_DISCHARGE_POWER_W = 11000;
   static const uint16_t DERATE_DISCHARGE_BELOW_SOC = 1500;  // in 0.01% units
   static const uint16_t DISCHARGE_MIN_SOC = 1000;
 

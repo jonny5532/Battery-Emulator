@@ -241,11 +241,11 @@ bool IsoTp::isotp_send(const uint8_t* data, int len) {
     _tx.state = ISOTP_SENDING;
     _tx.len   = len;
     _tx.idx   = 0;
-    logging.printf("ISOTP SEND: len=%d Data=", len);
-    for (int i = 0; i < len; i++) {
-      logging.printf("%02X ", data[i]);
-    }
-    logging.println();
+    // logging.printf("ISOTP SEND: len=%d Data=", len);
+    // for (int i = 0; i < len; i++) {
+    //   logging.printf("%02X ", data[i]);
+    // }
+    // logging.println();
     if (len <= 7 - off) {
       do_send_sf();
     } else {

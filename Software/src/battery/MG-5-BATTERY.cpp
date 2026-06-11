@@ -216,7 +216,7 @@ void Mg5Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
     case 0x3BE:
       // Per-cell voltages and temps
       cell_id = rx_frame.data.u8[5];
-      if (cell_id < 96) {
+      if (cell_id < MAX_AMOUNT_CELLS) {
         v = 1000 + ((rx_frame.data.u8[2] << 8) | rx_frame.data.u8[3]);
         datalayer.battery.status.cell_voltages_mV[cell_id] = v < 10000 ? v : 0;
         // cell temperature is rx_frame.data.u8[1]-40 but BE doesn't use it
