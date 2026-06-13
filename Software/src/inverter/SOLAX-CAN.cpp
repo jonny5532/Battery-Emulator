@@ -168,6 +168,9 @@ void SolaxInverter::map_can_frame_to_variable(CAN_frame rx_frame) {
         return;
       }
 
+      bool print_state = (STATE != PREV_STATE);
+      PREV_STATE = STATE;
+
       // Normal state machine (NoWorkaround and LockAfterFirstClose modes)
       switch (STATE) {
         case (BATTERY_ANNOUNCE):
