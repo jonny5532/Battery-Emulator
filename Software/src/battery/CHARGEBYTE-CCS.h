@@ -3,8 +3,8 @@
 #include "../devboard/hal/hal.h"
 #include "CanBattery.h"
 
-#include <Adafruit_MCP4725.h>
 #include <Wire.h>
+#include "../lib/adafruit-Adafruit_MCP4725/Adafruit_MCP4725.h"
 
 class ChargebyteCCSBattery : public CanBattery {
  public:
