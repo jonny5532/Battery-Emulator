@@ -468,6 +468,9 @@ void core_loop(void*) {
         if (precharge_control_enabled) {
           handle_precharge_control(currentMillis);  //Drive the hia4v1 via PWM
         }
+        if (battery) {
+          battery->handle_precharge();
+        }
         END_TIME_MEASUREMENT_MAX(10ms, datalayer.system.status.time_10ms_us);
       } else {  //Run 10ms tasks without timing it
         monitor_equipment_stop_button();
@@ -475,6 +478,9 @@ void core_loop(void*) {
         handle_contactors();  // Take care of startup precharge/contactor closing
         if (precharge_control_enabled) {
           handle_precharge_control(currentMillis);  //Drive the hia4v1 via PWM
+        }
+        if (battery) {
+          battery->handle_precharge();
         }
       }
     }
