@@ -1,3 +1,5 @@
+#ifndef SMALL_FLASH_DEVICE
+
 #include "CHARGEBYTE-CCS.h"
 #include "../datalayer/datalayer.h"
 #include "./Shunt.h"
@@ -227,3 +229,5 @@ void ChargebyteCCSBattery::setup() {
   }
   prechargeDac.setVoltage(0, true);  // set 0V output and store in EEPROM
 }
+
+#endif

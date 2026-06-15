@@ -1,3 +1,5 @@
+#ifndef SMALL_FLASH_DEVICE
+
 #ifndef CHARGEBYTE_CCS_BATTERY_H
 #define CHARGEBYTE_CCS_BATTERY_H
 #include "../devboard/hal/hal.h"
@@ -124,5 +126,7 @@ class ChargebyteCCSBattery : public CanBattery {
   TwoWire prechargeI2C = TwoWire(0);
   Adafruit_MCP4725 prechargeDac;
 };
+
+#endif
 
 #endif
