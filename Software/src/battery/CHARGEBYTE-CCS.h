@@ -5,8 +5,7 @@
 #include "../devboard/hal/hal.h"
 #include "CanBattery.h"
 
-#include <Wire.h>
-#include "../lib/adafruit-Adafruit_MCP4725/Adafruit_MCP4725.h"
+#include "driver/i2c_master.h"
 
 class ChargebyteCCSBattery : public CanBattery {
  public:
@@ -19,6 +18,7 @@ class ChargebyteCCSBattery : public CanBattery {
 
  private:
   void dump_data();
+  void setPrechargeVoltage(uint16_t value, bool writeEEPROM = false);
 
   static constexpr const char* EVSE_ID = "DEDIYE42";
   static const int EVSE_MIN_VOLTAGE = 1500;  // in dV
@@ -122,9 +122,8 @@ class ChargebyteCCSBattery : public CanBattery {
   uint16_t soc = 0;
   uint32_t energyCapacity_Wh = 20000;
 
-  // for controlling external precharge board
-  TwoWire prechargeI2C = TwoWire(0);
-  Adafruit_MCP4725 prechargeDac;
+  i2c_master_bus_handle_t prechargeI2CBus = nullptr;
+  i2c_master_dev_handle_t prechargeDacDev = nullptr;
 };
 
 #endif
