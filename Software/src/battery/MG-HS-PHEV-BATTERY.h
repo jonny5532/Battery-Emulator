@@ -104,6 +104,7 @@ class MgHsPHEVBattery : public UdsCanBattery {
   static const uint16_t DISCHARGE_MIN_SOC = 1000;
 
   uint16_t cellVoltageValidTime = 0;
+  uint16_t highestSeenCellCount = 0;
 
   uint8_t previousState = 0;
   enum MG_HS_RESET_STATE { IDLE, SENDING_DIAG, SENDING_RESET, WAITING_RESET_COMPLETE };

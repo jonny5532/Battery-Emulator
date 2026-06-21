@@ -167,7 +167,8 @@ void MgHsPHEVBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       if (datalayer.system.status.system_status == FAULT) {
         // If in fault state, don't try resetting things yet as it'll turn the
         // BMS off and we'll lose CAN info
-      } else if (!datalayer.system.status.inverter_allows_contactor_closing) {
+      } else if (!datalayer.system.status.inverter_allows_contactor_closing || batteryType == 0 ||
+                 highestSeenCellCount != datalayer_battery->info.number_of_cells) {
         // We haven't requested contactor closing, so we don't care what state
         // the BMS is in.
         datalayer.system.status.battery_allows_contactor_closing = false;
@@ -252,6 +253,9 @@ void MgHsPHEVBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       if (cell_id < datalayer_battery->info.number_of_cells) {
         v = 1000 + ((rx_frame.data.u8[2] << 8) | rx_frame.data.u8[3]);
         datalayer_battery->status.cell_voltages_mV[cell_id] = v < 10000 ? v : 0;
+        if (v < 10000 && cell_id >= highestSeenCellCount) {
+          highestSeenCellCount = cell_id + 1;
+        }
         // cell temperature is rx_frame.data.u8[1]-40 but BE doesn't use it
       }
 
@@ -450,7 +454,9 @@ void MgHsPHEVBattery::transmit_can(unsigned long currentMillis) {
         // or if inverter requests contactor opening
         || !datalayer.system.status.inverter_allows_contactor_closing
         // or if we haven't detected the battery type yet
-        || (batteryType == 0)) {
+        || (batteryType == 0)
+        // or the cellvoltage count disagrees with the expected number of cells
+        || (highestSeenCellCount != datalayer_battery->info.number_of_cells)) {
       MG_HS_8A.data.u8[5] = 0x00;
       MG_391.data.u8[4] = 0xB0;
       contactorCloseReset = false;
