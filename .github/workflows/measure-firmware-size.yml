@@ -19,6 +19,15 @@ jobs:
         PLATFORMIO_INI_HASH=$(md5sum platformio.ini | awk '{ print $1 }')
         echo "platformio_ini_hash=$PLATFORMIO_INI_HASH" >> $GITHUB_OUTPUT
 
+    # Broader cache (just the download files)
+    - uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.platformio/.cache
+        key: ${{ runner.os }}-pio
+
+    # Tighter cache (of platformio itself)
     - uses: actions/cache@v6
       with:
         path: |
@@ -99,7 +108,7 @@ jobs:
     - name: Upload firmware size report
       uses: actions/upload-artifact@v4
       with:
-        name: firmware-size-report
+        name: comment-for-pr
         path: |
           comment.md
           pr_number.txt            
