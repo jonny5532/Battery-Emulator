@@ -1,0 +1,101 @@
+name: ⚖️ Measure firmware size
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  measure-firmware-size:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout PR base
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ github.event.pull_request.base.ref }}
+        fetch-depth: 100
+
+    - name: Get platformio.ini hash
+      id: platformio_ini_hash
+      run: |
+        PLATFORMIO_INI_HASH=$(md5sum platformio.ini | awk '{ print $1 }')
+        echo "platformio_ini_hash=$PLATFORMIO_INI_HASH" >> $GITHUB_OUTPUT
+
+    - uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.platformio
+        key: ${{ runner.os }}-pio-${{ steps.platformio_ini_hash.outputs.platformio_ini_hash }}
+    
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+
+    - name: Install PlatformIO Core
+      run: pip install --upgrade platformio
+
+    - name: Build base image for lilygo_330
+      run: pio run -e lilygo_330
+
+    - name: Measure base firmware size for lilygo_330
+      id: measure_base_size
+      run: |
+        pio run -e lilygo_330 -t checkprogsize > base_output.txt
+
+    - name: Checkout PR head
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ github.event.pull_request.head.ref }}
+        clean: false
+    
+    - name: Build image for lilygo_330
+      run: pio run -e lilygo_330
+
+    - name: Measure PR firmware size for lilygo_330
+      id: measure_pr_size
+      run: |
+        pio run -e lilygo_330 -t checkprogsize > pr_output.txt
+
+    - name: Compare firmware sizes
+      id: compare_sizes
+      shell: python -u {0}
+      run: |
+        import os
+        import subprocess
+
+        base_output = open("base_output.txt").read()
+        pr_output = open("pr_output.txt").read()
+        base_line = base_output.split("\nFlash:")[1].split("\n")[0]
+        pr_line = pr_output.split("\nFlash:")[1].split("\n")[0]
+        base_used = int(base_line.split("used")[1].split("bytes")[0].strip())
+        base_total = int(base_line.split("from")[1].split("bytes")[0].strip())
+        base_percent = "%.2f"%((base_used / base_total) * 100)
+        pr_used = int(pr_line.split("used")[1].split("bytes")[0].strip())
+        pr_total = int(pr_line.split("from")[1].split("bytes")[0].strip())
+        pr_percent = "%.2f"%((pr_used / pr_total) * 100)
+        size_diff = pr_used - base_used
+        size_diff = f"+{size_diff}" if size_diff >= 0 else str(size_diff)
+
+        print(f"Base firmware size: {base_used} bytes used from {base_total} bytes total")
+        print(f"PR firmware size: {pr_used} bytes used from {pr_total} bytes total")
+        print(f"Size difference: {size_diff} bytes")
+
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"base_firmware_size={base_used}\n")
+            f.write(f"base_firmware_total={base_total}\n")
+            f.write(f"base_firmware_percent={base_percent}\n")
+            f.write(f"pr_firmware_size={pr_used}\n")
+            f.write(f"pr_firmware_total={pr_total}\n")
+            f.write(f"pr_firmware_percent={pr_percent}\n")
+            f.write(f"size_diff={size_diff}\n")
+
+    - name: Report size change in a comment
+      uses: marocchino/sticky-pull-request-comment@v2
+      with:
+        message: |
+          ## Firmware size (LilyGo T-CAN485 build)
+          | | Commit | Size | Max | % | Delta |
+          | - | - | - | - | - | - |
+          | Base | ${{ github.event.pull_request.base.sha }} | ${{ steps.compare_sizes.outputs.base_firmware_size }} | ${{ steps.compare_sizes.outputs.base_firmware_total }} | ${{ steps.compare_sizes.outputs.base_firmware_percent }}% | |
+          | This PR | ${{ github.event.pull_request.head.sha }} | ${{ steps.compare_sizes.outputs.pr_firmware_size }} | ${{ steps.compare_sizes.outputs.pr_firmware_total }} | ${{ steps.compare_sizes.outputs.pr_firmware_percent }}% | ${{ steps.compare_sizes.outputs.size_diff }} bytes |
