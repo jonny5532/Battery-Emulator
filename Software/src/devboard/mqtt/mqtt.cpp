@@ -1,3 +1,5 @@
+#if 0
+
 #include "mqtt.h"
 #include <Arduino.h>
 #include <WiFi.h>
@@ -941,7 +943,7 @@ bool init_mqtt(void) {
   return true;
 }
 
-void mqtt_client_loop(void) {
+void xmqtt_client_loop(void) {
   // Only attempt to publish/reconnect MQTT if Wi-Fi is connected and checkTimmer is elapsed
   if (check_global_timer.elapsed() && WiFi.status() == WL_CONNECTED) {
 
@@ -961,7 +963,9 @@ void mqtt_client_loop(void) {
   }
 }
 
-bool mqtt_publish(const char* topic, const char* mqtt_msg, bool retain) {
+bool xmqtt_publish(const char* topic, const char* mqtt_msg, bool retain) {
   int msg_id = esp_mqtt_client_publish(client, topic, mqtt_msg, strlen(mqtt_msg), MQTT_QOS, retain);
   return msg_id > -1;
 }
+
+#endif

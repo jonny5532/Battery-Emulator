@@ -85,6 +85,11 @@ void init_serial() {
 #endif
 }
 
+bool publish_cell_voltages();
+bool publish_cell_balancing();
+bool publish_buttons_discovery();
+bool publish_common_info();
+
 void connectivity_loop(void*) {
   esp_task_wdt_add(NULL);  // Register this task with WDT
   // Init wifi
@@ -117,6 +122,13 @@ void connectivity_loop(void*) {
     END_TIME_MEASUREMENT_MAX(wifi, datalayer.system.status.wifi_task_10s_max_us);
 
     mqtt_loop_watchdog.panic_if_exceeded_ms(60000, "MQTT task watchdog reset triggered!");
+
+    static uint32_t last_millis = 0;
+    uint32_t now = millis();
+    if (now - last_millis > 1000) {
+      publish_common_info();
+      last_millis = now;
+    }
 
     esp_task_wdt_reset();  // Reset watchdog
     delay(1);

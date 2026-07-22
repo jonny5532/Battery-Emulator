@@ -14,7 +14,7 @@
 #include "../../datalayer/datalayer_extended.h"
 #include "../../devboard/safety/safety.h"
 #include "../../inverter/INVERTERS.h"
-#include "../../lib/bblanchon-ArduinoJson/ArduinoJson.h"
+//#include "../../lib/bblanchon-ArduinoJson/ArduinoJson.h"
 #include "../sdcard/sdcard.h"
 #include "../utils/events.h"
 #include "../utils/led_handler.h"
@@ -901,11 +901,11 @@ void init_ElegantOTA() {
 String get_firmware_info_processor(const String& var) {
   if (var == "X") {
     String content = "";
-    static JsonDocument doc;
+    // static JsonDocument doc;
 
-    doc["hardware"] = esp32hal->name();
-    doc["firmware"] = String(version_number);
-    serializeJson(doc, content);
+    // doc["hardware"] = esp32hal->name();
+    // doc["firmware"] = String(version_number);
+    // serializeJson(doc, content);
     return content;
   }
   return String();
