@@ -42,12 +42,6 @@ jobs:
     - uses: actions/checkout@v7
       name: Checkout code
 
-    - name: Get platformio.ini hash
-      id: platformio_ini_hash
-      run: |
-        PLATFORMIO_INI_HASH=$(md5sum platformio.ini | awk '{ print $1 }')
-        echo "platformio_ini_hash=$PLATFORMIO_INI_HASH" >> $GITHUB_OUTPUT
-
     # Broader cache (just the download files)
     - uses: actions/cache@v6
       with:
@@ -62,7 +56,15 @@ jobs:
         path: |
           ~/.cache/pip
           ~/.platformio
-        key: ${{ runner.os }}-pio-${{ steps.platformio_ini_hash.outputs.platformio_ini_hash }}
+        key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+
+    # Even tighter cache (of the custom SDK build).
+    - uses: actions/cache@v6
+      with:
+        path: |
+          ~/.platformio/packages/framework-arduinoespressif32-libs
+          sdkconfig.defaults
+        key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}-${{ matrix.pio_env }}
 
     - uses: actions/setup-python@v7
       with:
@@ -144,6 +146,18 @@ jobs:
         path: ${{ steps.name.outputs.prefix }}.size.json
         archive: false
         if-no-files-found: error
+
+    - name: Cache reduction
+      if: matrix.pio_env != 'compiler_warning_check'
+      run: |
+        # Remove libs we don't use
+        rm -rf ~/.platformio/packages/framework-arduinoespressif32-libs/esp32c3
+        rm -rf ~/.platformio/packages/framework-arduinoespressif32-libs/esp32c5
+        rm -rf ~/.platformio/packages/framework-arduinoespressif32-libs/esp32c6
+        rm -rf ~/.platformio/packages/framework-arduinoespressif32-libs/esp32h2
+        rm -rf ~/.platformio/packages/framework-arduinoespressif32-libs/esp32p4
+        rm -rf ~/.platformio/packages/framework-arduinoespressif32-libs/esp32p4_es
+        rm -rf ~/.platformio/packages/framework-arduinoespressif32-libs/esp32s2
 
   measure-size:
     needs: build
