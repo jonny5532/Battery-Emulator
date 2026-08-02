@@ -248,6 +248,8 @@ static void register_status_route(AsyncWebServer& server) {
     JsonObject bat = batteryArr.add<JsonObject>();
     bat["temp_min"] = static_cast<float>(datalayer.battery.status.temperature_min_dC) / 10.0f;
     bat["temp_max"] = static_cast<float>(datalayer.battery.status.temperature_max_dC) / 10.0f;
+    // Cell-grid layout hint: number of columns, or 0 when geometry is unknown.
+    bat["columns"] = datalayer.battery.info.cells_per_row;
     JsonArray data = bat["voltages"].to<JsonArray>();
     for (size_t i = 0; i < datalayer.battery.info.number_of_cells && i < MAX_AMOUNT_CELLS; i++) {
       data.add(datalayer.battery.status.cell_voltages_mV[i]);
@@ -256,6 +258,7 @@ static void register_status_route(AsyncWebServer& server) {
       JsonObject bat2 = batteryArr.add<JsonObject>();
       bat2["temp_min"] = static_cast<float>(datalayer.battery2.status.temperature_min_dC) / 10.0f;
       bat2["temp_max"] = static_cast<float>(datalayer.battery2.status.temperature_max_dC) / 10.0f;
+      bat2["columns"] = datalayer.battery2.info.cells_per_row;
       JsonArray data2 = bat2["voltages"].to<JsonArray>();
       for (size_t i = 0; i < datalayer.battery2.info.number_of_cells && i < MAX_AMOUNT_CELLS; i++) {
         data2.add(datalayer.battery2.status.cell_voltages_mV[i]);

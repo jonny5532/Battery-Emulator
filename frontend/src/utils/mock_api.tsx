@@ -213,6 +213,7 @@ const MOCK_DATA: Record<string, any> = {
             {
                 "temp_min": 5,
                 "temp_max": 6,
+                "columns": 8,
                 "voltages": Array.from({ length: 96 }, () => Math.floor(Math.random() * (3720 - 3680 + 1)) + 3680)
             }
         ]
