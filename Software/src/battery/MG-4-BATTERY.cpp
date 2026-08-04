@@ -20,7 +20,24 @@ static const uint16_t MAX_DISCHARGE_POWER_W = 12000;
 static const uint16_t DERATE_DISCHARGE_BELOW_SOC = 1500;  // in 0.01% units
 static const uint16_t DISCHARGE_MIN_SOC = 1000;
 
-static const uint16_t WORKING_CELL_VOLTAGE_HYSTERESIS_MV = 100;
+// Cell-voltage-based power derating (copied from MG-GEN1-BATTERY)
+
+static constexpr int32_t CHARGE_TAPER_MV = 50;
+static constexpr int32_t CHARGE_HYSTERESIS_MV = 10;
+
+static constexpr int32_t DISCHARGE_TAPER_MV = 50;
+static constexpr int32_t DISCHARGE_HYSTERESIS_MV = 25;
+
+// Temperature-based power derating (copied from MG-GEN1-BATTERY)
+
+// Temp thresholds for the two chemistries
+static constexpr int32_t MIN_TEMP_NMC_DC = -100;
+static constexpr int32_t MIN_TEMP_LFP_DC = 0;
+static constexpr int32_t MAX_TEMP_DC = 500;
+// Taper down to 0W at min temp with a linear gradient (affects charge only)
+static constexpr int32_t MIN_WATTS_PER_DC = 280;  // gradient is 14kW per 5dC
+// Taper down to 0W at max temp with a linear gradient (both charge and discharge)
+static constexpr int32_t MAX_WATTS_PER_DC = 140;  // gradient is 14kW per 10dC
 
 // 101 voltage values from 0% to 100%
 static const uint16_t nmc_voltages[] = {
@@ -45,6 +62,95 @@ static const uint16_t lfp_voltages[] = {
 // inline static uint32_t get_working_min_cell_voltage_mV() {
 //   //return datalayer.battery.info.min_cell_voltage_mV + 300;
 // }
+
+/* Clamped linear interpolation: output_min at input_min, output_max at
+   input_max, linear between. Inputs outside the range are clamped. */
+static int32_t battery_linear_taper(int32_t input, int32_t input_min, int32_t input_max, int32_t output_min,
+                                    int32_t output_max) {
+  if (input <= input_min) {
+    return output_min;
+  } else if (input >= input_max) {
+    return output_max;
+  } else {
+    // Linear interpolation
+    return output_min + ((output_max - output_min) * (input - input_min)) / (input_max - input_min);
+  }
+}
+
+/* SoC based charge derating: full max_charge_power up to derate_above_soc (in
+   0.01% units), then a linear taper down to trickle_charge_power at 100%. */
+static uint32_t battery_charge_power_by_soc(uint32_t soc, uint32_t max_charge_power, uint32_t trickle_charge_power,
+                                            uint16_t derate_above_soc) {
+  if (soc <= derate_above_soc) {
+    return max_charge_power;
+  } else if (soc >= 10000) {
+    return trickle_charge_power;
+  } else {
+    // Linear derate
+    return max_charge_power -
+           ((max_charge_power - trickle_charge_power) * (soc - derate_above_soc)) / (10000 - derate_above_soc);
+  }
+}
+
+/* SoC based discharge derating: full max_discharge_power down to
+   derate_below_soc (in 0.01% units), then a linear taper down to 0 at min_soc. */
+static uint32_t battery_discharge_power_by_soc(uint32_t soc, uint32_t max_discharge_power, uint16_t min_soc,
+                                               uint16_t derate_below_soc) {
+  if (soc >= derate_below_soc) {
+    return max_discharge_power;
+  } else if (soc <= min_soc) {
+    return 0;
+  } else {
+    // Linear derate
+    return max_discharge_power - ((max_discharge_power * (derate_below_soc - soc)) / (derate_below_soc - min_soc));
+  }
+}
+
+/* Cell voltage based charge derating with hysteresis. Tapers linearly to 0 as
+   cell_max_mV rises from (working_max_mV - taper_mV) to working_max_mV. Once
+   tripped at working_max_mV the limit stays 0 until cell_max_mV drops back to
+   working_max_mV - recover_mV. The tripped flag persists between calls. */
+static int32_t battery_charge_power_by_cell_max(uint32_t cell_max_mV, uint32_t working_max_mV, uint32_t taper_mV,
+                                                uint32_t recover_mV, int32_t max_charge_power_W, bool* tripped) {
+  if (*tripped && cell_max_mV <= working_max_mV - recover_mV) {
+    *tripped = false;
+  } else if (!*tripped && cell_max_mV >= working_max_mV) {
+    *tripped = true;
+  }
+  int32_t power = battery_linear_taper((int32_t)cell_max_mV, (int32_t)(working_max_mV - taper_mV),
+                                       (int32_t)working_max_mV, max_charge_power_W, 0);
+  return *tripped ? 0 : power;
+}
+
+/* Cell voltage based discharge derating with hysteresis. Tapers linearly to 0
+   as cell_min_mV falls from (working_min_mV + taper_mV) to working_min_mV.
+   Once tripped at working_min_mV the limit stays 0 until cell_min_mV recovers
+   to working_min_mV + recover_mV. The tripped flag persists between calls. */
+static int32_t battery_discharge_power_by_cell_min(uint32_t cell_min_mV, uint32_t working_min_mV, uint32_t taper_mV,
+                                                   uint32_t recover_mV, int32_t max_discharge_power_W, bool* tripped) {
+  if (*tripped && cell_min_mV >= working_min_mV + recover_mV) {
+    *tripped = false;
+  } else if (!*tripped && cell_min_mV <= working_min_mV) {
+    *tripped = true;
+  }
+  int32_t power = battery_linear_taper((int32_t)cell_min_mV, (int32_t)working_min_mV,
+                                       (int32_t)(working_min_mV + taper_mV), 0, max_discharge_power_W);
+  return *tripped ? 0 : power;
+}
+
+/* Temperature based derating, low side: power scales linearly from 0 at
+   min_temp_dC upwards at watts_per_dC per degree C. Below min_temp_dC the value
+   goes negative (meaning "no power allowed" once intersected). */
+static int32_t battery_power_by_low_temp(int32_t temp_min_dC, int32_t min_temp_dC, int32_t watts_per_dC) {
+  return (temp_min_dC - min_temp_dC) * watts_per_dC;
+}
+
+/* Temperature based derating, high side: power scales linearly from 0 at
+   max_temp_dC downwards at watts_per_dC per degree C. Above max_temp_dC the
+   value goes negative (meaning "no power allowed" once intersected). */
+static int32_t battery_power_by_high_temp(int32_t temp_max_dC, int32_t max_temp_dC, int32_t watts_per_dC) {
+  return (max_temp_dC - temp_max_dC) * watts_per_dC;
+}
 
 static uint16_t ocv_to_soc(uint16_t voltage_mV) {
   const uint16_t* voltages;
@@ -96,57 +202,80 @@ static uint16_t soc_to_ocv(uint16_t soc_in_centipercent) {
 }
 
 uint32_t Mg4Battery::calculate_max_discharge_power_W() {
-  uint32_t working_min = working_cell_min_mV + (below_working_min ? WORKING_CELL_VOLTAGE_HYSTERESIS_MV : 0);
+  int32_t max_discharge_power_W = MAX_DISCHARGE_POWER_W;
 
-  if (cell_voltage_freshness <= 0) {
-    return 0;
+  // Cellvoltage-based power derating. Taper linearly to zero over the last
+  // DISCHARGE_TAPER_MV above working_cell_min_mV, then latch at zero (with
+  // hysteresis) until the cell voltage recovers past the trip threshold.
+  // Skipped if we have no fresh cell voltages (e.g. non-FD bus).
+  if (cell_voltage_freshness > 0) {
+    const int32_t cell_power_W = battery_discharge_power_by_cell_min(
+        datalayer.battery.status.cell_min_voltage_mV, working_cell_min_mV, DISCHARGE_TAPER_MV, DISCHARGE_HYSTERESIS_MV,
+        MAX_DISCHARGE_POWER_W, &voltageAtCellMin);
+    if (cell_power_W < max_discharge_power_W) {
+      max_discharge_power_W = cell_power_W;
+    }
   }
 
-  if (datalayer.battery.status.cell_min_voltage_mV < working_min) {
-    // Below working min, stop discharge
-    below_working_min = true;
-    return 0;
-  } else if (datalayer.battery.status.cell_min_voltage_mV > working_min) {
-    // Above working min, discharge allowed
-    below_working_min = false;
+  // Temperature-based power derating: high temperature limits both charge and
+  // discharge.
+  const int32_t temp_high_power_W =
+      battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_WATTS_PER_DC);
+  if (temp_high_power_W < max_discharge_power_W) {
+    max_discharge_power_W = temp_high_power_W;
   }
 
-  return MAX_DISCHARGE_POWER_W;
+  // SoC-based power derating: full power down to DERATE_DISCHARGE_BELOW_SOC,
+  // then a linear taper to zero at DISCHARGE_MIN_SOC.
+  const int32_t soc_power_W = battery_discharge_power_by_soc(datalayer.battery.status.real_soc, MAX_DISCHARGE_POWER_W,
+                                                             DISCHARGE_MIN_SOC, DERATE_DISCHARGE_BELOW_SOC);
+  if (soc_power_W < max_discharge_power_W) {
+    max_discharge_power_W = soc_power_W;
+  }
+
+  return max_discharge_power_W > 0 ? max_discharge_power_W : 0;
 }
 
 uint32_t Mg4Battery::calculate_max_charge_power_W() {
-  if (cell_voltage_freshness <= 0) {
-    return 0;
-  }
+  int32_t max_charge_power_W = MAX_CHARGE_POWER_W;
 
-  uint32_t working_max = working_cell_max_mV;  //get_working_max_cell_voltage_mV();
-
-  if (datalayer.battery.status.cell_max_voltage_mV >= working_max) {
-    return 0;
-  }
-
-  int32_t charge_power_W = MAX_CHARGE_POWER_W;
-
-  if (datalayer.battery.status.cell_max_voltage_mV > (working_max - 50)) {
-    // Taper from MAX down to 0 over the last 50mV
-    int32_t mV_above_taper_start = datalayer.battery.status.cell_max_voltage_mV - (working_max - 50);
-    int32_t power = (MAX_CHARGE_POWER_W * (50 - mV_above_taper_start)) / 50;
-    if (power >= 0 && power < charge_power_W) {
-      charge_power_W = power;
+  // Cellvoltage-based power derating. Taper linearly to zero over the last
+  // CHARGE_TAPER_MV below working_cell_max_mV, then latch at zero (with
+  // hysteresis) until the cell voltage recovers past the trip threshold.
+  // Skipped if we have no fresh cell voltages (e.g. non-FD bus).
+  if (cell_voltage_freshness > 0) {
+    const int32_t cell_power_W =
+        battery_charge_power_by_cell_max(datalayer.battery.status.cell_max_voltage_mV, working_cell_max_mV,
+                                         CHARGE_TAPER_MV, CHARGE_HYSTERESIS_MV, MAX_CHARGE_POWER_W, &voltageAtCellMax);
+    if (cell_power_W < max_charge_power_W) {
+      max_charge_power_W = cell_power_W;
     }
   }
 
-  if (datalayer.battery.status.real_soc > 9900) {
-    // Taper from current power down to CHARGE_TRICKLE_POWER_W between 99% and 100%
-    int32_t soc_above_99 = datalayer.battery.status.real_soc - 9900;
-    int32_t power =
-        CHARGE_TRICKLE_POWER_W + ((MAX_CHARGE_POWER_W - CHARGE_TRICKLE_POWER_W) * (100 - soc_above_99 / 100)) / 100;
-    if (power >= 0 && power < charge_power_W) {
-      charge_power_W = power;
-    }
+  // Temperature-based power derating: high temperature limits both charge and
+  // discharge, low temperature limits charge only.
+  const int32_t MIN_TEMP_DC =
+      datalayer.battery.info.chemistry == battery_chemistry_enum::LFP ? MIN_TEMP_LFP_DC : MIN_TEMP_NMC_DC;
+  const int32_t temp_high_power_W =
+      battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_WATTS_PER_DC);
+  const int32_t temp_low_power_W =
+      battery_power_by_low_temp(datalayer.battery.status.temperature_min_dC, MIN_TEMP_DC, MIN_WATTS_PER_DC);
+  if (temp_high_power_W < max_charge_power_W) {
+    max_charge_power_W = temp_high_power_W;
+  }
+  if (temp_low_power_W < max_charge_power_W) {
+    max_charge_power_W = temp_low_power_W;
   }
 
-  return charge_power_W;
+  // SoC-based power derating: full power up to DERATE_CHARGE_ABOVE_SOC, then a
+  // linear taper down to CHARGE_TRICKLE_POWER_W at 100%.
+  const int32_t soc_power_W = battery_charge_power_by_soc(datalayer.battery.status.real_soc, MAX_CHARGE_POWER_W,
+                                                          CHARGE_TRICKLE_POWER_W, DERATE_CHARGE_ABOVE_SOC);
+  if (soc_power_W < max_charge_power_W) {
+    max_charge_power_W = soc_power_W;
+  }
+
+  return max_charge_power_W > 0 ? max_charge_power_W : 0;
 }
 
 // uint32_t Mg4Battery::update_pack_max_voltage_limits() {
@@ -182,12 +311,6 @@ static void update_soc(uint16_t soc_in_centipercent) {
   } else {
     datalayer.battery.status.remaining_capacity_Wh = 0;
   }
-
-  // datalayer.battery.status.max_charge_power_W = taper_charge_power_linear(
-  //     datalayer.battery.status.real_soc, MAX_CHARGE_POWER_W, CHARGE_TRICKLE_POWER_W, DERATE_CHARGE_ABOVE_SOC);
-
-  // datalayer.battery.status.max_discharge_power_W = taper_discharge_power_linear(
-  //     datalayer.battery.status.real_soc, MAX_DISCHARGE_POWER_W, DISCHARGE_MIN_SOC, DERATE_DISCHARGE_BELOW_SOC);
 }
 
 void Mg4Battery::
@@ -290,26 +413,10 @@ void Mg4Battery::
       datalayer.battery.status.max_charge_power_W = 0;
       datalayer.battery.status.max_discharge_power_W = 0;
     } else {
-      datalayer.battery.status.max_charge_power_W = taper_charge_power_linear(
-          datalayer.battery.status.real_soc, MAX_CHARGE_POWER_W, CHARGE_TRICKLE_POWER_W, DERATE_CHARGE_ABOVE_SOC);
-
-      datalayer.battery.status.max_discharge_power_W = taper_discharge_power_linear(
-          datalayer.battery.status.real_soc, MAX_DISCHARGE_POWER_W, DISCHARGE_MIN_SOC, DERATE_DISCHARGE_BELOW_SOC);
+      datalayer.battery.status.max_charge_power_W = calculate_max_charge_power_W();
+      datalayer.battery.status.max_discharge_power_W = calculate_max_discharge_power_W();
     }
   }
-
-  // Taper charge/discharge power at high/low SoC
-  // if (datalayer.battery.status.real_soc > 9000) {
-  //   datalayer.battery.status.max_charge_power_W =
-  //       max_power_W * (1.0f - ((datalayer.battery.status.real_soc - 9000) / 1000.0f));
-  // } else {
-  //   datalayer.battery.status.max_charge_power_W = max_power_W;
-  // }
-  // if (datalayer.battery.status.real_soc < 1000) {
-  //   datalayer.battery.status.max_discharge_power_W = max_power_W * (datalayer.battery.status.real_soc / 1000.0f);
-  // } else {
-  //   datalayer.battery.status.max_discharge_power_W = max_power_W;
-  // }
 }
 
 void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
@@ -638,19 +745,19 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   // logging.printf("Nonvolatile cookie set to %lu\n", *nonvolatile_cookie);
 }
 
-void Mg4Battery::action(uint32_t action, uint32_t value) {
-  if (action == 0x47) {
-    uint32_t bit = value & 0xFF;
-    uint32_t state = (value >> 8) & 0xFF;
-    if (state) {
-      // set bit
-      MG4_047.data.u8[bit / 8] |= (1 << (bit % 8));
-    } else {
-      // clear bit
-      MG4_047.data.u8[bit / 8] &= ~(1 << (bit % 8));
-    }
-  }
-}
+// void Mg4Battery::action(uint32_t action, uint32_t value) {
+//   if (action == 0x47) {
+//     uint32_t bit = value & 0xFF;
+//     uint32_t state = (value >> 8) & 0xFF;
+//     if (state) {
+//       // set bit
+//       MG4_047.data.u8[bit / 8] |= (1 << (bit % 8));
+//     } else {
+//       // clear bit
+//       MG4_047.data.u8[bit / 8] &= ~(1 << (bit % 8));
+//     }
+//   }
+// }
 
 // Mg4BatteryHtmlRenderer::Mg4BatteryHtmlRenderer(Mg4Battery* battery) : HtmlRenderer(battery) {
 //   this->battery = battery;

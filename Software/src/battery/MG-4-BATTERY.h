@@ -22,7 +22,6 @@ class Mg4Battery : public UdsCanBattery {
   virtual void transmit_can(unsigned long currentMillis);
   virtual uint32_t calculate_max_discharge_power_W();
   virtual uint32_t calculate_max_charge_power_W();
-  virtual void action(uint32_t action_id, uint32_t value) override;
   //virtual uint32_t calculate_pack_voltage_limit_max_dV();
 
   static constexpr const char* Name = "MG4 battery";
@@ -38,7 +37,9 @@ class Mg4Battery : public UdsCanBattery {
   int32_t working_cell_min_mV = 0;
   int32_t working_cell_recharge_threshold_mV = 0;
   int32_t working_cell_max_mV = 0;
-  bool below_working_min = false;
+  // Latched flags for cell-voltage hysteresis (persist between update_values calls)
+  bool voltageAtCellMax = false;
+  bool voltageAtCellMin = false;
   int32_t cell_voltage_freshness = 0;
   int32_t soc_freshness = 0;
 
