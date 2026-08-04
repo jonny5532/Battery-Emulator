@@ -1,6 +1,7 @@
 #include "../battery/Battery.h"
 #include "../devboard/hal/hal.h"
 #include "../inverter/INVERTERS.h"
+#include "BATTERY-SECOND-INTERFACE.h"
 #include "BMW-SBOX.h"
 #include "QNHCK2-16.h"
 #include "Shunt.h"
