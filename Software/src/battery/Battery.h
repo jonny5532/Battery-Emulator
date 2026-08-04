@@ -64,6 +64,7 @@ enum class BatteryType {
   GrowattLv = 57,
   StellantisProOne = 58,
   BYDBatteryBoxPremium = 59,
+  Mg4 = 96, // FIXME: order properly later
   Highest
 };
 
