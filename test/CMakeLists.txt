@@ -76,6 +76,7 @@ add_executable(tests
     battery_alive_tests.cpp
     battery/NissanLeafTest.cpp
     battery/foxess_tests.cpp 
+    battery/Mg4BatteryTest.cpp
     battery/still_alive_tests.cpp
     battery/VolvoSPATest.cpp
     battery/UdsCanBatteryTest.cpp
@@ -135,6 +136,7 @@ add_executable(tests
     ../Software/src/battery/KIA-HYUNDAI-64-BATTERY.cpp
     ../Software/src/battery/KIA-HYUNDAI-HYBRID-BATTERY.cpp
     ../Software/src/battery/MEB-BATTERY.cpp
+    ../Software/src/battery/MG-4-BATTERY.cpp
     ../Software/src/battery/MG-5-BATTERY.cpp
     ../Software/src/battery/MG-GEN1-BATTERY.cpp
     ../Software/src/battery/NISSAN-LEAF-BATTERY.cpp

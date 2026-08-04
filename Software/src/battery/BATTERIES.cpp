@@ -34,6 +34,7 @@
 #include "KIA-HYUNDAI-64-BATTERY.h"
 #include "KIA-HYUNDAI-HYBRID-BATTERY.h"
 #include "MEB-BATTERY.h"
+#include "MG-4-BATTERY.h"
 #include "MG-5-BATTERY.h"
 #include "MG-GEN1-BATTERY.h"
 #include "NISSAN-LEAF-BATTERY.h"
@@ -149,6 +150,8 @@ const char* name_for_battery_type(BatteryType type) {
       return KiaHyundaiHybridBattery::Name;
     case BatteryType::Meb:
       return MebBattery::Name;
+    case BatteryType::Mg4:
+      return Mg4Battery::Name;
 #ifndef SMALL_FLASH_DEVICE
     case BatteryType::Mg5:
       return Mg5Battery::Name;
@@ -274,6 +277,8 @@ Battery* create_battery(BatteryType type) {
       return new KiaHyundaiHybridBattery();
     case BatteryType::Meb:
       return new MebBattery();
+    case BatteryType::Mg4:
+      return new Mg4Battery();
 #ifndef SMALL_FLASH_DEVICE
     case BatteryType::Mg5:
       return new Mg5Battery();
