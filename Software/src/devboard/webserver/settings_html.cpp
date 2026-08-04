@@ -1459,7 +1459,8 @@ const char* getCANInterfaceName(CAN_Interface interface) {
     form[data-shunttype="3"] .if-ctclamp { display: contents;}
     
 
-    form .if-cbms { display: none; }
+    form .if-cbms,
+    form .if-cv { display: none; }
     form[data-battery="6"] .if-cbms,
     form[data-battery="11"] .if-cbms,
     form[data-battery="22"] .if-cbms,
@@ -1469,7 +1470,8 @@ const char* getCANInterfaceName(CAN_Interface interface) {
     form[data-battery="41"] .if-cbms,
     form[data-battery="48"] .if-cbms,
     form[data-battery="49"] .if-cbms,
-    form[data-battery="51"] .if-cbms {
+    form[data-battery="51"] .if-cbms,
+    form[data-battery="55"] .if-cv {
       display: contents;
     }
 
@@ -1518,7 +1520,8 @@ const char* getCANInterfaceName(CAN_Interface interface) {
     form[data-battery="16"] .if-socestimated,
     form[data-battery="26"] .if-socestimated,
     form[data-battery="41"] .if-socestimated,
-    form[data-battery="42"] .if-socestimated {
+    form[data-battery="42"] .if-socestimated,
+    form[data-battery="55"] .if-socestimated {
       display: contents;
     }
 
@@ -1707,7 +1710,7 @@ const char* getCANInterfaceName(CAN_Interface interface) {
   </script>
 
 <div style='background-color: #404E47; padding: 10px; margin-bottom: 10px; border-radius: 50px'>
-        <form action='saveSettings' method='post' onsubmit='return validateWebAuthPassword() && confirmBmsRestart()'>
+        <form action='saveSettings' method='post' onsubmit='handleSubmit(); return validateWebAuthPassword() && confirmBmsRestart()'>
 
         <div style='grid-column: span 2; text-align: center; padding-top: 10px;' class="%SAVEDCLASS%">
           <p>Settings saved. Reboot to take the new settings into use.<p> <button type='button' onclick='askReboot()'>Reboot</button>
@@ -1937,7 +1940,8 @@ const char* getCANInterfaceName(CAN_Interface interface) {
         <label>Battery min design voltage (V): </label>
         <input name='BATTPVMIN' pattern="[0-9]+(\.[0-9]+)?" type='text' value='%BATTPVMIN%' 
         title="Minimum safe voltage for the entire battery pack in volts. Further discharge not possible below this limit." />
-
+        </div>
+        <div class="if-cbms if-cv">
         <label>Cell max design voltage (mV): </label>
         <input name='BATTCVMAX' pattern="[0-9]+" type='text' value='%BATTCVMAX%' 
         title="Maximum voltage per individual cell in millivolts. Charging stops if one cell reaches this voltage." />
@@ -2395,6 +2399,13 @@ const char* getCANInterfaceName(CAN_Interface interface) {
         </div>
 
         </form>
+        <script>
+        function handleSubmit() {
+            document.querySelectorAll('input,select').forEach(input => {
+              input.disabled = input.offsetParent === null && input.type !== 'hidden';
+            });
+        }
+        </script>
     </div>
 
     <div style='background-color: #333; padding: 10px; margin-bottom: 10px; border-radius: 50px'>
