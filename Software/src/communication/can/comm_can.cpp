@@ -317,6 +317,12 @@ void transmit_can_frame_to_interface(const CAN_frame* tx_frame, CAN_Interface in
         datalayer.system.info.can_native_send_fail = true;
         break;
       }
+
+      if (tx_frame->FD) {
+        //Native does not support CAN-FD, ignore
+        break;
+      }
+
       CANMessage frame;
       frame.id = tx_frame->ID;
       frame.ext = tx_frame->ext_ID;

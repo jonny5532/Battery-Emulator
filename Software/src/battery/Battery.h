@@ -62,6 +62,7 @@ enum class BatteryType {
   VAGMqbEvo = 55,
   Akasol = 56,
   GrowattLv = 57,
+  Mg4 = 96, // FIXME: order properly later
   Highest
 };
 
