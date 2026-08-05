@@ -11,6 +11,7 @@ class Mg4Battery : public UdsCanBattery {
   virtual void transmit_can(unsigned long currentMillis);
   virtual uint32_t calculate_max_discharge_power_W();
   virtual uint32_t calculate_max_charge_power_W();
+  virtual void action(uint32_t action_id, uint32_t value) override;
   //virtual uint32_t calculate_pack_voltage_limit_max_dV();
 
   static constexpr const char* Name = "MG4 battery";
