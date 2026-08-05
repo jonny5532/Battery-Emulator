@@ -2,17 +2,6 @@
 
 #include "UdsCanBattery.h"
 
-class Mg4Battery;
-
-class Mg4BatteryHtmlRenderer : public BatteryHtmlRenderer {
- public:
-  Mg4BatteryHtmlRenderer(Mg4Battery* battery) : battery(battery) {}
-  virtual String get_status_html();
-
- private:
-  Mg4Battery* battery;
-};
-
 class Mg4Battery : public UdsCanBattery {
  public:
   virtual void setup(void);
@@ -26,12 +15,10 @@ class Mg4Battery : public UdsCanBattery {
 
   static constexpr const char* Name = "MG4 battery";
 
-  BatteryHtmlRenderer& get_status_renderer() { return *renderer; }
-
-  uint8_t get_message_byte(uint8_t index) { return MG4_047.data.u8[index]; }
+  String get_uds_info_html() override;
+  const char* get_dtc_json_filename() override { return "mg_dtc.json"; }
 
  private:
-  Mg4BatteryHtmlRenderer* renderer;
   static const uint16_t MAX_CELL_DEVIATION_MV = 150;
 
   int32_t working_cell_min_mV = 0;
