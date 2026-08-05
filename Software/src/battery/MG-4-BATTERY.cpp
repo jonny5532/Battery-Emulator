@@ -748,23 +748,19 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   // logging.printf("Nonvolatile cookie set to %lu\n", *nonvolatile_cookie);
 }
 
-// void Mg4Battery::action(uint32_t action, uint32_t value) {
-//   if (action == 0x47) {
-//     uint32_t bit = value & 0xFF;
-//     uint32_t state = (value >> 8) & 0xFF;
-//     if (state) {
-//       // set bit
-//       MG4_047.data.u8[bit / 8] |= (1 << (bit % 8));
-//     } else {
-//       // clear bit
-//       MG4_047.data.u8[bit / 8] &= ~(1 << (bit % 8));
-//     }
-//   }
-// }
-
-// Mg4BatteryHtmlRenderer::Mg4BatteryHtmlRenderer(Mg4Battery* battery) : HtmlRenderer(battery) {
-//   this->battery = battery;
-// }
+void Mg4Battery::action(uint32_t action, uint32_t value) {
+  if (action == 0x47) {
+    uint32_t bit = value & 0xFF;
+    uint32_t state = (value >> 8) & 0xFF;
+    if (state) {
+      // set bit
+      MG4_047.data.u8[bit / 8] |= (1 << (bit % 8));
+    } else {
+      // clear bit
+      MG4_047.data.u8[bit / 8] &= ~(1 << (bit % 8));
+    }
+  }
+}
 
 String Mg4Battery::get_uds_info_html() {
   String html = "<h3>MG4 0x047 bits</h3>";
