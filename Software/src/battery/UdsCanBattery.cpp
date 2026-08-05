@@ -203,6 +203,7 @@ void UdsCanBattery::on_isotp_can_tx(uint32_t can_id, const uint8_t* can_data, ui
   CAN_frame frame = {};
   frame.ID = uds_address;  // Ignore the can_id from the ISO-TP layer, use our own.
   frame.DLC = can_dlc;
+  frame.FD = fd_uds_requests;
   memcpy(frame.data.u8, can_data, can_dlc);
   transmit_can_frame(&frame);
 }
