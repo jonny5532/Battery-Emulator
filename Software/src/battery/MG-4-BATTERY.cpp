@@ -12,13 +12,13 @@
 #include "../devboard/utils/logging.h"
 #include "BATTERY-SECOND-INTERFACE.h"
 
-static const uint16_t MAX_CHARGE_POWER_W = 12000;
-static const uint16_t CHARGE_TRICKLE_POWER_W = 20;
-static const uint16_t DERATE_CHARGE_ABOVE_SOC = 9000;  // in 0.01% units
+static const uint16_t MAX_CHARGE_POWER_W = 14000;
+static const uint16_t CHARGE_TRICKLE_POWER_W = 100;    // The cell voltage limits will override
+static const uint16_t DERATE_CHARGE_ABOVE_SOC = 9500;  // in 0.01% units
 
-static const uint16_t MAX_DISCHARGE_POWER_W = 12000;
-static const uint16_t DERATE_DISCHARGE_BELOW_SOC = 1500;  // in 0.01% units
-static const uint16_t DISCHARGE_MIN_SOC = 1000;
+static const uint16_t MAX_DISCHARGE_POWER_W = 14000;
+static const uint16_t DERATE_DISCHARGE_BELOW_SOC = 500;  // in 0.01% units
+static const uint16_t DISCHARGE_MIN_SOC = 0;
 
 // Cell-voltage-based power derating (copied from MG-GEN1-BATTERY)
 
