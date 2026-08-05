@@ -682,8 +682,6 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   set_pid_scan_list(POLL_LIST, sizeof(POLL_LIST) / sizeof(POLL_LIST[0]));
   dtc = &datalayer.battery.dtc;
 
-  renderer = new Mg4BatteryHtmlRenderer(this);
-
   strncpy(datalayer.system.info.battery_protocol, Name, 63);
   datalayer.system.info.battery_protocol[63] = '\0';
   datalayer.system.status.battery_allows_contactor_closing = true;
@@ -768,12 +766,12 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
 //   this->battery = battery;
 // }
 
-String Mg4BatteryHtmlRenderer::get_status_html() {
+String Mg4Battery::get_uds_info_html() {
   String html = "<h3>MG4 0x047 bits</h3>";
   html += "<div style='display: flex; gap: 10px; flex-wrap: wrap;'>";
 
   for (int b = 2; b < 8; b++) {
-    uint8_t byteValue = battery->get_message_byte(b);
+    uint8_t byteValue = MG4_047.data.u8[b];
     html += "<div style='border: 1px solid #ccc; padding: 5px;'>";
     html += "Byte " + String(b) + ": 0x" + (byteValue < 16 ? "0" : "") + String(byteValue, HEX) + "<br>";
     for (int i = 7; i >= 0; i--) {
@@ -789,9 +787,6 @@ String Mg4BatteryHtmlRenderer::get_status_html() {
   }
 
   html += "</div>";
-
-  auto& dtc = datalayer.battery.dtc;
-  html += BatteryHtmlRenderer::render_dtc_section_html(dtc, "mg_dtc.json", true);
 
   return html;
 }
