@@ -190,6 +190,8 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   uint16_t uds_response_address = 0;
   // The address we are currently receiving a UDS response from.
   uint16_t uds_current_response_address = 0;
+  // Whether UDS requests are sent as FD frames
+  bool fd_uds_requests = false;
 
  private:
   // True if the current pause blocks new sends of the given priority.
