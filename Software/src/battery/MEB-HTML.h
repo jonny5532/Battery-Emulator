@@ -5,6 +5,12 @@
 #include "../datalayer/datalayer_extended.h"
 #include "../devboard/webserver/BatteryHtmlRenderer.h"
 
+template <typename T>
+inline String& operator<<(String& str, const T& value) {
+  str += value;
+  return str;
+}
+
 class MebHtmlRenderer : public BatteryHtmlRenderer {
  public:
   String get_status_html() {
@@ -80,8 +86,8 @@ class MebHtmlRenderer : public BatteryHtmlRenderer {
       default:
         content += "?";
     }
-    content += String("</h4><h4>Charging: ") + (datalayer_extended.meb.charging_active ? "active" : "not active");
-    content += String("</h4><h4>Balancing: ");
+    content << "</h4><h4>Charging: " << (datalayer_extended.meb.charging_active ? "active" : "not active");
+    content << "</h4><h4>Balancing: ";
     switch (datalayer_extended.meb.balancing_active) {
       case 0:
         content += "init";
@@ -95,9 +101,8 @@ class MebHtmlRenderer : public BatteryHtmlRenderer {
       default:
         content += "?";
     }
-    content +=
-        String("</h4><h4>Slow charging: ") + (datalayer_extended.meb.balancing_request ? "requested" : "not requested");
-    content += "</h4><h4>Diagnostic: ";
+    content << "</h4><h4>Slow charging: " << (datalayer_extended.meb.balancing_request ? "requested" : "not requested");
+    content << "</h4><h4>Diagnostic: ";
     switch (datalayer_extended.meb.battery_diagnostic) {
       case 0:
         content += "Init";
@@ -132,7 +137,7 @@ class MebHtmlRenderer : public BatteryHtmlRenderer {
         content += "Fault";
         break;
       default:
-        content += "? " + String(datalayer_extended.meb.status_HV_PTC_line);
+        content << "? " << datalayer_extended.meb.status_HV_PTC_line;
     }
     content += "</h4>";
     content += datalayer_extended.meb.BMS_fault_performance ? "<h4>BMS fault performance: Active!</h4>"
@@ -178,8 +183,8 @@ class MebHtmlRenderer : public BatteryHtmlRenderer {
       default:
         content += "?";
     }
-    content += "</h4><h4>Interm. Voltage (" + String(datalayer_extended.meb.BMS_voltage_intermediate_dV / 10.0f, 1) +
-               "V) status: ";
+    content << "</h4><h4>Interm. Voltage (" << String(datalayer_extended.meb.BMS_voltage_intermediate_dV / 10.0f, 1)
+            << "V) status: ";
     switch (datalayer_extended.meb.BMS_status_voltage_free) {
       case 0:
         content += "Init";
@@ -225,68 +230,67 @@ class MebHtmlRenderer : public BatteryHtmlRenderer {
       default:
         content += "?";
     }
-    content += "</h4><h4>BMS voltage: " + String(datalayer_extended.meb.BMS_voltage_dV / 10.0f, 1) + "</h4>";
+    content << "</h4><h4>BMS voltage: " << String(datalayer_extended.meb.BMS_voltage_dV / 10.0f, 1) << "</h4>";
     content += datalayer_extended.meb.BMS_OBD_MIL ? "<h4>OBD MIL: ON!</h4>" : "<h4>OBD MIL: Off</h4>";
     content +=
         datalayer_extended.meb.BMS_error_lamp_req ? "<h4>Red error lamp: ON!</h4>" : "<h4>Red error lamp: Off</h4>";
     content += datalayer_extended.meb.BMS_warning_lamp_req ? "<h4>Yellow warning lamp: ON!</h4>"
                                                            : "<h4>Yellow warning lamp: Off</h4>";
-    content += "<h4>Isolation resistance: " + String(datalayer_extended.meb.isolation_resistance) + " kOhm</h4>";
+    content << "<h4>Isolation resistance: " << datalayer_extended.meb.isolation_resistance << " kOhm</h4>";
     content +=
         datalayer_extended.meb.battery_heating ? "<h4>Battery heating: Active!</h4>" : "<h4>Battery heating: Off</h4>";
     const char* rt_enum[] = {"No", "Error level 1", "Error level 2", "Error level 3"};
-    content += "<h4>Overcurrent: " + String(rt_enum[datalayer_extended.meb.rt_overcurrent & 0x03]) + "</h4>";
-    content += "<h4>CAN fault: " + String(rt_enum[datalayer_extended.meb.rt_CAN_fault & 0x03]) + "</h4>";
-    content += "<h4>Overcharged: " + String(rt_enum[datalayer_extended.meb.rt_overcharge & 0x03]) + "</h4>";
-    content += "<h4>SOC too high: " + String(rt_enum[datalayer_extended.meb.rt_SOC_high & 0x03]) + "</h4>";
-    content += "<h4>SOC too low: " + String(rt_enum[datalayer_extended.meb.rt_SOC_low & 0x03]) + "</h4>";
-    content += "<h4>SOC jumping: " + String(rt_enum[datalayer_extended.meb.rt_SOC_jumping & 0x03]) + "</h4>";
-    content += "<h4>Temp difference: " + String(rt_enum[datalayer_extended.meb.rt_temp_difference & 0x03]) + "</h4>";
-    content += "<h4>Cell overtemp: " + String(rt_enum[datalayer_extended.meb.rt_cell_overtemp & 0x03]) + "</h4>";
-    content += "<h4>Cell undertemp: " + String(rt_enum[datalayer_extended.meb.rt_cell_undertemp & 0x03]) + "</h4>";
-    content +=
-        "<h4>Battery overvoltage: " + String(rt_enum[datalayer_extended.meb.rt_battery_overvolt & 0x03]) + "</h4>";
-    content +=
-        "<h4>Battery undervoltage: " + String(rt_enum[datalayer_extended.meb.rt_battery_undervol & 0x03]) + "</h4>";
-    content += "<h4>Cell overvoltage: " + String(rt_enum[datalayer_extended.meb.rt_cell_overvolt & 0x03]) + "</h4>";
-    content += "<h4>Cell undervoltage: " + String(rt_enum[datalayer_extended.meb.rt_cell_undervol & 0x03]) + "</h4>";
-    content += "<h4>Cell imbalance: " + String(rt_enum[datalayer_extended.meb.rt_cell_imbalance & 0x03]) + "</h4>";
-    content +=
-        "<h4>Battery unathorized: " + String(rt_enum[datalayer_extended.meb.rt_battery_unathorized & 0x03]) + "</h4>";
-    content += "<h4>Battery temperature: ";
+    // clang-format off
+    content << "<h4>Overcurrent: " << rt_enum[datalayer_extended.meb.rt_overcurrent & 0x03] << "</h4>"
+               "<h4>CAN fault: " << rt_enum[datalayer_extended.meb.rt_CAN_fault & 0x03] << "</h4>"
+               "<h4>Overcharged: " << rt_enum[datalayer_extended.meb.rt_overcharge & 0x03] << "</h4>"
+               "<h4>SOC too high: " << rt_enum[datalayer_extended.meb.rt_SOC_high & 0x03] << "</h4>"
+               "<h4>SOC too low: " << rt_enum[datalayer_extended.meb.rt_SOC_low & 0x03] << "</h4>"
+               "<h4>SOC jumping: " << rt_enum[datalayer_extended.meb.rt_SOC_jumping & 0x03] << "</h4>"
+               "<h4>Temp difference: " << rt_enum[datalayer_extended.meb.rt_temp_difference & 0x03] << "</h4>"
+               "<h4>Cell overtemp: " << rt_enum[datalayer_extended.meb.rt_cell_overtemp & 0x03] << "</h4>"
+               "<h4>Cell undertemp: " << rt_enum[datalayer_extended.meb.rt_cell_undertemp & 0x03] << "</h4>"
+               "<h4>Battery overvoltage: " << rt_enum[datalayer_extended.meb.rt_battery_overvolt & 0x03] << "</h4>"
+               "<h4>Battery undervoltage: " << rt_enum[datalayer_extended.meb.rt_battery_undervol & 0x03] << "</h4>"
+               "<h4>Cell overvoltage: " << rt_enum[datalayer_extended.meb.rt_cell_overvolt & 0x03] << "</h4>"
+               "<h4>Cell undervoltage: " << rt_enum[datalayer_extended.meb.rt_cell_undervol & 0x03] << "</h4>"
+               "<h4>Cell imbalance: " << rt_enum[datalayer_extended.meb.rt_cell_imbalance & 0x03] << "</h4>"
+               "<h4>Battery unathorized: " << rt_enum[datalayer_extended.meb.rt_battery_unathorized & 0x03] << "</h4>"
+               "<h4>Battery temperature: ";
+    // clang-format on
     if (datalayer_extended.meb.battery_temperature_dC == 875) {  //Raw value 255
-      content += "ERROR</h4>";
+      content << "ERROR</h4>";
     } else if (datalayer_extended.meb.battery_temperature_dC == 870) {  //Raw value 254
-      content += "INIT</h4>";
+      content << "INIT</h4>";
     } else {
-      content += String(datalayer_extended.meb.battery_temperature_dC / 10.f, 1) + " &deg;C</h4>";
+      content << String(datalayer_extended.meb.battery_temperature_dC / 10.f, 1) << " &deg;C</h4>";
     }
 
     for (int i = 0; i < 3; i++) {
-      content += "<h4>Temperature points " + String(i * 6 + 1) + "-" + String(i * 6 + 6) + " :";
+      content << "<h4>Temperature points " << (i * 6 + 1) << "-" << (i * 6 + 6) << " :";
       for (int j = 0; j < 6; j++)
-        content += " &nbsp;" + String(datalayer_extended.meb.temp_points[i * 6 + j], 1);
-      content += " &deg;C</h4>";
+        content << " &nbsp;" << String(datalayer_extended.meb.temp_points[i * 6 + j], 1);
+      content << " &deg;C</h4>";
     }
     bool temps_done = false;
     for (int i = 0; i < 7 && !temps_done; i++) {
-      content += "<h4>Cell temperatures " + String(i * 8 + 1) + "-" + String(i * 8 + 8) + " :";
+      content << "<h4>Cell temperatures " << (i * 8 + 1) << "-" << (i * 8 + 8) << " :";
       for (int j = 0; j < 8; j++) {
         if (datalayer_extended.meb.celltemperature_dC[i * 8 + j] == 865) {
           temps_done = true;
           break;
         } else {
-          content += " &nbsp;" + String(datalayer_extended.meb.celltemperature_dC[i * 8 + j] / 10.f, 1);
+          content << " &nbsp;" << String(datalayer_extended.meb.celltemperature_dC[i * 8 + j] / 10.f, 1);
         }
       }
-      content += " &deg;C</h4>";
+      content << " &deg;C</h4>";
     }
-    content +=
-        "<h4>Total charged: " + String(datalayer.battery.status.total_charged_battery_Wh / 1000.0, 1) + " kWh</h4>";
-    content += "<h4>Total discharged: " + String(datalayer.battery.status.total_discharged_battery_Wh / 1000.0, 1) +
-               " kWh</h4>";
+    content << "<h4>Total charged: " << String(datalayer.battery.status.total_charged_battery_Wh / 1000.0, 1)
+            << " kWh</h4>"
+               "<h4>Total discharged: "
+            << String(datalayer.battery.status.total_discharged_battery_Wh / 1000.0, 1) + " kWh</h4>";
 
-    content += BatteryHtmlRenderer::render_dtc_section_html(datalayer.battery.dtc, "vag_meb_dtc.json", false);
+    content << BatteryHtmlRenderer::render_dtc_section_html(datalayer.battery.dtc, "vag_meb_dtc.json", false);
 
     return content;
   }
