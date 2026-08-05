@@ -212,6 +212,7 @@ void UdsCanBattery::on_isotp_can_tx(uint32_t can_id, const uint8_t* can_data, ui
   }
   frame.FD = send_messages_asFD;
   frame.DLC = can_dlc;
+  frame.FD = fd_uds_requests;
   memcpy(frame.data.u8, can_data, can_dlc);
   transmit_can_frame(&frame);
 }
