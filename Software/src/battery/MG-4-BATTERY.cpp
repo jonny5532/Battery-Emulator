@@ -647,6 +647,9 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
   // Currently unused
 
   switch (pid) {
+    case POLL_BATTERY_SOH:
+      datalayer.battery.status.soh_pptt = value;
+      break;
     case POLL_BATTERY_VOLTAGE:
       //datalayer.battery.status.voltage_dV = (value * 5) / 2;
       break;
@@ -672,8 +675,8 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
 void Mg4Battery::setup(void) {  // Performs one time setup at startup
   setup_uds(0x7E5, 0);          //POLL_BATTERY_VOLTAGE);
 
-  static const uint16_t POLL_LIST[] = {POLL_BATTERY_VOLTAGE, POLL_BATTERY_CURRENT, POLL_BATTERY_SOC,
-                                       POLL_MIN_CELL_TEMPERATURE, POLL_MAX_CELL_TEMPERATURE};
+  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_BATTERY_VOLTAGE, POLL_MIN_CELL_TEMPERATURE,
+                                       POLL_MAX_CELL_TEMPERATURE};
 
   set_pid_scan_list(POLL_LIST, sizeof(POLL_LIST) / sizeof(POLL_LIST[0]));
 
