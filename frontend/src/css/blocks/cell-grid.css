@@ -5,10 +5,30 @@
   margin-bottom: 2rem;
 }
 
+/* Known battery geometry: render a fixed grid whose column count is set
+   inline (grid-template-columns) so rows/columns mirror the pack layout. */
+.cell-grid[data-fixed] {
+  display: grid;
+  gap: 1px;
+  justify-content: initial;
+}
+
 .cell-grid__cell {
   flex: 1 1 auto;
   border: 1px solid #555;
   padding: 0.3rem 0.6rem;
+  text-align: center;
+}
+
+.cell-grid[data-fixed] .cell-grid__cell {
+  flex: initial;
+}
+
+/* Placeholder for a not-yet-read cell, keeps the fixed grid aligned. */
+.cell-grid__cell--empty {
+  border-color: #333;
+  background: repeating-linear-gradient(
+    45deg, transparent, transparent 4px, #2a2a2a 4px, #2a2a2a 8px);
 }
 
 .cell-grid__cell[data-sel] {

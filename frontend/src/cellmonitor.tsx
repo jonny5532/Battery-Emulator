@@ -11,12 +11,18 @@ export function CellMonitor() {
         <h2>Cell monitor</h2>
 
         { (data?.battery ?? []).map((battery: any, idx: number) => {
-            const cells = battery.voltages
-                .map((v: number, i: number) => ({v, i}))
-                .filter((c: any) => c.v > 0);
+            const columns = battery.columns ?? 0;
+            const allCells = battery.voltages
+                .map((v: number, i: number) => ({v, i}));
+            const cells = allCells.filter((c: any) => c.v > 0);
             const max = Math.max(...cells.map((c: any) => c.v), 0);
             const min = Math.min(...cells.map((c: any) => c.v), 9999);
             const deviation = max - min;
+            // When the battery reports a known geometry (columns > 0), render a fixed
+            // grid in cell-index order so rows/columns map to the physical pack layout.
+            // Absent cells (0 mV, not yet read) keep their slot so the grid stays aligned;
+            // otherwise fall back to the responsive flow-wrap of populated cells only.
+            const gridCells = columns > 0 ? allCells : cells;
 
             return (
                 <>
@@ -60,8 +66,11 @@ export function CellMonitor() {
                         ))}
                     </div>
 
-                    <div class="cell-grid">
-                        { cells.map((c: any, k: number) => (
+                    <div class="cell-grid"
+                        data-fixed={ columns > 0 || undefined }
+                        style={ columns > 0 ? { gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` } : undefined }>
+                        { gridCells.map((c: any) => (
+                            c.v > 0 ? (
                             <div class="cell-grid__cell"
                                 key={c.i}
                                 data-sel={ selectedCell===(idx*1000 + c.i) || undefined }
@@ -70,9 +79,12 @@ export function CellMonitor() {
                                 onMouseEnter={ ()=>{ setSelectedCell(idx*1000 + c.i) } }
                                 onMouseLeave={ ()=>{ setSelectedCell(null) } }
                                 >
-                                Cell {k+1}<br />
+                                Cell {c.i+1}<br />
                                 { c.v } mV
                             </div>
+                            ) : (
+                            <div class="cell-grid__cell cell-grid__cell--empty" key={c.i}></div>
+                            )
                         ))}
                     </div>
                 </>
