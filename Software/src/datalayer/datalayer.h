@@ -412,7 +412,7 @@ struct DATALAYER_SYSTEM_STATUS_TYPE {
    * parallel-join rule: false while another pack holds the DC link closed and
    * the pack voltages differ by more than 1.5 V. Computed by
    * check_parallel_battery_safety(); defaults to true so single-battery
-   * systems (where that function never runs) are unaffected. */
+   * systems (where no secondary is detected) are unaffected. */
   bool battery1_allowed_contactor_closing = true;
   /** True if the second battery is allowed to close the contactors */
   bool battery2_allowed_contactor_closing = false;
