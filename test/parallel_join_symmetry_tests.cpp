@@ -48,7 +48,7 @@ TEST_F(ParallelJoinSymmetryTest, EngagedPackWithLargeDiffBlocksMainClose) {
   datalayer.system.status.contactors_battery2_engaged = true;
   datalayer.battery2.status.voltage_dV = 3700 + 250;  // 25 V below main
 
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
 
   EXPECT_FALSE(datalayer.system.status.battery1_allowed_contactor_closing)
       << "Main battery must not close onto a live link with a large voltage difference";
@@ -58,7 +58,7 @@ TEST_F(ParallelJoinSymmetryTest, EngagedPackWithinWindowAllowsMainClose) {
   datalayer.system.status.contactors_battery2_engaged = true;
   datalayer.battery2.status.voltage_dV = 3910;  // 1.0 V difference
 
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
 
   EXPECT_TRUE(datalayer.system.status.battery1_allowed_contactor_closing);
 }
@@ -67,7 +67,7 @@ TEST_F(ParallelJoinSymmetryTest, DisengagedPackDoesNotBlockMain) {
   datalayer.system.status.contactors_battery2_engaged = false;
   datalayer.battery2.status.voltage_dV = 3600;  // 30 V difference, but link is dead
 
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
 
   EXPECT_TRUE(datalayer.system.status.battery1_allowed_contactor_closing)
       << "A pack with open contactors holds no link - any voltage difference is fine";
@@ -76,12 +76,12 @@ TEST_F(ParallelJoinSymmetryTest, DisengagedPackDoesNotBlockMain) {
 TEST_F(ParallelJoinSymmetryTest, ExistingBattery2GatingUnchanged) {
   // Regression guard for the original direction of the rule
   datalayer.battery2.status.voltage_dV = 3905;
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
   EXPECT_TRUE(datalayer.system.status.battery2_allowed_contactor_closing);
 
   datalayer.battery2.status.voltage_dV = 3600;
   for (int i = 0; i < 11; i++) {
-    check_parallel_battery_safety(2);
+    check_parallel_battery_safety();
   }
   EXPECT_FALSE(datalayer.system.status.battery2_allowed_contactor_closing)
       << "Battery 2 must still disengage after 10 s out of sync";
@@ -93,13 +93,13 @@ TEST_F(ParallelJoinSymmetryTest, UnknownReportedStateFallsBackToCommanded) {
   datalayer.system.status.contactors_battery2_engaged = true;
   datalayer.battery2.status.voltage_dV = 3600;
 
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
 
   EXPECT_FALSE(datalayer.system.status.battery1_allowed_contactor_closing)
       << "Unknown reported state must fall back to the BE-commanded engaged state";
 
   datalayer.system.status.contactors_battery2_engaged = false;
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
   EXPECT_TRUE(datalayer.system.status.battery1_allowed_contactor_closing);
 }
 
