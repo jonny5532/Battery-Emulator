@@ -670,12 +670,11 @@ void core_loop(void*) {
 
       if (battery2) {
         battery2->update_values();
-        check_parallel_battery_safety(2);
       }
       if (battery3) {
         battery3->update_values();
-        check_parallel_battery_safety(3);
       }
+      check_parallel_battery_safety();
       update_calculated_values(currentMillis);
       update_machineryprotection();  // Check safeties
       filter_charge_taper_soc();     // Taper charge limit near full SOC (runs after safeties, before LPF)

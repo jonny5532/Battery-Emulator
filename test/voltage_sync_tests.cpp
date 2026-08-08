@@ -27,7 +27,7 @@ TEST_F(VoltageSyncTest, Battery2NotPoweredOn) {
   datalayer.battery.status.voltage_dV = 3700;   //Default startup voltage
   datalayer.battery2.status.voltage_dV = 3700;  //Default startup voltage
 
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
 
   EXPECT_FALSE(datalayer.system.status.battery2_allowed_contactor_closing);
 }
@@ -37,7 +37,7 @@ TEST_F(VoltageSyncTest, Battery2AllowedWhenVoltagesInSync) {
   datalayer.battery.status.voltage_dV = 3750;
   datalayer.battery2.status.voltage_dV = 3750;
 
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
 
   EXPECT_TRUE(datalayer.system.status.battery2_allowed_contactor_closing);
 }
@@ -50,14 +50,14 @@ TEST_F(VoltageSyncTest, Battery2DisconnectedAfterVoltageDriftTimeout) {
 
   // Simulate 10 seconds of calls (function called once per second)
   for (int i = 0; i < 10; i++) {
-    check_parallel_battery_safety(2);
+    check_parallel_battery_safety();
     // During the first 10 calls, battery2 should still be allowed (counting up)
     EXPECT_TRUE(datalayer.system.status.battery2_allowed_contactor_closing)
         << "Should still be allowed at second " << i;
   }
 
   // 11th call — counter reaches 10, battery2 should be disconnected
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
   EXPECT_FALSE(datalayer.system.status.battery2_allowed_contactor_closing);
 }
 
@@ -68,13 +68,13 @@ TEST_F(VoltageSyncTest, Battery2ReconnectsAfterVoltagesResync) {
 
   // Drift for 11 seconds — battery2 disconnected
   for (int i = 0; i < 11; i++) {
-    check_parallel_battery_safety(2);
+    check_parallel_battery_safety();
   }
   EXPECT_FALSE(datalayer.system.status.battery2_allowed_contactor_closing);
 
   // Voltages re-sync
   datalayer.battery2.status.voltage_dV = 3710;
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
   EXPECT_TRUE(datalayer.system.status.battery2_allowed_contactor_closing);
 }
 
@@ -85,12 +85,12 @@ TEST_F(VoltageSyncTest, Battery3DisconnectedAfterVoltageDriftTimeout) {
   datalayer.battery3.status.voltage_dV = 3500;  // 20V difference
 
   for (int i = 0; i < 10; i++) {
-    check_parallel_battery_safety(3);
+    check_parallel_battery_safety();
     EXPECT_TRUE(datalayer.system.status.battery3_allowed_contactor_closing)
         << "Should still be allowed at second " << i;
   }
 
-  check_parallel_battery_safety(3);
+  check_parallel_battery_safety();
   EXPECT_FALSE(datalayer.system.status.battery3_allowed_contactor_closing);
 }
 
@@ -100,17 +100,17 @@ TEST_F(VoltageSyncTest, Battery1FaultDisengagesBattery2) {
   datalayer.battery2.status.voltage_dV = 3700;  // In sync
   datalayer.system.status.system_status = FAULT;
 
-  check_parallel_battery_safety(2);
+  check_parallel_battery_safety();
   EXPECT_FALSE(datalayer.system.status.battery2_allowed_contactor_closing);
 }
 
-// Test: Zero voltage skips the check entirely (no crash, no state change)
+// Test: Zero voltage (no data) keeps the current permission (no crash, no state change)
 TEST_F(VoltageSyncTest, ZeroVoltageSkipsCheck) {
   datalayer.battery.status.voltage_dV = 0;
   datalayer.battery2.status.voltage_dV = 3710;
   datalayer.system.status.battery2_allowed_contactor_closing = true;
 
-  check_parallel_battery_safety(2);
-  // Should remain unchanged — early return
+  check_parallel_battery_safety();
+  // Should remain unchanged — no data, keep the previous permission
   EXPECT_TRUE(datalayer.system.status.battery2_allowed_contactor_closing);
 }

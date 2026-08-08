@@ -20,6 +20,9 @@ class MgGen1Battery : public UdsCanBattery {
   virtual bool supports_reset_BMS() override;
   virtual void on_uds_sequence_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len) override;
 
+  // The contactor state the BMS reports in the 0x297 status byte (previousState).
+  ContactorState reported_contactor_state() override;
+
   static constexpr const char* Name = "MG Gen1 (HS/ZS/MG5/MarvelR)";
 
   String get_uds_info_html() override;
@@ -85,8 +88,9 @@ class MgGen1Battery : public UdsCanBattery {
   uint8_t pid_f1aa[5] = {0};
 
   // Contactor control. allowed_contactor_closing is an input from the
-  // multi-battery controller; null means we're the primary battery, so we
-  // always can close, otherwise we wait for this to be true.
+  // multi-battery controller: for a secondary battery it points at
+  // battery2/3_allowed_contactor_closing; for the primary (null) the
+  // parallel-join gate is battery1_allowed_contactor_closing instead.
   bool* allowed_contactor_closing = nullptr;
   bool announcedContactorsClosed = false;
   bool contactorCloseReset = false;
@@ -139,7 +143,7 @@ class MgGen1Battery : public UdsCanBattery {
                         .ext_ID = false,
                         .DLC = 8,
                         .ID = 0x08A,
-                        .data = {0x80, 0x00, 0x00, 0x04, 0x00, 0x02, 0x36, 0xB0}};
+                        .data = {0x80, 0x00, 0x00, 0x04, 0x00, 0x00, 0x36, 0xB0}};
   // Apart from the initial 0x0E, various balues have been seen. However 0x00
   // seems most likely to work across all batteries.
   static constexpr CAN_frame MG_HS_1F1 = {.FD = false,

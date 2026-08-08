@@ -355,6 +355,27 @@ void MgGen1Battery::announce_contactor_state(bool state) {
   }
 }
 
+ContactorState MgGen1Battery::reported_contactor_state() {
+  // The BMS's own view of the contactors, from the 0x297 status byte (the
+  // last value seen is kept in previousState):
+  //   3 = connected, 1 = disconnected, 15 = fault,
+  //   2 = precharge, 0/8 = checking.
+  switch (previousState) {
+    case 1:   // disconnected
+    case 15:  // fault
+      return ContactorState::Open;
+    case 3:  // connected
+      return ContactorState::Closed;
+    default:
+      // 2 (precharge), 0/8 (checking), or nothing seen yet. Unknown makes the
+      // parallel-join arbiter fall back to the BE-commanded state. Precharge
+      // is left Unknown on purpose: the BMS equalizes through the precharge
+      // resistor, so the bus is safe to join, and blocking the main for the
+      // duration of a transient precharge would be over-conservative.
+      return ContactorState::Unknown;
+  }
+}
+
 void MgGen1Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
   // We start polling with UDS ID 0x7DF, the generic broadcast one. Our first
   // reply will indicate what the BMS-specific one is, which we switch to.
@@ -763,21 +784,23 @@ void MgGen1Battery::transmit_can(unsigned long currentMillis) {
     const bool identified_battery = batteryType != 0 && highestSeenCellCount == datalayer_battery->info.number_of_cells;
     // Open contactors if fault
     const bool must_open_contactors = datalayer.system.status.system_status == FAULT;
+    // For multi-battery, whether this particular battery is allowed to close contactors.
+    const bool join_gate_allows = (allowed_contactor_closing != nullptr)
+                                      ? *allowed_contactor_closing
+                                      : datalayer.system.status.battery1_allowed_contactor_closing;
     // Open contactors if inverter requests it, or we haven't identified the
-    // battery yet, or we don't have a recent voltage reading, or if we're a
-    // secondary battery and haven't been given permission to close yet.
+    // battery yet, or we don't have a recent voltage reading, or the
+    // parallel-join gate forbids us to close.
     const bool should_open_contactors = !datalayer.system.status.inverter_allows_contactor_closing ||
-                                        !identified_battery || voltageValidTime == 0 ||
-                                        (allowed_contactor_closing != nullptr && !*allowed_contactor_closing);
+                                        !identified_battery || voltageValidTime == 0 || !join_gate_allows;
 
     bool send_8a = true;
     if (must_open_contactors || (should_open_contactors && currentMillis > STARTUP_GRACE_PERIOD_MS)) {
 
       if (announcedContactorsClosed) {
-        logging.printf("[MG] Open contactors, iacc: %d, hSCC: %d, bT: %d, accnull: %d, acc: %d, vvt: %d\n",
+        logging.printf("[MG] Open contactors, iacc: %d, hSCC: %d, bT: %d, gate: %d, vvt: %d\n",
                        datalayer.system.status.inverter_allows_contactor_closing, highestSeenCellCount, batteryType,
-                       allowed_contactor_closing == nullptr,
-                       allowed_contactor_closing != nullptr ? *allowed_contactor_closing : 0, voltageValidTime);
+                       join_gate_allows, voltageValidTime);
         announcedContactorsClosed = false;
       }
 
@@ -796,10 +819,9 @@ void MgGen1Battery::transmit_can(unsigned long currentMillis) {
       MG_HS_8A.data.u8[5] = 0x02;
 
       if (!announcedContactorsClosed) {
-        logging.printf("[MG] Close contactors, iacc: %d, hSCC: %d, bT: %d, accnull: %d, acc: %d\n",
+        logging.printf("[MG] Close contactors, iacc: %d, hSCC: %d, bT: %d, gate: %d\n",
                        datalayer.system.status.inverter_allows_contactor_closing, highestSeenCellCount, batteryType,
-                       allowed_contactor_closing == nullptr,
-                       allowed_contactor_closing != nullptr ? *allowed_contactor_closing : 0);
+                       join_gate_allows);
         announcedContactorsClosed = true;
       }
 
