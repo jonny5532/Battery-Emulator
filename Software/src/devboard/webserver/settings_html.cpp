@@ -1672,7 +1672,7 @@ String qnhck_zero_text(uint16_t zero_mV) {
     form[data-battery="26"] .if-socestimated,
     form[data-battery="41"] .if-socestimated,
     form[data-battery="42"] .if-socestimated,
-    form[data-battery="55"] .if-socestimated {
+    form[data-battery="96"] .if-socestimated {
       display: contents;
     }
 
