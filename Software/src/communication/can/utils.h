@@ -2,6 +2,7 @@
 
 #include "../../devboard/utils/types.h"
 #include "../../lib/mcp2515_lite/mcp2515_lite.h"
+#include "../../lib/twai_lite/twai_lite.h"
 
 #include <cstring>  // for memcpy
 
@@ -13,6 +14,26 @@ static_assert(offsetof(MCP2515_Lite_Frame, ext) == offsetof(CAN_frame, ext_ID), 
 static_assert(offsetof(MCP2515_Lite_Frame, dlc) == offsetof(CAN_frame, DLC), "dlc/DLC field offset mismatch");
 static_assert(offsetof(MCP2515_Lite_Frame, id) == offsetof(CAN_frame, ID), "id/ID field offset mismatch");
 static_assert(offsetof(MCP2515_Lite_Frame, data) == offsetof(CAN_frame, data), "data field offset mismatch");
+
+// TWAI_Lite_Frame has the same layout as MCP2515_Lite_Frame (and CAN_frame), so
+// the same memcpy conversion applies
+static_assert(sizeof(TWAI_Lite_Frame) <= sizeof(CAN_frame), "TWAI_Lite_Frame must fit within CAN_frame");
+static_assert(offsetof(TWAI_Lite_Frame, fd) == offsetof(CAN_frame, FD), "fd/FD field offset mismatch");
+static_assert(offsetof(TWAI_Lite_Frame, ext) == offsetof(CAN_frame, ext_ID), "ext/ext_ID field offset mismatch");
+static_assert(offsetof(TWAI_Lite_Frame, dlc) == offsetof(CAN_frame, DLC), "dlc/DLC field offset mismatch");
+static_assert(offsetof(TWAI_Lite_Frame, id) == offsetof(CAN_frame, ID), "id/ID field offset mismatch");
+static_assert(offsetof(TWAI_Lite_Frame, data) == offsetof(CAN_frame, data), "data field offset mismatch");
+
+static inline void copy_can_frame_to_twai_lite_frame(const CAN_frame& source, TWAI_Lite_Frame& target) {
+  memcpy(&target, &source, sizeof(TWAI_Lite_Frame));
+  target.fd = false;  // Native TWAI does not support CAN-FD
+}
+
+static inline void copy_twai_lite_frame_to_can_frame(const TWAI_Lite_Frame& source, CAN_frame& target) {
+  memcpy(&target, &source, sizeof(TWAI_Lite_Frame));
+  target.FD = false;  // Native TWAI does not support CAN-FD
+  // The remaining bytes in CAN_frame.data will be left as-is
+}
 
 static inline void copy_can_frame_to_mcp2515_lite_frame(const CAN_frame& source, MCP2515_Lite_Frame& target) {
   memcpy(&target, &source, sizeof(MCP2515_Lite_Frame));
