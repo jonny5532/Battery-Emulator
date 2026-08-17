@@ -85,21 +85,37 @@ class TWAI_Lite {
   // Non-blocking: pauses all communication (and stops acknowledging messages)
   void pause(bool paused);
 
+  // Bitmask returned by errorFlags(): the causes that latched the error
+  // status. Latched read-clear, so a bus-off event is still reported here
+  // even though the live busOff() bit is usually already cleared by the time
+  // the application polls (the ISR's recovery workaround brings the bus back
+  // first).
+  enum : uint8_t {
+    ERR_EWL     = 1 << 0,  // Hardware error-warning level: TEC or REC >= 96 (ES)
+    ERR_BUS_OFF = 1 << 1,  // Entered bus-off (BS)
+    ERR_RX_EWL  = 1 << 2,  // Software REC mirror (rxHealth) reached EWL 96
+  };
+
+  // Read-clear bitmask of what set the error status since the last call.
+  // More granular than hasErrors(), which is equivalent to errorFlags() != 0.
+  // The read-modify-clear runs under the spinlock so a set latched by the ISR
+  // between the read and the clear cannot be lost.
+  inline uint8_t errorFlags() {
+    portENTER_CRITICAL(&_spinlock);
+    const uint8_t f = _error_flags;
+    _error_flags = 0;
+    portEXIT_CRITICAL(&_spinlock);
+    return f;
+  }
+
   // Latch set when the controller reports a persistent error condition: the
   // error warning level (TEC or REC >= EWL 96), bus-off — or the software REC
-  // mirror (rxHealth) reaching EWL — cleared on read. Single transient bus
-  // errors do NOT latch it, matching MCP2515_Lite's EFLG (EWARN|TXBO) check
-  // and the ESP-IDF ABOVE_ERR_WARN / BUS_OFF alerts. Errata peripheral resets
-  // (frame loss) are NOT counted as a bus error; track them with
-  // periphResetCount() instead. The read-modify-clear runs under the spinlock
-  // so a set latched by the ISR between the read and the clear cannot be lost.
-  inline bool hasErrors() {
-    portENTER_CRITICAL(&_spinlock);
-    const bool err = _errors;
-    _errors = false;
-    portEXIT_CRITICAL(&_spinlock);
-    return err;
-  }
+  // mirror (rxHealth) reaching EWL — cleared on read (see errorFlags() for
+  // the cause). Single transient bus errors do NOT latch it, matching
+  // MCP2515_Lite's EFLG (EWARN|TXBO) check and the ESP-IDF ABOVE_ERR_WARN /
+  // BUS_OFF alerts. Errata peripheral resets (frame loss) are NOT counted as
+  // a bus error; track them with periphResetCount() instead.
+  inline bool hasErrors() { return errorFlags() != 0; }
 
   // Latch set when received frames were lost (hardware FIFO data overrun or
   // the RX queue was full), cleared on read. Not a bus error: use for
@@ -142,7 +158,10 @@ class TWAI_Lite {
   inline uint8_t lastErrorDir() const { return (_last_ecc >> 5) & 0x01; }
   inline uint8_t lastErrorSeg() const { return _last_ecc & 0x1F; }
 
-  // True while the controller is in the bus-off state
+  // Live bus-off status bit. Usually already false when polled after a
+  // bus-off event: the ISR forces recovery (TEC re-trigger workaround) before
+  // the application gets to read it. Use errorFlags() & ERR_BUS_OFF for a
+  // latched "bus-off happened" signal.
   inline bool busOff() const { return (statusRegister() & 0x80) != 0; }
 
   // Raw TWAI status register (RBS/DOS/TBS/TCS/RS/TS/ES/BS bits)
@@ -182,7 +201,7 @@ class TWAI_Lite {
   volatile bool _running;       // Controller is out of reset mode (TX path may run)
   volatile bool _paused;
   volatile bool _rx_overflow;
-  volatile bool _errors;
+  volatile uint8_t _error_flags;  // errorFlags() latch: ERR_EWL|ERR_BUS_OFF|ERR_RX_EWL
   volatile uint32_t _periph_reset_count;  // errata peripheral resets (diagnostics)
   volatile uint8_t _last_ecc;   // Last ECC register capture (diagnostics)
   volatile uint8_t _rec_sw;     // Software REC mirror (EWL source, see rxHealth)

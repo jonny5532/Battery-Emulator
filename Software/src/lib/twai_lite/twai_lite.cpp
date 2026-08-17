@@ -172,7 +172,7 @@ static bool calcTiming(uint32_t bitrate, uint32_t& brp, uint8_t& tseg1, uint8_t&
 TWAI_Lite::TWAI_Lite()
     : _base(TWAI_BASE), _loopback(false), _listen_only(false),
       _brp(0), _tseg1(0), _tseg2(0), _sjw(0), _bitrate(0),
-      _tx_pending(false), _running(false), _paused(false), _rx_overflow(false), _errors(false),
+      _tx_pending(false), _running(false), _paused(false), _rx_overflow(false), _error_flags(0),
       _periph_reset_count(0), _last_ecc(0), _rec_sw(0),
       _tx_queue(nullptr), _rx_queue(nullptr), _isr_handle(nullptr) {
   memset(&_tx_current, 0, sizeof(_tx_current));
@@ -220,7 +220,7 @@ bool TWAI_Lite::begin(const TWAI_Lite_Speed& speed, gpio_num_t tx_pin, gpio_num_
   _tx_pending = false;
   _running = false;   // set true again by configure() once the controller exits reset mode
   _paused = false;
-  _errors = false;
+  _error_flags = 0;
   _rx_overflow = false;
   _rec_sw = 0;
 
@@ -530,7 +530,7 @@ void TWAI_Lite::handleInterrupt() {
       // RX errors increment the REC by 8.
       _rec_sw = (_rec_sw > 247) ? 255 : (uint8_t)(_rec_sw + 8);
       // Latch errors if we exceed the error warning level
-      if (_rec_sw >= 96) _errors = true;
+      if (_rec_sw >= 96) _error_flags = _error_flags | ERR_RX_EWL;
     }
     if ((ecc & ECC_DIR_RX) &&
         (seg == ECC_SEG_DATA || seg == ECC_SEG_CRC_SEQ ||
@@ -594,9 +594,8 @@ void TWAI_Lite::handleInterrupt() {
   //--- EI also fires on the transition back below EWL, which must not latch.
   if (intr & INT_EI) {
     const uint32_t status = *reg(REG_STATUS);
-    if (status & (STATUS_ES | STATUS_BS)) {
-      _errors = true;
-    }
+    if (status & STATUS_ES) _error_flags = _error_flags | ERR_EWL;
+    if (status & STATUS_BS) _error_flags = _error_flags | ERR_BUS_OFF;
     if (status & STATUS_BS) {
       // Errata: bus-off recovery requires both TEC and REC to reach 0, but the
       // REC can be left non-zero if errors keep arriving before the ISR
