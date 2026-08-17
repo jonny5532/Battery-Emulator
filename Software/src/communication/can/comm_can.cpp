@@ -396,14 +396,24 @@ receive_frame_can_native() {  // This section checks if we have a complete CAN m
     map_can_frame_to_variable(&rx_frame, CAN_NATIVE);
   }
 
-  if (twai_lite.busOff()) {
-    // Bus off, reset the CAN controller
-    change_can_speed(CAN_Interface::CAN_NATIVE, native_can_speed);
+  // errorFlags() is a latched read-clear mask of what set the error status
+  // since the last poll. The live busOff() bit alone is unreliable: the ISR's
+  // recovery workaround (TEC re-trigger) usually brings the bus back before
+  // this task gets to poll, so use the latched ERR_BUS_OFF flag instead.
+  const uint8_t can_err_flags = twai_lite.errorFlags();
+  if (can_err_flags) {
     datalayer.system.info.can_native_bus_error = true;
-    logging.printf("Native CAN bus off (tec=%u rec=%u), resetting controller\n", twai_lite.tec(), twai_lite.rec());
-  }
-  if (twai_lite.hasErrors()) {
-    datalayer.system.info.can_native_bus_error = true;
+    logging.printf("Native CAN errors: %s%s%s (tec=%u rec=%u rxHealth=%u)\n",
+                   (can_err_flags & TWAI_Lite::ERR_EWL) ? "EWL " : "",
+                   (can_err_flags & TWAI_Lite::ERR_BUS_OFF) ? "BUS_OFF " : "",
+                   (can_err_flags & TWAI_Lite::ERR_RX_EWL) ? "RX_EWL" : "", twai_lite.tec(), twai_lite.rec(),
+                   twai_lite.rxHealth());
+    if (can_err_flags & TWAI_Lite::ERR_BUS_OFF) {
+      // Leave bus-off via a full re-init (recovery is normally already done
+      // by the ISR's TEC re-trigger; this is belt and braces)
+      logging.println("Native CAN: resetting controller after bus-off");
+      change_can_speed(CAN_Interface::CAN_NATIVE, native_can_speed);
+    }
   }
 
   // Diagnostic heartbeat: log the CAN health every 10 s so slow climbs and
