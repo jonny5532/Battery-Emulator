@@ -86,13 +86,13 @@ class TWAI_Lite {
   void pause(bool paused);
 
   // Latch set when the controller reports a persistent error condition: the
-  // error warning level (TEC or REC >= EWL 96) or bus-off — cleared on read.
-  // Single transient bus errors do NOT latch it, matching MCP2515_Lite's
-  // EFLG (EWARN|TXBO) check and the ESP-IDF ABOVE_ERR_WARN / BUS_OFF alerts.
-  // Errata peripheral resets (frame loss) are NOT counted as a bus error;
-  // track them with periphResetCount() instead. The read-modify-clear runs
-  // under the spinlock so a set latched by the ISR between the read and the
-  // clear cannot be lost.
+  // error warning level (TEC or REC >= EWL 96), bus-off — or the software REC
+  // mirror (rxHealth) reaching EWL — cleared on read. Single transient bus
+  // errors do NOT latch it, matching MCP2515_Lite's EFLG (EWARN|TXBO) check
+  // and the ESP-IDF ABOVE_ERR_WARN / BUS_OFF alerts. Errata peripheral resets
+  // (frame loss) are NOT counted as a bus error; track them with
+  // periphResetCount() instead. The read-modify-clear runs under the spinlock
+  // so a set latched by the ISR between the read and the clear cannot be lost.
   inline bool hasErrors() {
     portENTER_CRITICAL(&_spinlock);
     const bool err = _errors;
@@ -120,6 +120,13 @@ class TWAI_Lite {
   // Live error counters (TEC = transmit errors, REC = receive errors)
   inline uint16_t tec() const { return *reg(0x03C) & 0xFF; }  // TX error counter
   inline uint16_t rec() const { return *reg(0x038) & 0xFF; }  // RX error counter
+
+  // Software mirror of the hardware REC, which the errata resets keep zeroing:
+  // +8 per RX-direction bus error, -1 per successfully received frame
+  // (0..255, EWL = 96). Unlike rec(), this one reflects sustained RX
+  // corruption even though the resets prevent the hardware counter from
+  // climbing. Reset by begin(), preserved across changeSpeed()/pause().
+  inline uint16_t rxHealth() const { return _rec_sw; }
 
   // Programmed bit timing (diagnostics)
   inline uint32_t bitRatePrescaler() const { return _brp; }
@@ -178,6 +185,7 @@ class TWAI_Lite {
   volatile bool _errors;
   volatile uint32_t _periph_reset_count;  // errata peripheral resets (diagnostics)
   volatile uint8_t _last_ecc;   // Last ECC register capture (diagnostics)
+  volatile uint8_t _rec_sw;     // Software REC mirror (EWL source, see rxHealth)
   TWAI_Lite_Frame _tx_current;  // Copy of the in-flight frame (errata TX retry)
 
   QueueHandle_t _tx_queue;

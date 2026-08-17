@@ -406,13 +406,15 @@ receive_frame_can_native() {  // This section checks if we have a complete CAN m
     datalayer.system.info.can_native_bus_error = true;
   }
 
-  // Diagnostic heartbeat: log the error counters every 10 s so slow climbs
-  // and recoveries are visible even without a latched error
-  static uint32_t last_counters_log_ms = 0;
-  if (millis() - last_counters_log_ms >= 10000) {
-    last_counters_log_ms = millis();
-    logging.printf("Native CAN counters: tec=%u rec=%u resets=%u\n", twai_lite.tec(), twai_lite.rec(),
-                   (unsigned)twai_lite.periphResetCount());
+  // Diagnostic heartbeat: log the CAN health every 10 s so slow climbs and
+  // recoveries are visible even without a latched error. rxHealth is the
+  // software REC mirror (see TWAI_Lite::rxHealth): it keeps climbing where
+  // the hardware rec can't, because the errata resets keep zeroing it.
+  static uint32_t last_health_log_ms = 0;
+  if (millis() - last_health_log_ms >= 10000) {
+    last_health_log_ms = millis();
+    logging.printf("Native CAN health: tec=%u rec=%u rxHealth=%u resets=%u\n", twai_lite.tec(), twai_lite.rec(),
+                   twai_lite.rxHealth(), (unsigned)twai_lite.periphResetCount());
   }
 }
 

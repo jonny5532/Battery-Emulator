@@ -173,7 +173,7 @@ TWAI_Lite::TWAI_Lite()
     : _base(TWAI_BASE), _loopback(false), _listen_only(false),
       _brp(0), _tseg1(0), _tseg2(0), _sjw(0), _bitrate(0),
       _tx_pending(false), _running(false), _paused(false), _rx_overflow(false), _errors(false),
-      _periph_reset_count(0), _last_ecc(0),
+      _periph_reset_count(0), _last_ecc(0), _rec_sw(0),
       _tx_queue(nullptr), _rx_queue(nullptr), _isr_handle(nullptr) {
   memset(&_tx_current, 0, sizeof(_tx_current));
 }
@@ -222,6 +222,7 @@ bool TWAI_Lite::begin(const TWAI_Lite_Speed& speed, gpio_num_t tx_pin, gpio_num_
   _paused = false;
   _errors = false;
   _rx_overflow = false;
+  _rec_sw = 0;
 
   // Enable the clock, reset the peripheral and route the GPIO pins
   periph_module_enable(PERIPH_TWAI_MODULE);
@@ -469,6 +470,8 @@ void TWAI_Lite::drainRxFifo() {
   }
   while (*reg(REG_RX_MSG_CNT) > 0) {
     TWAI_Lite_Frame f;
+    // Valid frames decrement the REC
+    _rec_sw = (_rec_sw > 0) ? (uint8_t)(_rec_sw - 1) : 0;
     f.flags = 0;
     const uint32_t info = *reg(REG_FRAME_INFO);
     const bool ext = (info & FRAME_EFF) != 0;
@@ -523,8 +526,12 @@ void TWAI_Lite::handleInterrupt() {
     const uint32_t ecc = *reg(REG_ECC);  // reading ECC rearms the bus error interrupt
     _last_ecc = ecc & 0xFF;              // diagnostics: type/dir/segment
     const uint32_t seg = ecc & ECC_SEG_MASK;
-    // Note: a single transient bus error (BEI) does NOT set _errors; only the
-    // persistent warning-level / bus-off state (status ES/BS) does, see below.
+    if (ecc & ECC_DIR_RX) {
+      // RX errors increment the REC by 8.
+      _rec_sw = (_rec_sw > 247) ? 255 : (uint8_t)(_rec_sw + 8);
+      // Latch errors if we exceed the error warning level
+      if (_rec_sw >= 96) _errors = true;
+    }
     if ((ecc & ECC_DIR_RX) &&
         (seg == ECC_SEG_DATA || seg == ECC_SEG_CRC_SEQ ||
          (seg == ECC_SEG_ACK_DELIM && (ecc & ECC_TYPE_OTHER) == ECC_TYPE_OTHER))) {
