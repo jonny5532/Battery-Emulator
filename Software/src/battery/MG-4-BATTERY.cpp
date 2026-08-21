@@ -10,7 +10,7 @@
 #include "../devboard/utils/common_functions.h"
 #include "../devboard/utils/events.h"
 #include "../devboard/utils/logging.h"
-#include "BATTERY-SECOND-INTERFACE.h"
+#include "../shunt/BATTERY-SECOND-INTERFACE.h"
 
 static const uint16_t MAX_CHARGE_POWER_W = 14000;
 static const uint16_t CHARGE_TRICKLE_POWER_W = 100;    // The cell voltage limits will override
