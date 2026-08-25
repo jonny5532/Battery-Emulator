@@ -309,17 +309,17 @@ const VolatileUint VOLATILE_UINTS[] = {
   //  - max (inclusive)
   //  - VolatileStored: has a pointer to the live variable
   //  - VolatileHooked: has apply function (web -> runtime), read function (runtime -> web)
-  VolatileUintStored("TMP_CALTARGETSOC", 0, 100, &datalayer_extended.bydAtto3.calibrationTargetSOC),
-  VolatileUintStored("TMP_CALTARGETAH", 0, 1000, &datalayer_extended.bydAtto3.calibrationTargetAH),
-  VolatileUintStored("TMP_CALTARGETSOC2", 0, 100, &datalayer_extended.bydAtto3_2.calibrationTargetSOC),
-  VolatileUintStored("TMP_CALTARGETAH2", 0, 1000, &datalayer_extended.bydAtto3_2.calibrationTargetAH),
-  VolatileUintHooked("TMP_FAKEBATTERYV", 0, 1000,
+  VolatileStored("TMP_CALTARGETSOC", 0, 100, &datalayer_extended.bydAtto3.calibrationTargetSOC),
+  VolatileStored("TMP_CALTARGETAH", 0, 1000, &datalayer_extended.bydAtto3.calibrationTargetAH),
+  VolatileStored("TMP_CALTARGETSOC2", 0, 100, &datalayer_extended.bydAtto3_2.calibrationTargetSOC),
+  VolatileStored("TMP_CALTARGETAH2", 0, 1000, &datalayer_extended.bydAtto3_2.calibrationTargetAH),
+  VolatileHooked("TMP_FAKEBATTERYV", 0, 1000,
     [](uint32_t value) { if (battery != nullptr) battery->set_fake_voltage((float)value); },
     []() { return battery ? (uint32_t)battery->get_voltage() : 0; }),
-  VolatileUintStored("TMP_BALFLOATPOWER", 0, UINT32_MAX, &datalayer.battery.settings.balancing_float_power_W),
-  VolatileUintStored("TMP_BALMAXPACKV", 0, UINT32_MAX, &datalayer.battery.settings.balancing_max_pack_voltage_dV),
-  VolatileUintStored("TMP_BALMAXCELLV", 0, UINT32_MAX, &datalayer.battery.settings.balancing_max_cell_voltage_mV),
-  VolatileUintStored("TMP_BALMAXDEVCELLV", 0, UINT32_MAX,
+  VolatileStored("TMP_BALFLOATPOWER", 0, UINT32_MAX, &datalayer.battery.settings.balancing_float_power_W),
+  VolatileStored("TMP_BALMAXPACKV", 0, UINT32_MAX, &datalayer.battery.settings.balancing_max_pack_voltage_dV),
+  VolatileStored("TMP_BALMAXCELLV", 0, UINT32_MAX, &datalayer.battery.settings.balancing_max_cell_voltage_mV),
+  VolatileStored("TMP_BALMAXDEVCELLV", 0, UINT32_MAX,
                   &datalayer.battery.settings.balancing_max_deviation_cell_voltage_mV),
 };
 
