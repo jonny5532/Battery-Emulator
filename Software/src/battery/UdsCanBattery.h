@@ -91,7 +91,8 @@ class UdsCanBattery : public CanBattery, public IsoTp {
     // Superclass-internal sequences.
     UDS_STATE_READ_DTC_START = UDS_STATE_INTERNAL | 0x01,
     UDS_STATE_READ_DTC,  // 0x19 0x02
-    UDS_STATE_CLEAR_DTC_START = UDS_STATE_INTERNAL | 0x03,
+    UDS_STATE_CLEAR_DTC_START,
+    UDS_STATE_CLEAR_DTC_DIAG,
     UDS_STATE_CLEAR_DTC,  // 0x14 FF FF FF
   };
 
