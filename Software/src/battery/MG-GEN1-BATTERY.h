@@ -142,7 +142,7 @@ class MgGen1Battery : public UdsCanBattery {
                                           .ext_ID = false,
                                           .DLC = 8,
                                           .ID = 0x1F1,
-                                          .data = {0x0E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+                                          .data = {0x0E, 0x00, 0x00, 0x00, 0x08, 0x72, 0x00, 0x00}};
 };
 
 inline MgGen1Battery::MgGen1Battery(DATALAYER_BATTERY_TYPE* datalayer_ptr, CAN_Interface targetCan,
