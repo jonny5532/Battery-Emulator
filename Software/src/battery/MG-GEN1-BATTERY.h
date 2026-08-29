@@ -102,10 +102,6 @@ class MgGen1Battery : public UdsCanBattery {
   // Latched flags for hysteresis
   bool voltageAtCellMin = false;
   bool voltageAtCellMax = false;
-  // Some batteries might need the transmit frames at 10/20ms intervals, others
-  // seem happy with 100ms (which is preferable)
-  // TODO: Double-check whether this is true (ideally we'd use 100ms for all of them).
-  bool fastTick = true;
 
   uint16_t soc = 5000;
 
@@ -146,7 +142,7 @@ class MgGen1Battery : public UdsCanBattery {
                                           .ext_ID = false,
                                           .DLC = 8,
                                           .ID = 0x1F1,
-                                          .data = {0x0E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+                                          .data = {0x0E, 0x00, 0x00, 0x00, 0x08, 0x72, 0x00, 0x00}};
 };
 
 inline MgGen1Battery::MgGen1Battery(DATALAYER_BATTERY_TYPE* datalayer_ptr, CAN_Interface targetCan,
