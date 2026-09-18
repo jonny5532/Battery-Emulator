@@ -2,6 +2,7 @@
 #include <soc/soc.h>
 #include <cmath>    //For unit test
 #include <cstring>  //For unit test
+#include "MG-4-FD-GENERATORS.h"
 //#include "esp_timer.h"
 #include "../battery/BATTERIES.h"
 #include "../communication/can/comm_can.h"
@@ -538,6 +539,14 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
           update_soc(soc_times_ten * 10);
           soc_freshness = 10;
         }
+
+        // Precharge/contactor state, confirmed against a real vehicle
+        // capture: 3=idle, 11=precharge active, 7=closed/charging. Used to
+        // decide where the FD handshake segment loops back to.
+        if ((rx_frame.data.u8[21] & 0x0F) != precharge_contactor_state) {
+          precharge_contactor_state = rx_frame.data.u8[21] & 0x0F;
+          logging.printf("[MG4] Precharge/contactor state changed to %d\n", precharge_contactor_state);
+        }
         break;
       default:
         break;
@@ -576,12 +585,6 @@ static const uint8_t FOURSEVEN_FIRST_BYTES[] = {
     0x81, 0x53, 0x3B, 0x66, 0xE8, 0xB5, 0xDD, 0x0F, 0x53, 0x0E, 0x66, 0xB4, 0x3A, 0xE8, 0x0F,
 };
 
-static const uint8_t FOURSEVEN_FD_CYCLE_1[] = {0xF4, 0xA9, 0x4E, 0x13, 0x9D, 0xC0, 0x27, 0x7A,
-                                               0x26, 0x7B, 0x9C, 0xC1, 0x4F, 0x12, 0xF5};
-
-static const uint8_t FOURSEVEN_FD_CYCLE_2[] = {0x61, 0x3C, 0xDB, 0x86, 0x08, 0x55, 0xB2, 0xEF,
-                                               0xB3, 0xEE, 0x09, 0x54, 0xDA, 0x87, 0x60};
-
 void Mg4Battery::transmit_can(unsigned long currentMillis) {
   if (datalayer.system.status.bms_reset_status != BMS_RESET_IDLE) {
     // Transmitting towards battery is halted while BMS is being reset
@@ -603,19 +606,72 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
 
     if (sendPhase == 3 || sendPhase == 13 || sendPhase == 23) {
       // Send a non-FD 4F3 to wake up the PTEXT interface.
-      ptext_transmit(&MG4_4F3);
+      //ptext_transmit(&MG4_4F3);
     }
 
-    if (true) {
-      int offset = sendPhase;
-      if (sendPhase >= 15) {
-        offset = sendPhase - 15;
+    // 0x047 (FD) and 0x08A: generated closing-handshake frames (see
+    // MG-4-FD-GENERATORS.h). Both are stepped together once per 10ms tick.
+    //
+    // The full segment starts with an idle period whose 0x08A "open request"
+    // bit would cause a repeating open/close cycle every time the loop wraps,
+    // so once the pack has confirmed closed (0x15B state == 7) the loop
+    // restarts from the already-closed tail of the segment instead.
+    static const int CLOSED_TAIL_START_047_08A = 304;
+    static const int CLOSED_TAIL_START_313_314 = 30;
+
+    sendClosingMessagesFD = (datalayer.system.status.system_status != FAULT);
+
+    // Reset to the start of the segment whenever closing is (re)enabled -
+    // including on a fresh boot. If the pack is already reporting closed
+    // (e.g. this is a software restart rather than a real power-cycle), jump
+    // straight into the closed tail instead.
+    if (sendClosingMessagesFD && !prevSendClosingMessagesFD) {
+      if (precharge_contactor_state == 7) {
+        replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
+        replayFrameIndex313_314 = CLOSED_TAIL_START_313_314;
+      } else {
+        replayFrameIndex047_08A = 0;
+        replayFrameIndex313_314 = 0;
       }
-      MG4_047_FD.data.u8[4] = FOURSEVEN_FD_CYCLE_1[offset];
-      MG4_047_FD.data.u8[5] = 0xF0 | offset;
-      MG4_047_FD.data.u8[16] = FOURSEVEN_FD_CYCLE_2[offset];
-      MG4_047_FD.data.u8[17] = 0xF0 | offset;
+    }
+    prevSendClosingMessagesFD = sendClosingMessagesFD;
+
+    if (sendClosingMessagesFD) {
+      mg4_fd::gen047::build(replayFrameIndex047_08A, datalayer.battery.status.voltage_dV, MG4_047_FD.data.u8);
+      mg4_fd::gen08a::build(replayFrameIndex047_08A, MG4_08A_FD.data.u8);
       transmit_can_frame(&MG4_047_FD);
+      transmit_can_frame(&MG4_08A_FD);
+    }
+
+    replayFrameIndex047_08A++;
+    if (precharge_contactor_state == 7) {
+      if (replayFrameIndex047_08A >= mg4_fd::LEN_047) {
+        replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
+      }
+    } else if (replayFrameIndex047_08A >= mg4_fd::LEN_047) {
+      replayFrameIndex047_08A = 0;
+    }
+
+    if (currentMillis - previousMillis100 >= INTERVAL_100_MS) {
+      previousMillis100 = currentMillis;
+
+      // 0x313/0x314: generated companion frames, sent at 100ms and kept in
+      // step with the 10ms segment above.
+      if (sendClosingMessagesFD) {
+        mg4_fd::gen313::build(replayFrameIndex313_314, datalayer.battery.status.voltage_dV, MG4_313_FD.data.u8);
+        mg4_fd::gen314::build(replayFrameIndex313_314, MG4_314_FD.data.u8);
+        transmit_can_frame(&MG4_313_FD);
+        transmit_can_frame(&MG4_314_FD);
+      }
+
+      replayFrameIndex313_314++;
+      if (precharge_contactor_state == 7) {
+        if (replayFrameIndex313_314 >= mg4_fd::LEN_313) {
+          replayFrameIndex313_314 = CLOSED_TAIL_START_313_314;
+        }
+      } else if (replayFrameIndex313_314 >= mg4_fd::LEN_313) {
+        replayFrameIndex313_314 = 0;
+      }
     }
 
     // Send the non-FD 047 frame to close contactors on PTEXT.
@@ -626,7 +682,7 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
       MG4_047.data.u8[1] = sendPhase;
     }
     if (datalayer.system.status.system_status != FAULT) {
-      ptext_transmit(&MG4_047);
+      //ptext_transmit(&MG4_047);
     }
 
     if (sendPhase == 2 || sendPhase == 12 || sendPhase == 22) {
