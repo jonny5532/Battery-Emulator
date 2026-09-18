@@ -38,6 +38,11 @@ class Mg4Battery : public UdsCanBattery {
   bool reportsFDVoltages = false;
   bool reportsSoC = false;
   bool coulombCounting = false;
+  bool sendClosingMessagesFD = true;
+  bool prevSendClosingMessagesFD = false;
+  uint8_t precharge_contactor_state = 0xFF;  // 0x15B byte[21]&0xF: 3=idle, 11=precharge, 7=closed/charging
+  int replayFrameIndex047_08A = 0;           // cycles through the generated 047/08A segment
+  int replayFrameIndex313_314 = 0;           // cycles through the generated 313/314 segment
 
   uint32_t total_discharge_dC = 0;  // in deci-Coulombs
   bool total_discharge_initialized = false;
@@ -45,6 +50,7 @@ class Mg4Battery : public UdsCanBattery {
   unsigned long lastTickMillis = 0;
 
   unsigned long previousMillis10 = 0;   // will store last time a 10ms CAN Message was send
+  unsigned long previousMillis100 = 0;  // will store last time a 100ms CAN Message was send
   unsigned long previousMillis200 = 0;  // will store last time a 200ms CAN Message was send
 
   uint32_t* nonvolatile_cookie = 0;
@@ -74,10 +80,16 @@ class Mg4Battery : public UdsCanBattery {
                           .DLC = 8,
                           .ID = 0x4F3,
                           .data = {0xF3, 0x10, 0x48, 0x00, 0xFF, 0xFF, 0x00, 0x11}};
+  // 0x047 (FD), 0x08A, 0x313 and 0x314 are all populated at runtime by
+  // concise generators (see MG-4-FD-GENERATORS.h) rather than by replaying a
+  // long captured table.
   CAN_frame MG4_047_FD = {.FD = true,
                           .ext_ID = false,
                           .DLC = 24,
                           .ID = 0x047,
                           .data = {0x00, 0x01, 0x27, 0x08, 0xF4, 0xF0, 0x80, 0x04, 0x00, 0x5F, 0x3C, 0x00,
                                    0x00, 0x01, 0x48, 0x08, 0x61, 0xF0, 0x6A, 0x06, 0xA0, 0xFF, 0xF0, 0xFF}};
+  CAN_frame MG4_08A_FD = {.FD = true, .ext_ID = false, .DLC = 48, .ID = 0x08A, .data = {0}};
+  CAN_frame MG4_313_FD = {.FD = true, .ext_ID = false, .DLC = 48, .ID = 0x313, .data = {0}};
+  CAN_frame MG4_314_FD = {.FD = true, .ext_ID = false, .DLC = 24, .ID = 0x314, .data = {0}};
 };
