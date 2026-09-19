@@ -222,11 +222,11 @@ uint32_t Mg4Battery::calculate_max_discharge_power_W() {
   // default/uninitialized value of 0 dC must not be mistaken for an actual
   // at-limit reading.
   if (temp_freshness > 0) {
-  const int32_t temp_high_power_W =
-      battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_WATTS_PER_DC);
-  if (temp_high_power_W < max_discharge_power_W) {
-    max_discharge_power_W = temp_high_power_W;
-  }
+    const int32_t temp_high_power_W =
+        battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_WATTS_PER_DC);
+    if (temp_high_power_W < max_discharge_power_W) {
+      max_discharge_power_W = temp_high_power_W;
+    }
   }
 
   // SoC-based power derating: full power down to DERATE_DISCHARGE_BELOW_SOC,
@@ -263,18 +263,18 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
   // clamped LFP charge power to 0 W any time temperature hadn't been read
   // yet, since MIN_TEMP_LFP_DC is also 0).
   if (temp_freshness > 0) {
-  const int32_t MIN_TEMP_DC =
-      datalayer.battery.info.chemistry == battery_chemistry_enum::LFP ? MIN_TEMP_LFP_DC : MIN_TEMP_NMC_DC;
-  const int32_t temp_high_power_W =
-      battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_WATTS_PER_DC);
-  const int32_t temp_low_power_W =
-      battery_power_by_low_temp(datalayer.battery.status.temperature_min_dC, MIN_TEMP_DC, MIN_WATTS_PER_DC);
-  if (temp_high_power_W < max_charge_power_W) {
-    max_charge_power_W = temp_high_power_W;
-  }
-  if (temp_low_power_W < max_charge_power_W) {
-    max_charge_power_W = temp_low_power_W;
-  }
+    const int32_t MIN_TEMP_DC =
+        datalayer.battery.info.chemistry == battery_chemistry_enum::LFP ? MIN_TEMP_LFP_DC : MIN_TEMP_NMC_DC;
+    const int32_t temp_high_power_W =
+        battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_WATTS_PER_DC);
+    const int32_t temp_low_power_W =
+        battery_power_by_low_temp(datalayer.battery.status.temperature_min_dC, MIN_TEMP_DC, MIN_WATTS_PER_DC);
+    if (temp_high_power_W < max_charge_power_W) {
+      max_charge_power_W = temp_high_power_W;
+    }
+    if (temp_low_power_W < max_charge_power_W) {
+      max_charge_power_W = temp_low_power_W;
+    }
   }
 
   // SoC-based power derating: full power up to DERATE_CHARGE_ABOVE_SOC, then a
@@ -562,6 +562,8 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
           precharge_contactor_state = rx_frame.data.u8[21] & 0x0F;
           logging.printf("[MG4] Precharge/contactor state changed to %d\n", precharge_contactor_state);
         }
+        precharge_state_received = true;
+
         // Reflect the pack's own contactor state on the main BE page (see
         // battery_reports_contactor_state in setup()).
         switch (precharge_contactor_state) {
@@ -641,21 +643,44 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
     sendClosingMessagesFD = (datalayer.system.status.system_status != FAULT);
 
     // Reset to the start of the segment whenever closing is (re)enabled -
-    // including on a fresh boot. If the pack is already reporting closed
-    // (e.g. this is a software restart rather than a real power-cycle), jump
-    // straight into the closed tail instead.
-    if (sendClosingMessagesFD && !prevSendClosingMessagesFD) {
-      if (precharge_contactor_state == 7) {
-        replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
-        replayFrameIndex313_314 = CLOSED_TAIL_START_313_314;
-      } else {
-        replayFrameIndex047_08A = 0;
-        replayFrameIndex313_314 = 0;
-      }
-    }
-    prevSendClosingMessagesFD = sendClosingMessagesFD;
+    // including on a fresh boot. Mirrors the MG-GEN1 startup grace period:
+    // don't start replaying until we've received a precharge/contactor state
+    // in 0x15B (or the grace period expires), so we know whether the pack's
+    // contactors are already closed (e.g. this is a software restart rather
+    // than a real power-cycle). If they are, jump straight into the closed
+    // tail instead of replaying the opening sequence from the start, which
+    // would open and reclose the contactors. Until then the handshake frames
+    // stay silent, so already-closed contactors remain so. The pack
+    // broadcasts 0x15B every 50ms while awake, so the wait is normally very
+    // short; the grace period only bounds the delay if it is asleep.
+    static constexpr unsigned long STARTUP_GRACE_PERIOD_MS = 5000;  // 5 seconds
 
     if (sendClosingMessagesFD) {
+      if (!prevSendClosingMessagesFD) {
+        if (precharge_state_received || currentMillis - closingWaitStartMillis >= STARTUP_GRACE_PERIOD_MS) {
+          if (precharge_state_received && precharge_contactor_state == 7) {
+            logging.printf("[MG4] Pack contactors already closed, resuming at closed tail\n");
+            replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
+            replayFrameIndex313_314 = CLOSED_TAIL_START_313_314;
+          } else {
+            logging.printf("[MG4] Pack contactors open (state %d), starting closing sequence from the beginning\n",
+                           precharge_state_received ? (int)precharge_contactor_state : -1);
+            replayFrameIndex047_08A = 0;
+            replayFrameIndex313_314 = 0;
+          }
+          prevSendClosingMessagesFD = true;
+        } else if (closingWaitStartMillis == 0) {
+          // Start the grace timer on the first tick after closing is enabled
+          closingWaitStartMillis = currentMillis;
+        }
+      }
+    } else {
+      // Closing is disabled (FAULT): stop the handshake and the wait timer
+      prevSendClosingMessagesFD = false;
+      closingWaitStartMillis = 0;
+    }
+
+    if (sendClosingMessagesFD && prevSendClosingMessagesFD) {
       mg4_fd::gen047::build(replayFrameIndex047_08A, datalayer.battery.status.voltage_dV, MG4_047_FD.data.u8);
       mg4_fd::gen08a::build(replayFrameIndex047_08A, MG4_08A_FD.data.u8);
       transmit_can_frame(&MG4_047_FD);
@@ -676,7 +701,7 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
 
       // 0x313/0x314: generated companion frames, sent at 100ms and kept in
       // step with the 10ms segment above.
-      if (sendClosingMessagesFD) {
+      if (sendClosingMessagesFD && prevSendClosingMessagesFD) {
         mg4_fd::gen313::build(replayFrameIndex313_314, datalayer.battery.status.voltage_dV, MG4_313_FD.data.u8);
         mg4_fd::gen314::build(replayFrameIndex313_314, MG4_314_FD.data.u8);
         transmit_can_frame(&MG4_313_FD);
