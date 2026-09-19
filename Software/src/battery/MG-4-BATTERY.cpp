@@ -785,11 +785,6 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   strncpy(datalayer.system.info.battery_protocol, Name, 63);
   datalayer.system.info.battery_protocol[63] = '\0';
   datalayer.system.status.battery_allows_contactor_closing = true;
-  // The pack has its own internal, BMS-controlled contactors, driven via CAN
-  // rather than by BE-driven external relays. This tells the webserver to
-  // show detailed contactor status (via contactors_engaged) even when
-  // contactor_control_enabled is false.
-  datalayer.system.status.battery_reports_contactor_state = true;
 
   datalayer.battery.info.chemistry = user_selected_battery_chemistry;
   datalayer.battery.info.number_of_cells = 104;
@@ -853,40 +848,39 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   // logging.printf("Nonvolatile cookie set to %lu\n", *nonvolatile_cookie);
 }
 
-void Mg4Battery::action(uint32_t action, uint32_t value) {
-  if (action == 0x47) {
-    uint32_t bit = value & 0xFF;
-    uint32_t state = (value >> 8) & 0xFF;
-    if (state) {
-      // set bit
-      MG4_047.data.u8[bit / 8] |= (1 << (bit % 8));
-    } else {
-      // clear bit
-      MG4_047.data.u8[bit / 8] &= ~(1 << (bit % 8));
-    }
-  }
-}
-
 String Mg4Battery::get_uds_info_html() {
-  String html = "<h3>MG4 0x047 bits</h3>";
-  html += "<div style='display: flex; gap: 10px; flex-wrap: wrap;'>";
-
-  for (int b = 2; b < 8; b++) {
-    uint8_t byteValue = MG4_047.data.u8[b];
-    html += "<div style='border: 1px solid #ccc; padding: 5px;'>";
-    html += "Byte " + String(b) + ": 0x" + (byteValue < 16 ? "0" : "") + String(byteValue, HEX) + "<br>";
-    for (int i = 7; i >= 0; i--) {
-      bool isSet = (byteValue >> i) & 1;
-      int bitIdx = (b * 8) + i;
-      html += "<button onclick=\"fetch('/batteryAction?value=71," + String((bitIdx) | (!isSet << 8)) +
-              "').then(() => location.reload())\" style='background-color: " + (isSet ? "#f44336" : "#4CAF50") +
-              "; color: white; margin: 2px;'>" + String(i) + "</button>";
-      if (i == 4)
-        html += "<br>";
+  // Precharge/contactor state (0x15B byte[21]&0xF): 3=idle, 11=precharge, 7=closed/charging
+  const char* state_text;
+  const char* state_color;
+  if (!precharge_state_received) {
+    state_text = "No data received yet";
+    state_color = "#9e9e9e";  // Grey
+  } else {
+    switch (precharge_contactor_state) {
+      case 7:
+        state_text = "Closed / charging";
+        state_color = "#4CAF50";  // Green
+        break;
+      case 11:
+        state_text = "Precharge active";
+        state_color = "#ff9800";  // Orange
+        break;
+      case 3:
+        state_text = "Idle";
+        state_color = "#f44336";  // Red
+        break;
+      default:
+        state_text = "Unknown";
+        state_color = "#9e9e9e";  // Grey
+        break;
     }
-    html += "</div>";
   }
-
+  String html = "<h3>Precharge/contactor state</h3>";
+  html += "<div style='border: 1px solid #ccc; padding: 5px;'>";
+  html += "<span style='display: inline-block; width: 14px; height: 14px; background-color: " + String(state_color) +
+          "; margin-right: 6px;'></span>";
+  html += "State: " + String(precharge_state_received ? String(precharge_contactor_state) : String("n/a")) + " (" +
+          state_text + ")";
   html += "</div>";
 
   return html;
