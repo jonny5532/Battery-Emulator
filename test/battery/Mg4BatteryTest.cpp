@@ -87,10 +87,11 @@ TEST_F(Mg4BatteryTest, CoulombCountAndLimitsTest) {
   EXPECT_EQ(datalayer.battery.status.real_soc, 0);
 
   // Test Charge Limit Observation
-  // setup(): max_cell_voltage_mV for NMC is 4250, so working_max is 4100mV.
+  // setup(): max_cell_voltage_mV for NMC is 4250, so the default working max is
+  // 4240mV (no user-selected max is set, working_cell_max_mV = 4250 - 10).
 
   // Simulate hitting working max
-  send_can_12c_fd(415 * 104 / 10, 0, 4150, 4150);
+  send_can_12c_fd(425 * 104 / 10, 0, 4250, 4250);
   battery->update_values();
   EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0);
   EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
