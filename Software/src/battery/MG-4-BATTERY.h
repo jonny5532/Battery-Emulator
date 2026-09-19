@@ -30,6 +30,7 @@ class Mg4Battery : public UdsCanBattery {
   bool voltageAtCellMin = false;
   int32_t cell_voltage_freshness = 0;
   int32_t soc_freshness = 0;
+  int32_t temp_freshness = 0;
 
   int16_t module_temperatures_dC[12] = {0};
   int16_t module_temps_received = 0;
