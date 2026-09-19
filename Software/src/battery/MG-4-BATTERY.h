@@ -40,6 +40,7 @@ class Mg4Battery : public UdsCanBattery {
   bool coulombCounting = false;
   bool sendClosingMessagesFD = true;
   bool prevSendClosingMessagesFD = false;
+  bool playingOpenLoop = false;              // True while looping the open segment (open requested)
   bool precharge_state_received = false;     // Have we received a 0x15B precharge/contactor state yet?
   uint8_t precharge_contactor_state = 0xFF;  // 0x15B byte[21]&0xF: 3=idle, 11=precharge, 7=closed/charging
   unsigned long closingWaitStartMillis = 0;  // When we started waiting for the first 0x15B state

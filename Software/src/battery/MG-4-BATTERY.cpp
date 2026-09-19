@@ -639,6 +639,13 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
     // restarts from the already-closed tail of the segment instead.
     static const int CLOSED_TAIL_START_047_08A = 304;
     static const int CLOSED_TAIL_START_313_314 = 30;
+    // The open part of the message cycle: the first 150 frames of the 10ms
+    // 047/08A segment, and the first 15 frames of the 100ms 313/314 segment
+    // (150 x 10ms == 15 x 100ms, so the two loops stay in step). Looping this
+    // leading part keeps the 0x08A open-request bit asserted, which holds the
+    // pack's contactors open.
+    static const int OPEN_LOOP_LEN_047_08A = 150;
+    static const int OPEN_LOOP_LEN_313_314 = 15;
 
     sendClosingMessagesFD = (datalayer.system.status.system_status != FAULT);
 
@@ -657,6 +664,7 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
 
     if (sendClosingMessagesFD) {
       if (!prevSendClosingMessagesFD) {
+        playingOpenLoop = false;
         if (precharge_state_received || currentMillis - closingWaitStartMillis >= STARTUP_GRACE_PERIOD_MS) {
           if (precharge_state_received && precharge_contactor_state == 7) {
             logging.printf("[MG4] Pack contactors already closed, resuming at closed tail\n");
@@ -675,12 +683,22 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
         }
       }
     } else {
-      // Closing is disabled (FAULT): stop the handshake and the wait timer
+      // Contactor open is requested (FAULT). Replay the open part of the
+      // message cycle on loop: the first 15 frames of 313/314 together with
+      // the first 150 frames of 047/08A (which run at 10x the rate, so the
+      // two loops complete together every 1.5s). Restart from index 0 the
+      // first time open is requested after closing was active.
+      if (!playingOpenLoop) {
+        logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
+        playingOpenLoop = true;
+        replayFrameIndex047_08A = 0;
+        replayFrameIndex313_314 = 0;
+      }
       prevSendClosingMessagesFD = false;
       closingWaitStartMillis = 0;
     }
 
-    if (sendClosingMessagesFD && prevSendClosingMessagesFD) {
+    if ((sendClosingMessagesFD && prevSendClosingMessagesFD) || playingOpenLoop) {
       mg4_fd::gen047::build(replayFrameIndex047_08A, datalayer.battery.status.voltage_dV, MG4_047_FD.data.u8);
       mg4_fd::gen08a::build(replayFrameIndex047_08A, MG4_08A_FD.data.u8);
       transmit_can_frame(&MG4_047_FD);
@@ -688,7 +706,13 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
     }
 
     replayFrameIndex047_08A++;
-    if (precharge_contactor_state == 7) {
+    if (playingOpenLoop) {
+      // Open requested: loop just the open part of the cycle, regardless of
+      // the pack's current contactor state.
+      if (replayFrameIndex047_08A >= OPEN_LOOP_LEN_047_08A) {
+        replayFrameIndex047_08A = 0;
+      }
+    } else if (precharge_contactor_state == 7) {
       if (replayFrameIndex047_08A >= mg4_fd::LEN_047) {
         replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
       }
@@ -701,7 +725,7 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
 
       // 0x313/0x314: generated companion frames, sent at 100ms and kept in
       // step with the 10ms segment above.
-      if (sendClosingMessagesFD && prevSendClosingMessagesFD) {
+      if ((sendClosingMessagesFD && prevSendClosingMessagesFD) || playingOpenLoop) {
         mg4_fd::gen313::build(replayFrameIndex313_314, datalayer.battery.status.voltage_dV, MG4_313_FD.data.u8);
         mg4_fd::gen314::build(replayFrameIndex313_314, MG4_314_FD.data.u8);
         transmit_can_frame(&MG4_313_FD);
@@ -709,7 +733,12 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
       }
 
       replayFrameIndex313_314++;
-      if (precharge_contactor_state == 7) {
+      if (playingOpenLoop) {
+        // Open requested: loop just the open part of the cycle
+        if (replayFrameIndex313_314 >= OPEN_LOOP_LEN_313_314) {
+          replayFrameIndex313_314 = 0;
+        }
+      } else if (precharge_contactor_state == 7) {
         if (replayFrameIndex313_314 >= mg4_fd::LEN_313) {
           replayFrameIndex313_314 = CLOSED_TAIL_START_313_314;
         }
