@@ -58,17 +58,20 @@ void UdsCanBattery::transmit_uds_can(unsigned long currentMillis) {
     return;
   }
 
-  if (pending_seq_state != UDS_STATE_IDLE) {
-    if (seq_pause_ticks > 0) {
-      // Don't start the sequence until the pause expires.
-      return;
-    }
+  if (pending_seq_state != UDS_STATE_IDLE && seq_pause_ticks == 0 && pending_pid == 0) {
     // A new sequence was requested, start it now.
     uint16_t state = pending_seq_state;
     pending_seq_state = UDS_STATE_IDLE;
     handle_sequence(state, 0, nullptr, 0);
     return;
   }
+  // If a sequence is queued but cannot start yet (pause active, or a PID
+  // request is still in flight), fall through to the PID scan so the
+  // in-flight request keeps ticking and retrying. Dispatching while a PID is
+  // in flight would make send_sequence_message() refuse (PID busy) after the
+  // queued state has already been consumed, silently dropping the sequence -
+  // with a dead bus the PID only clears once its retry budget is exhausted,
+  // and only then does the first sequence step go out.
 
   if (transmit_uds_pid_scan()) {
     // We did a PID scan.
