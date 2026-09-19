@@ -556,27 +556,17 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
         }
 
         // Precharge/contactor state, confirmed against a real vehicle
-        // capture: 3=idle, 11=precharge active, 7=closed/charging. Used to
-        // decide where the FD handshake segment loops back to.
-        if ((rx_frame.data.u8[21] & 0x0F) != precharge_contactor_state) {
-          precharge_contactor_state = rx_frame.data.u8[21] & 0x0F;
-          logging.printf("[MG4] Precharge/contactor state changed to %d\n", precharge_contactor_state);
+        // capture: 3=idle, 11=precharge active, 7=closed/charging. Single
+        // source of truth for the contactor state machine, the
+        // contactors_engaged reporting and the UDS info page.
+        if ((rx_frame.data.u8[21] & 0x0F) != pack_contactors.state) {
+          pack_contactors.state = rx_frame.data.u8[21] & 0x0F;
+          logging.printf("[MG4] Precharge/contactor state changed to %d\n", pack_contactors.state);
         }
-        precharge_state_received = true;
+        pack_contactors.received = true;
 
-        // Reflect the pack's own contactor state on the main BE page (see
-        // battery_reports_contactor_state in setup()).
-        switch (precharge_contactor_state) {
-          case 7:  // Closed / charging
-            datalayer.system.status.contactors_engaged = 1;
-            break;
-          case 11:  // Precharge active
-            datalayer.system.status.contactors_engaged = 3;
-            break;
-          default:  // Idle (3), or no data yet (0xFF)
-            datalayer.system.status.contactors_engaged = 0;
-            break;
-        }
+        // Reflect the pack's own contactor state on the main BE page.
+        datalayer.system.status.contactors_engaged = pack_contactors.contactsEngaged();
         break;
       default:
         break;
@@ -610,10 +600,108 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
   }
 }
 
-static const uint8_t FOURSEVEN_FIRST_BYTES[] = {
-    0x81, 0xDC, 0xB4, 0xE9, 0xE8, 0xB5, 0xDD, 0x0F, 0x53, 0x81, 0x66, 0xB4, 0x3A, 0x67, 0x0F,
-    0x81, 0x53, 0x3B, 0x66, 0xE8, 0xB5, 0xDD, 0x0F, 0x53, 0x0E, 0x66, 0xB4, 0x3A, 0xE8, 0x0F,
-};
+// --- Contactor state machine constants -------------------------------------
+// Geometry of the generated message cycle (frames; see MG-4-FD-GENERATORS.h):
+// 0x047/0x08A are generated at 10ms, 0x313/0x314 at 100ms, all driven from one
+// master cursor (replayFrameIndex047_08A).
+//
+// The cycle opens with an idle period whose 0x08A "open request" bit holds the
+// pack's contactors open, so:
+//   - looping the first OPEN_LOOP_LEN frames of it keeps the contactors open,
+//   - replaying it from index 0 closes them (precharge ramp included), and
+//   - once the pack confirms closed (0x15B state == 7) the cycle restarts from
+//     the already-closed tail instead, which would otherwise open and reclose
+//     the contactors every time the loop wrapped.
+static constexpr int OPEN_LOOP_LEN_047_08A = 150;                  // first 1.5s of the cycle
+static constexpr int CLOSED_TAIL_START_047_08A = 304;              // already-closed tail of the cycle
+static constexpr unsigned long CONTACTOR_STARTUP_GRACE_MS = 5000;  // max wait for the first 0x15B state
+// 0x313/0x314 run at 1/10th the 047/08A rate; their closed-tail start is
+// CLOSED_TAIL_START_047_08A / 10 = 30, and their cycle position is derived
+// from the master cursor at transmit time.
+
+void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
+  const bool open_requested = (datalayer.system.status.system_status == FAULT);
+
+  switch (contactorState) {
+    case ContactorState::WAITING_FOR_PACK:
+      // We don't know the current pack state yet.
+
+      if (open_requested) {
+        // If an open is requested, we should proceed with that immediately.
+        logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
+        replayFrameIndex047_08A = 0;
+        contactorState = ContactorState::OPENING;
+      } else if (pack_contactors.received || currentMillis - contactorWaitStartMillis >= CONTACTOR_STARTUP_GRACE_MS) {
+        // We now know the pack state, or have given up waiting for it.
+
+        contactorWaitStartMillis = 0;
+        if (pack_contactors.isClosed()) {
+          // Pack contactors were already closed (eg, we rebooted without opening them).
+          // Keep them closed.
+          logging.printf("[MG4] Pack contactors already closed, resuming at closed tail\n");
+          replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
+          contactorState = ContactorState::CLOSED;
+        } else {
+          // Pack contactors are open, start the closing sequence from the beginning.
+          logging.printf("[MG4] Pack contactors open (state %d), starting closing sequence from the beginning\n",
+                         pack_contactors.received ? (int)pack_contactors.state : -1);
+          replayFrameIndex047_08A = 0;
+          contactorState = ContactorState::CLOSING;
+        }
+      } else if (contactorWaitStartMillis == 0) {
+        // Start the grace period timer
+        contactorWaitStartMillis = currentMillis;
+      }
+      break;
+
+    case ContactorState::CLOSING:
+      // We're replaying the contactor-close sequence.
+
+      if (open_requested) {
+        // Open was requested, abort!
+        logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
+        replayFrameIndex047_08A = 0;
+        contactorState = ContactorState::OPENING;
+      } else if (pack_contactors.isClosed()) {
+        // The sequence has worked, the pack has closed.
+        // We'll now stay in the closed state.
+        contactorState = ContactorState::CLOSED;
+      }
+      break;
+
+    case ContactorState::CLOSED:
+      // The contactors are (presumably) currently closed.
+
+      if (open_requested) {
+        // Open requested, do that immediately.
+        logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
+        replayFrameIndex047_08A = 0;
+        contactorState = ContactorState::OPENING;
+      } else if (pack_contactors.received && !pack_contactors.isClosed()) {
+        // The contactors opened by themselves. Try to reclose them by
+        // restarting the closing sequence.
+        logging.printf("[MG4] Pack contactors no longer closed (state %d), replaying closing sequence\n",
+                       (int)pack_contactors.state);
+        replayFrameIndex047_08A = 0;
+        contactorState = ContactorState::CLOSING;
+      }
+      break;
+
+    case ContactorState::OPENING:
+      // We're waiting for contactors to open.
+
+      if (!open_requested) {
+        // Close was requested during opening. Go to the waiting state until
+        // we've figured out what the pack is doing (we don't know how far the
+        // opening got).
+
+        logging.printf("[MG4] Closing re-enabled, waiting for pack contactor state\n");
+        contactorWaitStartMillis = 0;
+        contactorState = ContactorState::WAITING_FOR_PACK;
+      }
+      break;
+  }
+}
 
 void Mg4Battery::transmit_can(unsigned long currentMillis) {
   if (datalayer.system.status.bms_reset_status != BMS_RESET_IDLE) {
@@ -626,144 +714,41 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
   if (currentMillis - previousMillis10 >= INTERVAL_10_MS) {
     previousMillis10 = currentMillis;
 
-    if (sendPhase == 3 || sendPhase == 13 || sendPhase == 23) {
-      // Non-FD 4F3 (PTEXT wakeup) is not sent - closing works over FD alone.
-    }
+    contactor_state_tick(currentMillis);
 
-    // 0x047 (FD) and 0x08A: generated closing-handshake frames (see
-    // MG-4-FD-GENERATORS.h). Both are stepped together once per 10ms tick.
-    //
-    // The full segment starts with an idle period whose 0x08A "open request"
-    // bit would cause a repeating open/close cycle every time the loop wraps,
-    // so once the pack has confirmed closed (0x15B state == 7) the loop
-    // restarts from the already-closed tail of the segment instead.
-    static const int CLOSED_TAIL_START_047_08A = 304;
-    static const int CLOSED_TAIL_START_313_314 = 30;
-    // The open part of the message cycle: the first 150 frames of the 10ms
-    // 047/08A segment, and the first 15 frames of the 100ms 313/314 segment
-    // (150 x 10ms == 15 x 100ms, so the two loops stay in step). Looping this
-    // leading part keeps the 0x08A open-request bit asserted, which holds the
-    // pack's contactors open.
-    static const int OPEN_LOOP_LEN_047_08A = 150;
-    static const int OPEN_LOOP_LEN_313_314 = 15;
-
-    sendClosingMessagesFD = (datalayer.system.status.system_status != FAULT);
-
-    // Reset to the start of the segment whenever closing is (re)enabled -
-    // including on a fresh boot. Mirrors the MG-GEN1 startup grace period:
-    // don't start replaying until we've received a precharge/contactor state
-    // in 0x15B (or the grace period expires), so we know whether the pack's
-    // contactors are already closed (e.g. this is a software restart rather
-    // than a real power-cycle). If they are, jump straight into the closed
-    // tail instead of replaying the opening sequence from the start, which
-    // would open and reclose the contactors. Until then the handshake frames
-    // stay silent, so already-closed contactors remain so. The pack
-    // broadcasts 0x15B every 50ms while awake, so the wait is normally very
-    // short; the grace period only bounds the delay if it is asleep.
-    static constexpr unsigned long STARTUP_GRACE_PERIOD_MS = 5000;  // 5 seconds
-
-    if (sendClosingMessagesFD) {
-      if (!prevSendClosingMessagesFD) {
-        playingOpenLoop = false;
-        if (precharge_state_received || currentMillis - closingWaitStartMillis >= STARTUP_GRACE_PERIOD_MS) {
-          if (precharge_state_received && precharge_contactor_state == 7) {
-            logging.printf("[MG4] Pack contactors already closed, resuming at closed tail\n");
-            replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
-            replayFrameIndex313_314 = CLOSED_TAIL_START_313_314;
-          } else {
-            logging.printf("[MG4] Pack contactors open (state %d), starting closing sequence from the beginning\n",
-                           precharge_state_received ? (int)precharge_contactor_state : -1);
-            replayFrameIndex047_08A = 0;
-            replayFrameIndex313_314 = 0;
-          }
-          prevSendClosingMessagesFD = true;
-        } else if (closingWaitStartMillis == 0) {
-          // Start the grace timer on the first tick after closing is enabled
-          closingWaitStartMillis = currentMillis;
-        }
-      }
-    } else {
-      // Contactor open is requested (FAULT). Replay the open part of the
-      // message cycle on loop: the first 15 frames of 313/314 together with
-      // the first 150 frames of 047/08A (which run at 10x the rate, so the
-      // two loops complete together every 1.5s). Restart from index 0 the
-      // first time open is requested after closing was active.
-      if (!playingOpenLoop) {
-        logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
-        playingOpenLoop = true;
-        replayFrameIndex047_08A = 0;
-        replayFrameIndex313_314 = 0;
-      }
-      prevSendClosingMessagesFD = false;
-      closingWaitStartMillis = 0;
-    }
-
-    if ((sendClosingMessagesFD && prevSendClosingMessagesFD) || playingOpenLoop) {
+    if (contactorState != ContactorState::WAITING_FOR_PACK) {
       mg4_fd::gen047::build(replayFrameIndex047_08A, datalayer.battery.status.voltage_dV, MG4_047_FD.data.u8);
       mg4_fd::gen08a::build(replayFrameIndex047_08A, MG4_08A_FD.data.u8);
       transmit_can_frame(&MG4_047_FD);
       transmit_can_frame(&MG4_08A_FD);
-    }
 
-    replayFrameIndex047_08A++;
-    if (playingOpenLoop) {
-      // Open requested: loop just the open part of the cycle, regardless of
-      // the pack's current contactor state.
-      if (replayFrameIndex047_08A >= OPEN_LOOP_LEN_047_08A) {
-        replayFrameIndex047_08A = 0;
+      // Calculate the start/end indices for the replay
+      int wrap_start = (contactorState == ContactorState::CLOSED) ? CLOSED_TAIL_START_047_08A : 0;
+      int wrap_limit = (contactorState == ContactorState::OPENING) ? OPEN_LOOP_LEN_047_08A : mg4_fd::LEN_047;
+      // Wrap if necessary
+      if (++replayFrameIndex047_08A >= wrap_limit) {
+        replayFrameIndex047_08A = wrap_start;
       }
-    } else if (precharge_contactor_state == 7) {
-      if (replayFrameIndex047_08A >= mg4_fd::LEN_047) {
-        replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
-      }
-    } else if (replayFrameIndex047_08A >= mg4_fd::LEN_047) {
-      replayFrameIndex047_08A = 0;
     }
 
     if (currentMillis - previousMillis100 >= INTERVAL_100_MS) {
       previousMillis100 = currentMillis;
 
-      // 0x313/0x314: generated companion frames, sent at 100ms and kept in
-      // step with the 10ms segment above.
-      if ((sendClosingMessagesFD && prevSendClosingMessagesFD) || playingOpenLoop) {
+      if (contactorState != ContactorState::WAITING_FOR_PACK) {
+        int replayFrameIndex313_314 = replayFrameIndex047_08A / 10;
         mg4_fd::gen313::build(replayFrameIndex313_314, datalayer.battery.status.voltage_dV, MG4_313_FD.data.u8);
         mg4_fd::gen314::build(replayFrameIndex313_314, MG4_314_FD.data.u8);
         transmit_can_frame(&MG4_313_FD);
         transmit_can_frame(&MG4_314_FD);
       }
-
-      replayFrameIndex313_314++;
-      if (playingOpenLoop) {
-        // Open requested: loop just the open part of the cycle
-        if (replayFrameIndex313_314 >= OPEN_LOOP_LEN_313_314) {
-          replayFrameIndex313_314 = 0;
-        }
-      } else if (precharge_contactor_state == 7) {
-        if (replayFrameIndex313_314 >= mg4_fd::LEN_313) {
-          replayFrameIndex313_314 = CLOSED_TAIL_START_313_314;
-        }
-      } else if (replayFrameIndex313_314 >= mg4_fd::LEN_313) {
-        replayFrameIndex313_314 = 0;
-      }
     }
 
-    // Send the non-FD 047 frame to close contactors on PTEXT.
-    MG4_047.data.u8[0] = FOURSEVEN_FIRST_BYTES[sendPhase];
-    if (sendPhase >= 0xf) {
-      MG4_047.data.u8[1] = sendPhase - 0xf;
-    } else {
-      MG4_047.data.u8[1] = sendPhase;
-    }
-    // Non-FD 047 (PTEXT) is not sent - closing works over FD alone.
-
-    if (sendPhase == 2 || sendPhase == 12 || sendPhase == 22) {
-      // Send a FD 4F3 to wake up the FD interface.
+    // 0x4F3 (FD) wakeup keep-alive, every 100ms. This was the only live part
+    // of the old non-FD 047/sendPhase PTEXT cycle - closing works over FD
+    // alone, so the non-FD frames are gone.
+    if (++wakeupCounter >= 10) {
+      wakeupCounter = 0;
       transmit_can_frame(&MG4_4F3_FD);
-    }
-
-    sendPhase++;
-    if (sendPhase >= 30) {
-      sendPhase = 0;
     }
   }
 
@@ -878,38 +863,13 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
 }
 
 String Mg4Battery::get_uds_info_html() {
-  // Precharge/contactor state (0x15B byte[21]&0xF): 3=idle, 11=precharge, 7=closed/charging
-  const char* state_text;
-  const char* state_color;
-  if (!precharge_state_received) {
-    state_text = "No data received yet";
-    state_color = "#9e9e9e";  // Grey
-  } else {
-    switch (precharge_contactor_state) {
-      case 7:
-        state_text = "Closed / charging";
-        state_color = "#4CAF50";  // Green
-        break;
-      case 11:
-        state_text = "Precharge active";
-        state_color = "#ff9800";  // Orange
-        break;
-      case 3:
-        state_text = "Idle";
-        state_color = "#f44336";  // Red
-        break;
-      default:
-        state_text = "Unknown";
-        state_color = "#9e9e9e";  // Grey
-        break;
-    }
-  }
+  // Pack-reported precharge/contactor state (0x15B byte[21]&0xF)
   String html = "<h3>Precharge/contactor state</h3>";
   html += "<div style='border: 1px solid #ccc; padding: 5px;'>";
-  html += "<span style='display: inline-block; width: 14px; height: 14px; background-color: " + String(state_color) +
-          "; margin-right: 6px;'></span>";
-  html += "State: " + String(precharge_state_received ? String(precharge_contactor_state) : String("n/a")) + " (" +
-          state_text + ")";
+  html += "<span style='display: inline-block; width: 14px; height: 14px; background-color: " +
+          String(pack_contactors.color()) + "; margin-right: 6px;'></span>";
+  html += "State: " + String(pack_contactors.received ? String(pack_contactors.state) : String("n/a")) + " (" +
+          pack_contactors.label() + ")";
   html += "</div>";
 
   return html;
