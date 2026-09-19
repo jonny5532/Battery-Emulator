@@ -109,7 +109,6 @@ add_executable(tests
     ../Software/src/lib/eModbus-eModbus/ModbusTypeDefs.cpp
     ../Software/src/lib/eModbus-eModbus/RTUutils.cpp
     ../Software/src/battery/BATTERIES.cpp
-    ../Software/src/battery/BATTERY-SECOND-INTERFACE.cpp
     ../Software/src/battery/Battery.cpp
     ../Software/src/battery/AKASOL-BATTERY.cpp
     ../Software/src/battery/BMW-I3-BATTERY.cpp
@@ -118,6 +117,7 @@ add_executable(tests
     ../Software/src/battery/BMW-IX-HTML.cpp
     ../Software/src/battery/BMW-PHEV-BATTERY.cpp
     ../Software/src/shunt/BMW-SBOX.cpp
+    ../Software/src/shunt/BATTERY-SECOND-INTERFACE.cpp
     ../Software/src/battery/BOLT-AMPERA-BATTERY.cpp
     ../Software/src/battery/BYD-ATTO-3-BATTERY.cpp
     ../Software/src/battery/CanBattery.cpp
