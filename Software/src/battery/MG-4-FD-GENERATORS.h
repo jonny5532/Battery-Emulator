@@ -301,6 +301,7 @@ inline void build(int i, uint8_t out[48]) {
   // Subfield 2 (00 01 00)
   memcpy(s2, BASE_S100, 12);
   s2[5] = counter08a(0x40, i);
+  // I suspect S100_MODE_RLE is the contactor close request?
   s2[7] = (uint8_t)rle_lookup(S100_MODE_RLE, i);
   s2[8] = (uint8_t)rle_lookup(S100_FLAG_RLE, i);
   //s2[11] = (uint8_t)rle_lookup(S100_LSB_RLE, i);
