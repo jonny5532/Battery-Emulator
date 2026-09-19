@@ -169,8 +169,10 @@ inline void build(int i, uint16_t voltage_dV, uint8_t out[24]) {
   uint8_t cnt = (uint8_t)(0xF0 + ((i + 11) % 15));
 
   uint16_t val12 = shape_value(precharge_shape_q16((uint32_t)i), A_VAL12_DC, (uint16_t)target);
-  uint16_t mod = rle_lookup(A_MOD_RLE, i);
-  uint16_t flag = rle_lookup(B_FLAG_RLE, i);
+  //uint16_t mod = rle_lookup(A_MOD_RLE, i);
+  uint16_t mod = 0x01;
+  //uint16_t flag = rle_lookup(B_FLAG_RLE, i);
+  uint16_t flag = 0x9F;
 
   // Subfield A
   uint8_t a[12];
@@ -292,7 +294,8 @@ inline void build(int i, uint8_t out[48]) {
   // Subfield 1 (00 01 18)
   memcpy(s1, BASE_S118, 12);
   s1[5] = counter08a(0x30, i);
-  s1[7] = (uint8_t)rle_lookup(S118_VAL_RLE, i);
+  //s1[7] = (uint8_t)rle_lookup(S118_VAL_RLE, i);
+  s1[7] = 0x2F;
   s1[4] = crc8(&s1[5]);
 
   // Subfield 2 (00 01 00)
@@ -300,7 +303,8 @@ inline void build(int i, uint8_t out[48]) {
   s2[5] = counter08a(0x40, i);
   s2[7] = (uint8_t)rle_lookup(S100_MODE_RLE, i);
   s2[8] = (uint8_t)rle_lookup(S100_FLAG_RLE, i);
-  s2[11] = (uint8_t)rle_lookup(S100_LSB_RLE, i);
+  //s2[11] = (uint8_t)rle_lookup(S100_LSB_RLE, i);
+  s2[11] = 0xFF;
   s2[4] = crc8(&s2[5]);
 
   // Subfield 3 (00 01 53) - CRC slot stays 0x00, as captured
@@ -489,7 +493,8 @@ inline void build(int i, uint8_t out[24]) {
   s1[5] = counter314(0x40, i);
   s1[6] = (uint8_t)rle_lookup(S1_VAL_RLE, i);
   s1[7] = (uint8_t)rle_lookup(S1_HI_RLE, i);
-  s1[8] = (uint8_t)rle_lookup(S1_FLAG_RLE, i);
+  //s1[8] = (uint8_t)rle_lookup(S1_FLAG_RLE, i);
+  s1[8] = 0x7F;
   s1[9] = (uint8_t)rle_lookup(S1_STAT_RLE, i);
   s1[4] = crc8(&s1[5]);
 
