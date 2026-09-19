@@ -34,18 +34,74 @@ class Mg4Battery : public UdsCanBattery {
   int16_t module_temperatures_dC[12] = {0};
   int16_t module_temps_received = 0;
 
-  int sendPhase = 0;
+  // For monitoring the actual battery-reported contactor state.
+  struct PackContactorFeedback {
+    bool received = false;
+    uint8_t state = 0xFF;  // 0xFF = no data yet
+    bool isClosed() const { return received && state == 7; }
+    bool isPrecharging() const { return received && state == 11; }
+    // Value for datalayer.system.status.contactors_engaged (shown on the main
+    // BE contactor widget): 1=closed, 3=precharge active, 0=otherwise.
+    uint8_t contactsEngaged() const {
+      if (isClosed()) {
+        return 1;
+      }
+      if (isPrecharging()) {
+        return 3;
+      }
+      return 0;
+    }
+    const char* label() const {
+      if (!received) {
+        return "No data received yet";
+      }
+      switch (state) {
+        case 7:
+          return "Closed / charging";
+        case 11:
+          return "Precharge active";
+        case 3:
+          return "Idle";
+        default:
+          return "Unknown";
+      }
+    }
+    const char* color() const {
+      if (!received) {
+        return "#9e9e9e";  // Grey
+      }
+      switch (state) {
+        case 7:
+          return "#4CAF50";  // Green
+        case 11:
+          return "#ff9800";  // Orange
+        case 3:
+          return "#f44336";  // Red
+        default:
+          return "#9e9e9e";  // Grey
+      }
+    }
+  };
+
+  // Contactor management state machine.
+  enum class ContactorState {
+    WAITING_FOR_PACK,  // Silent: waiting for the first 0x15B state (or grace expiry)
+    CLOSING,           // Replaying the full message cycle from index 0
+    CLOSED,            // Pack confirmed closed, replaying the end of the cycle
+    OPENING,           // Open requested, replaying the start of the cycle
+  };
+
   bool reportsFDVoltages = false;
   bool reportsSoC = false;
   bool coulombCounting = false;
-  bool sendClosingMessagesFD = true;
-  bool prevSendClosingMessagesFD = false;
-  bool playingOpenLoop = false;              // True while looping the open segment (open requested)
-  bool precharge_state_received = false;     // Have we received a 0x15B precharge/contactor state yet?
-  uint8_t precharge_contactor_state = 0xFF;  // 0x15B byte[21]&0xF: 3=idle, 11=precharge, 7=closed/charging
-  unsigned long closingWaitStartMillis = 0;  // When we started waiting for the first 0x15B state
-  int replayFrameIndex047_08A = 0;           // cycles through the generated 047/08A segment
-  int replayFrameIndex313_314 = 0;           // cycles through the generated 313/314 segment
+  ContactorState contactorState = ContactorState::WAITING_FOR_PACK;
+  PackContactorFeedback pack_contactors;
+  unsigned long contactorWaitStartMillis = 0;  // Grace timer base while WAITING_FOR_PACK
+  int replayFrameIndex047_08A = 0;             // Master cursor through the message cycle; the
+                                               // 313/314 index is derived from it (see cpp)
+  int wakeupCounter = 0;                       // Paces the 0x4F3 FD wakeup keep-alive
+
+  void contactor_state_tick(unsigned long currentMillis);
 
   uint32_t total_discharge_dC = 0;  // in deci-Coulombs
   bool total_discharge_initialized = false;
@@ -66,17 +122,6 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t POLL_MIN_CELL_TEMPERATURE = 0xB057;
   static const uint16_t POLL_MAX_CELL_TEMPERATURE = 0xB056;
   static const uint16_t POLL_BATTERY_SOH = 0xB061;
-
-  CAN_frame MG4_4F3 = {.FD = false,
-                       .ext_ID = false,
-                       .DLC = 8,
-                       .ID = 0x4F3,
-                       .data = {0xF3, 0x10, 0x48, 0x00, 0xFF, 0xFF, 0x00, 0x11}};
-  CAN_frame MG4_047 = {.FD = false,
-                       .ext_ID = false,
-                       .DLC = 8,
-                       .ID = 0x047,
-                       .data = {0x00, 0x00, 0x45, 0x7D, 0x7F, 0xFF, 0xFF, 0xFE}};
 
   CAN_frame MG4_4F3_FD = {.FD = true,
                           .ext_ID = false,
