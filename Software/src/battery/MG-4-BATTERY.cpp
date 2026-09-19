@@ -11,7 +11,6 @@
 #include "../devboard/utils/common_functions.h"
 #include "../devboard/utils/events.h"
 #include "../devboard/utils/logging.h"
-#include "../shunt/BATTERY-SECOND-INTERFACE.h"
 
 static const uint16_t MAX_CHARGE_POWER_W = 14000;
 static const uint16_t CHARGE_TRICKLE_POWER_W = 100;    // The cell voltage limits will override
@@ -219,11 +218,15 @@ uint32_t Mg4Battery::calculate_max_discharge_power_W() {
   }
 
   // Temperature-based power derating: high temperature limits both charge and
-  // discharge.
+  // discharge. Skipped if we have no fresh temperature reading yet - a
+  // default/uninitialized value of 0 dC must not be mistaken for an actual
+  // at-limit reading.
+  if (temp_freshness > 0) {
   const int32_t temp_high_power_W =
       battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_WATTS_PER_DC);
   if (temp_high_power_W < max_discharge_power_W) {
     max_discharge_power_W = temp_high_power_W;
+  }
   }
 
   // SoC-based power derating: full power down to DERATE_DISCHARGE_BELOW_SOC,
@@ -254,7 +257,12 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
   }
 
   // Temperature-based power derating: high temperature limits both charge and
-  // discharge, low temperature limits charge only.
+  // discharge, low temperature limits charge only. Skipped if we have no
+  // fresh temperature reading yet - a default/uninitialized value of 0 dC
+  // must not be mistaken for an actual at-limit reading (this previously
+  // clamped LFP charge power to 0 W any time temperature hadn't been read
+  // yet, since MIN_TEMP_LFP_DC is also 0).
+  if (temp_freshness > 0) {
   const int32_t MIN_TEMP_DC =
       datalayer.battery.info.chemistry == battery_chemistry_enum::LFP ? MIN_TEMP_LFP_DC : MIN_TEMP_NMC_DC;
   const int32_t temp_high_power_W =
@@ -266,6 +274,7 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
   }
   if (temp_low_power_W < max_charge_power_W) {
     max_charge_power_W = temp_low_power_W;
+  }
   }
 
   // SoC-based power derating: full power up to DERATE_CHARGE_ABOVE_SOC, then a
@@ -318,6 +327,10 @@ void Mg4Battery::
     update_values() {  //This function maps all the values fetched via CAN to the correct parameters used for modbus
 
   // Should be called every second
+
+  if (temp_freshness > 0) {
+    temp_freshness--;
+  }
 
   if (coulombCounting) {
     if (cell_voltage_freshness <= 0) {
@@ -446,6 +459,7 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
 
         datalayer.battery.status.temperature_max_dC = ((int)rx_frame.data.u8[19] * 5) - 400;
         datalayer.battery.status.temperature_min_dC = ((int)rx_frame.data.u8[22] * 5) - 400;
+        temp_freshness = 10;
 
         cell_voltage_freshness = 10;
         reportsFDVoltages = true;
@@ -521,6 +535,7 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
               }
               datalayer.battery.status.temperature_min_dC = temp_min_dC;
               datalayer.battery.status.temperature_max_dC = temp_max_dC;
+              temp_freshness = 10;
             }
           }
           // Cell module temps are in 0x511
@@ -546,6 +561,19 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
         if ((rx_frame.data.u8[21] & 0x0F) != precharge_contactor_state) {
           precharge_contactor_state = rx_frame.data.u8[21] & 0x0F;
           logging.printf("[MG4] Precharge/contactor state changed to %d\n", precharge_contactor_state);
+        }
+        // Reflect the pack's own contactor state on the main BE page (see
+        // battery_reports_contactor_state in setup()).
+        switch (precharge_contactor_state) {
+          case 7:  // Closed / charging
+            datalayer.system.status.contactors_engaged = 1;
+            break;
+          case 11:  // Precharge active
+            datalayer.system.status.contactors_engaged = 3;
+            break;
+          default:  // Idle (3), or no data yet (0xFF)
+            datalayer.system.status.contactors_engaged = 0;
+            break;
         }
         break;
       default:
@@ -593,20 +621,11 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
     return;
   }
 
-  auto ptext_transmit = [&](CAN_frame* frame) {
-    if (shunt && user_selected_shunt_type == ShuntType::BatterySecondInterface) {
-      static_cast<BatterySecondInterfaceShunt*>(shunt)->transmit_can_frame(frame);
-    } else {
-      transmit_can_frame(frame);
-    }
-  };
-
   if (currentMillis - previousMillis10 >= INTERVAL_10_MS) {
     previousMillis10 = currentMillis;
 
     if (sendPhase == 3 || sendPhase == 13 || sendPhase == 23) {
-      // Send a non-FD 4F3 to wake up the PTEXT interface.
-      //ptext_transmit(&MG4_4F3);
+      // Non-FD 4F3 (PTEXT wakeup) is not sent - closing works over FD alone.
     }
 
     // 0x047 (FD) and 0x08A: generated closing-handshake frames (see
@@ -681,9 +700,7 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
     } else {
       MG4_047.data.u8[1] = sendPhase;
     }
-    if (datalayer.system.status.system_status != FAULT) {
-      //ptext_transmit(&MG4_047);
-    }
+    // Non-FD 047 (PTEXT) is not sent - closing works over FD alone.
 
     if (sendPhase == 2 || sendPhase == 12 || sendPhase == 22) {
       // Send a FD 4F3 to wake up the FD interface.
@@ -720,9 +737,11 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
       break;
     case POLL_MIN_CELL_TEMPERATURE:
       datalayer.battery.status.temperature_min_dC = ((int32_t)value - 20000) / 50;
+      temp_freshness = 10;
       break;
     case POLL_MAX_CELL_TEMPERATURE:
       datalayer.battery.status.temperature_max_dC = ((int32_t)value - 20000) / 50;
+      temp_freshness = 10;
       break;  // End of cycle
   }
   return 0;  // Continue normal PID cycling
@@ -741,6 +760,11 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   strncpy(datalayer.system.info.battery_protocol, Name, 63);
   datalayer.system.info.battery_protocol[63] = '\0';
   datalayer.system.status.battery_allows_contactor_closing = true;
+  // The pack has its own internal, BMS-controlled contactors, driven via CAN
+  // rather than by BE-driven external relays. This tells the webserver to
+  // show detailed contactor status (via contactors_engaged) even when
+  // contactor_control_enabled is false.
+  datalayer.system.status.battery_reports_contactor_state = true;
 
   datalayer.battery.info.chemistry = user_selected_battery_chemistry;
   datalayer.battery.info.number_of_cells = 104;
@@ -748,14 +772,14 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
 
   // Danger limits
   if (datalayer.battery.info.chemistry == battery_chemistry_enum::LFP) {
-    datalayer.battery.info.max_cell_voltage_mV = 3700;
+    datalayer.battery.info.max_cell_voltage_mV = 3760;
     datalayer.battery.info.min_cell_voltage_mV = 2500;
   } else {
     datalayer.battery.info.max_cell_voltage_mV = 4250;
     datalayer.battery.info.min_cell_voltage_mV = 2700;
   }
 
-  working_cell_max_mV = datalayer.battery.info.max_cell_voltage_mV - 150;
+  working_cell_max_mV = datalayer.battery.info.max_cell_voltage_mV - 10;
   working_cell_min_mV = datalayer.battery.info.min_cell_voltage_mV + 300;
   working_cell_recharge_threshold_mV = working_cell_max_mV - 100;
   coulombCounting = user_selected_use_estimated_SOC;
