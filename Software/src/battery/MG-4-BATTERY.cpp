@@ -602,8 +602,8 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
 
 // --- Contactor state machine constants -------------------------------------
 // Geometry of the generated message cycle (frames; see MG-4-FD-GENERATORS.h):
-// 0x047/0x08A are generated at 10ms, 0x313/0x314 at 100ms, all driven from one
-// master cursor (replayFrameIndex047_08A).
+// 0x047/0x08A are generated at 10ms, 0x313/0x314/0x315 at 100ms, all driven
+// from one master cursor (replayFrameIndex047_08A).
 //
 // The cycle opens with an idle period whose 0x08A "open request" bit holds the
 // pack's contactors open, so:
@@ -615,8 +615,8 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
 static constexpr int OPEN_LOOP_LEN_047_08A = 150;                  // first 1.5s of the cycle
 static constexpr int CLOSED_TAIL_START_047_08A = 304;              // already-closed tail of the cycle
 static constexpr unsigned long CONTACTOR_STARTUP_GRACE_MS = 5000;  // max wait for the first 0x15B state
-// 0x313/0x314 run at 1/10th the 047/08A rate; their closed-tail start is
-// CLOSED_TAIL_START_047_08A / 10 = 30, and their cycle position is derived
+// 0x313/0x314/0x315 run at 1/10th the 047/08A rate; their closed-tail start
+// is CLOSED_TAIL_START_047_08A / 10 = 30, and their cycle position is derived
 // from the master cursor at transmit time.
 
 void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
@@ -735,11 +735,13 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
       previousMillis100 = currentMillis;
 
       if (contactorState != ContactorState::WAITING_FOR_PACK) {
-        int replayFrameIndex313_314 = replayFrameIndex047_08A / 10;
-        mg4_fd::gen313::build(replayFrameIndex313_314, datalayer.battery.status.voltage_dV, MG4_313_FD.data.u8);
-        mg4_fd::gen314::build(replayFrameIndex313_314, MG4_314_FD.data.u8);
+        int replayFrameIndex313_314_315 = replayFrameIndex047_08A / 10;
+        mg4_fd::gen313::build(replayFrameIndex313_314_315, datalayer.battery.status.voltage_dV, MG4_313_FD.data.u8);
+        mg4_fd::gen314::build(replayFrameIndex313_314_315, MG4_314_FD.data.u8);
+        mg4_fd::gen315::build(replayFrameIndex313_314_315, datalayer.battery.status.voltage_dV, MG4_315_FD.data.u8);
         transmit_can_frame(&MG4_313_FD);
         transmit_can_frame(&MG4_314_FD);
+        transmit_can_frame(&MG4_315_FD);
       }
     }
 

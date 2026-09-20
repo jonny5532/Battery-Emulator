@@ -6,7 +6,7 @@
 
 // ---------------------------------------------------------------------------
 // Decomposed generators for the MG4 contactor-closing FD frames
-// (0x047, 0x08A, 0x313, 0x314).
+// (0x047, 0x08A, 0x313, 0x314, 0x315).
 //
 // These are the runtime form of the standalone generators that used to live
 // in mg4_dev/*cycle_opt.cpp. Each FD payload is a sequence of back-to-back
@@ -104,11 +104,31 @@ inline uint16_t shape_value(uint32_t shape_q16, uint16_t dc, uint16_t scale) {
   return (uint16_t)(dc + ((range * shape_q16 + CURVE_ONE / 2) >> 16));
 }
 
+// --- Signal shapes shared between the 0x313, 0x314 and 0x315 generators ----
+// 0x313 subfield 2 and 0x315 subfield 1 both carry this VALB companion byte
+// (~0x78 -> 0x75 around the precharge ramp).
+static const RleRun VALB_RLE[14] = {
+    {0x78, 37}, {0x79, 1}, {0x78, 1}, {0x76, 2}, {0x78, 2}, {0x79, 1}, {0x78, 3},
+    {0x77, 9},  {0x76, 8}, {0x77, 1}, {0x76, 7}, {0x75, 1}, {0x76, 2}, {0x75, 5},
+};
+
+// Linear ramp shared by 0x313's VALA/VALC and 0x315 subfield 1's VALA: idle
+// until frame 32, straight line to VALA_MAX at frame 78, then held.
+static const int VALA_RAMP_START = 32;
+static const int VALA_RAMP_END = 78;
+static const uint16_t VALA_MAX = 77;
+
+// Linear ramp timing shared by 0x314 subfield 2's VAL and 0x315 subfield 2's
+// bytes 7/9: idle until frame 44, reaching the field maximum at frame 59.
+static const int VAL_RAMP_START = 44;
+static const int VAL_RAMP_END = 59;
+
 // Frame-segment lengths (number of frames in each generated segment).
 static const int LEN_047 = 800;
 static const int LEN_08A = 800;
 static const int LEN_313 = 80;
 static const int LEN_314 = 80;
+static const int LEN_315 = 80;
 
 // ===========================================================================
 // 0x047 (24-byte FD payload, two 12-byte subfields)
@@ -353,18 +373,9 @@ static const RleRun S1_FLAG_RLE[2] = {
     {0xE7, 47},
 };
 
-// Subfield 2 (00 04 00): VALA and VALC share a linear ramp shape, each with
-// its own maximum.
-static const int S2_RAMP_START = 32;  // first frame off the idle value
-static const int S2_RAMP_END = 78;    // frame the ramp reaches MAX
-static const uint16_t S2_VALA_MAX = 77;
+// Subfield 2 (00 04 00): VALC shares the shared VALA ramp timing above but
+// has its own maximum. VALB is the shared 0x313/0x315 table.
 static const uint16_t S2_VALC_MAX = 90;
-
-// Subfield 2 (00 04 00): VALB payload byte (0x75-0x79), 14 runs
-static const RleRun S2_VALB_RLE[14] = {
-    {0x78, 37}, {0x79, 1}, {0x78, 1}, {0x76, 2}, {0x78, 2}, {0x79, 1}, {0x78, 3},
-    {0x77, 9},  {0x76, 8}, {0x77, 1}, {0x76, 7}, {0x75, 1}, {0x76, 2}, {0x75, 5},
-};
 
 // Subfield 2 (00 04 00): VALD payload byte (0x68/0x69), 2 runs
 static const RleRun S2_VALD_RLE[2] = {
@@ -405,11 +416,11 @@ inline void build(int i, uint16_t voltage_dV, uint8_t out[48]) {
   s1[4] = crc8(&s1[5]);
 
   // Subfield 2 (00 04 00) - CRC slot stays 0x00 and byte 5 stays 0x01, as captured
-  uint32_t ramp = linear_shape_q16((uint32_t)i, (uint32_t)S2_RAMP_START, (uint32_t)S2_RAMP_END);
+  uint32_t ramp = linear_shape_q16((uint32_t)i, (uint32_t)VALA_RAMP_START, (uint32_t)VALA_RAMP_END);
   uint16_t valc = shape_value(ramp, 0, S2_VALC_MAX);
   memcpy(s2, BASE_S2, 12);
-  s2[6] = (uint8_t)shape_value(ramp, 0, S2_VALA_MAX);
-  s2[7] = (uint8_t)rle_lookup(S2_VALB_RLE, i);
+  s2[6] = (uint8_t)shape_value(ramp, 0, VALA_MAX);
+  s2[7] = (uint8_t)rle_lookup(VALB_RLE, i);
   s2[8] = (uint8_t)(0x80 | (valc >> 4));          // static hi nibble 8 + VALC hi nibble
   s2[9] = (uint8_t)(((valc & 0xF) << 4) | 0x08);  // VALC lo nibble + static lo nibble 8
   s2[10] = (uint8_t)rle_lookup(S2_VALD_RLE, i);
@@ -467,9 +478,8 @@ static const RleRun S1_STAT_RLE[4] = {
     {0xE4, 16},
 };
 
-// Subfield 2 (00 04 05): VAL ramps from idle to a peak, then holds.
-static const int S2_VAL_RAMP_START = 44;  // first frame off the idle value
-static const int S2_VAL_RAMP_END = 59;    // frame the ramp reaches MAX
+// Subfield 2 (00 04 05): VAL ramps from idle to a peak, then holds. It reuses
+// the shared VAL ramp timing defined above.
 static const uint16_t S2_VAL_MAX = 48;
 
 // Subfield 2 (00 04 05): CNT2 payload byte (0x00-0x04), 5 runs
@@ -502,7 +512,7 @@ inline void build(int i, uint8_t out[24]) {
   // Subfield 2 (00 04 05)
   memcpy(s2, BASE_S2, 12);
   s2[5] = counter314(0x70, i);
-  s2[6] = (uint8_t)shape_value(linear_shape_q16((uint32_t)i, (uint32_t)S2_VAL_RAMP_START, (uint32_t)S2_VAL_RAMP_END), 0,
+  s2[6] = (uint8_t)shape_value(linear_shape_q16((uint32_t)i, (uint32_t)VAL_RAMP_START, (uint32_t)VAL_RAMP_END), 0,
                                S2_VAL_MAX);
   s2[9] = (uint8_t)rle_lookup(S2_CNT2_RLE, i);
   s2[4] = crc8(&s2[5]);
@@ -512,5 +522,104 @@ inline void build(int i, uint8_t out[24]) {
 }
 
 }  // namespace gen314
+
+// ===========================================================================
+// 0x315 (48-byte FD payload, four 12-byte subfields)
+// ===========================================================================
+namespace gen315 {
+
+// Subfield 2 (00 04 06): MODE payload byte (0x00/0x64/0x7D), 3 runs
+static const RleRun S2_MODE_RLE[3] = {
+    {0x00, 32},
+    {0x64, 2},
+    {0x7D, 46},
+};
+
+// Subfield 2 (00 04 06): byte 7 ramps to 0x1A, byte 9 ramps from 0x63 to
+// 0x72. Both reuse the shared linear ramp timing of 0x314's VAL.
+static const uint16_t S2_VAL_MAX = 0x1A;   // byte 7 final value
+static const uint16_t S2_TEMP_DC = 0x63;   // byte 9 idle value
+static const uint16_t S2_TEMP_MAX = 0x72;  // byte 9 final value
+
+// Subfield 4 (00 04 18): STAT payload byte (0x10/0x30/0x50), 3 runs
+static const RleRun S4_STAT_RLE[3] = {
+    {0x10, 10},
+    {0x30, 23},
+    {0x50, 47},
+};
+
+// Subfield 4 (00 04 18): VAL16 is the 0x313 subfield 3 precharge curve,
+// sampled one 100 ms frame earlier (the 0x315 capture leads by one sample),
+// and like 0x313 it tracks the live pack voltage (5 x voltage_dV at full
+// precharge).
+static const uint16_t S4_VAL16_DC = 562;   // 12.5 x 45, idle
+static const uint32_t S4_VAL16_SCALE = 5;  // frame value = 5 x voltage_dV
+static const uint16_t S4_VAL16_FIELD_MAX = 0xFFFF;
+static const int S4_VAL16_SKIP = 1;  // 0x315 leads 0x313 by one sample
+
+// Subfield 4 (00 04 18): FLAG payload byte (0x00/0x02), 2 runs
+static const RleRun S4_FLAG_RLE[2] = {
+    {0x00, 1},
+    {0x02, 79},
+};
+
+static const uint8_t BASE_S1[12] = {0x00, 0x04, 0x09, 0x08, 0x00, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+static const uint8_t BASE_S2[12] = {0x00, 0x04, 0x06, 0x08, 0x00, 0x00, 0x00, 0x00, 0xB9, 0x00, 0x4E, 0x00};
+static const uint8_t BASE_S3[12] = {0x00, 0x04, 0x17, 0x08, 0x00, 0x00, 0x41, 0x4C, 0x3F, 0xFF, 0xFF, 0xFF};
+static const uint8_t BASE_S4[12] = {0x00, 0x04, 0x18, 0x08, 0x00, 0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00};
+
+// Rolling counter: 15 values cycling with wrap, starting at base+7 on frame 0.
+inline uint8_t counter315(uint8_t base, int i) {
+  return (uint8_t)(base + ((i + 7) % 15));
+}
+
+// Assemble the 48-byte 0x315 FD payload for frame index i. The VAL16 plateau
+// tracks the live pack voltage (5 x voltage_dV), like 0x313.
+inline void build(int i, uint16_t voltage_dV, uint8_t out[48]) {
+  uint8_t s1[12], s2[12], s3[12], s4[12];
+
+  // Subfield 1 (00 04 09): VALB and VALA reuse the 0x313 shapes; the CRC
+  // slot stays 0x00, as captured.
+  memcpy(s1, BASE_S1, 12);
+  s1[10] = (uint8_t)rle_lookup(VALB_RLE, i);
+  s1[11] = (uint8_t)shape_value(linear_shape_q16((uint32_t)i, (uint32_t)VALA_RAMP_START, (uint32_t)VALA_RAMP_END), 0,
+                                VALA_MAX);
+
+  // Subfield 2 (00 04 06): bytes 7 and 9 reuse the 0x314 VAL ramp timing; the
+  // CRC slot stays 0x00, as captured.
+  uint32_t ramp = linear_shape_q16((uint32_t)i, (uint32_t)VAL_RAMP_START, (uint32_t)VAL_RAMP_END);
+  memcpy(s2, BASE_S2, 12);
+  s2[6] = (uint8_t)rle_lookup(S2_MODE_RLE, i);
+  s2[7] = (uint8_t)shape_value(ramp, 0, S2_VAL_MAX);
+  s2[9] = (uint8_t)shape_value(ramp, S2_TEMP_DC, S2_TEMP_MAX);
+
+  // Subfield 3 (00 04 17)
+  memcpy(s3, BASE_S3, 12);
+  s3[5] = counter315(0xF0, i);
+  s3[4] = crc8(&s3[5]);
+
+  // Subfield 4 (00 04 18): VAL16 tracks the live pack voltage like 0x313,
+  // sampled one frame earlier; the CRC slot stays 0x00, as captured.
+  uint32_t target16 = (uint32_t)voltage_dV * S4_VAL16_SCALE;
+  if (target16 < S4_VAL16_DC) {
+    target16 = S4_VAL16_DC;
+  } else if (target16 > S4_VAL16_FIELD_MAX) {
+    target16 = S4_VAL16_FIELD_MAX;
+  }
+  uint32_t t16 = (i > S4_VAL16_SKIP) ? (uint32_t)(i - S4_VAL16_SKIP) * 10u : 0u;
+  uint16_t val16 = shape_value(precharge_shape_q16(t16), S4_VAL16_DC, (uint16_t)target16);
+  memcpy(s4, BASE_S4, 12);
+  s4[5] = (uint8_t)rle_lookup(S4_STAT_RLE, i);
+  s4[6] = (uint8_t)(val16 >> 8);    // VAL16 high byte
+  s4[7] = (uint8_t)(val16 & 0xFF);  // VAL16 low byte
+  s4[9] = (uint8_t)rle_lookup(S4_FLAG_RLE, i);
+
+  memcpy(out, s1, 12);
+  memcpy(out + 12, s2, 12);
+  memcpy(out + 24, s3, 12);
+  memcpy(out + 36, s4, 12);
+}
+
+}  // namespace gen315
 
 }  // namespace mg4_fd

@@ -98,7 +98,7 @@ class Mg4Battery : public UdsCanBattery {
   PackContactorFeedback pack_contactors;
   unsigned long contactorWaitStartMillis = 0;  // Grace timer base while WAITING_FOR_PACK
   int replayFrameIndex047_08A = 0;             // Master cursor through the message cycle; the
-                                               // 313/314 index is derived from it (see cpp)
+                                               // 313/314/315 index is derived from it (see cpp)
   int wakeupCounter = 0;                       // Paces the 0x4F3 FD wakeup keep-alive
 
   void contactor_state_tick(unsigned long currentMillis);
@@ -128,9 +128,9 @@ class Mg4Battery : public UdsCanBattery {
                           .DLC = 8,
                           .ID = 0x4F3,
                           .data = {0xF3, 0x10, 0x48, 0x00, 0xFF, 0xFF, 0x00, 0x11}};
-  // 0x047 (FD), 0x08A, 0x313 and 0x314 are all populated at runtime by
-  // concise generators (see MG-4-FD-GENERATORS.h) rather than by replaying a
-  // long captured table.
+  // 0x047 (FD), 0x08A, 0x313, 0x314 and 0x315 are all populated at runtime
+  // by concise generators (see MG-4-FD-GENERATORS.h) rather than by replaying
+  // a long captured table.
   CAN_frame MG4_047_FD = {.FD = true,
                           .ext_ID = false,
                           .DLC = 24,
@@ -140,4 +140,5 @@ class Mg4Battery : public UdsCanBattery {
   CAN_frame MG4_08A_FD = {.FD = true, .ext_ID = false, .DLC = 48, .ID = 0x08A, .data = {0}};
   CAN_frame MG4_313_FD = {.FD = true, .ext_ID = false, .DLC = 48, .ID = 0x313, .data = {0}};
   CAN_frame MG4_314_FD = {.FD = true, .ext_ID = false, .DLC = 24, .ID = 0x314, .data = {0}};
+  CAN_frame MG4_315_FD = {.FD = true, .ext_ID = false, .DLC = 48, .ID = 0x315, .data = {0}};
 };
