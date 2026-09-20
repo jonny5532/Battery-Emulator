@@ -129,7 +129,7 @@ class Mg4Battery : public UdsCanBattery {
                           .ID = 0x4F3,
                           .data = {0xF3, 0x10, 0x48, 0x00, 0xFF, 0xFF, 0x00, 0x11}};
   // 0x047 (FD), 0x08A, 0x313, 0x314 and 0x315 are all populated at runtime
-  // by concise generators (see MG-4-FD-GENERATORS.h) rather than by replaying
+  // by concise generators (see MG-4-BATTERY.cpp) rather than by replaying
   // a long captured table.
   CAN_frame MG4_047_FD = {.FD = true,
                           .ext_ID = false,
