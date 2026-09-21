@@ -123,6 +123,44 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t POLL_MAX_CELL_TEMPERATURE = 0xB056;
   static const uint16_t POLL_BATTERY_SOH = 0xB061;
 
+  // Identifier PIDs, same DIDs as MG-GEN1-BATTERY
+  static const uint16_t POLL_BATTERY_TYPE = 0xF18A;
+  static const uint16_t POLL_BATTERY_VIN = 0xF190;
+  static const uint16_t POLL_BATTERY_MFR_DATE = 0xF18B;
+  static const uint16_t POLL_BATTERY_FINGERPRINT = 0xF183;
+  static const uint16_t POLL_BATTERY_VEHICLE_HW_NUMBER = 0xF191;
+  static const uint16_t POLL_BATTERY_SYSTEM_HW_NUMBER = 0xF192;
+  static const uint16_t POLL_BATTERY_SYSTEM_SW_NUMBER = 0xF194;
+
+  // PIDs read at boot time only (battery identifiers)
+  static constexpr uint16_t UDS_BOOT_PID_LIST[] = {POLL_BATTERY_VEHICLE_HW_NUMBER,
+                                                   POLL_BATTERY_TYPE,
+                                                   0xF120,
+                                                   0xB18C,
+                                                   POLL_BATTERY_FINGERPRINT,
+                                                   POLL_BATTERY_MFR_DATE,
+                                                   POLL_BATTERY_VIN,
+                                                   POLL_BATTERY_SYSTEM_HW_NUMBER,
+                                                   POLL_BATTERY_SYSTEM_SW_NUMBER,
+                                                   0xF1A2,
+                                                   0xF1AA};
+  // PIDs read regularly
+  static constexpr uint16_t UDS_STEADY_PID_LIST[] = {POLL_BATTERY_SOH, POLL_BATTERY_VOLTAGE, POLL_MIN_CELL_TEMPERATURE,
+                                                     POLL_MAX_CELL_TEMPERATURE};
+
+  // Identifier PID payloads
+  uint8_t pid_f18a[8] = {0};
+  uint8_t pid_f120[16] = {0};
+  uint8_t pid_b18c[24] = {0};
+  uint8_t pid_fingerprint[10] = {0};
+  uint8_t pid_mfr_date[3] = {0};
+  uint8_t pid_vin[17] = {0};
+  uint8_t pid_vehicle_hw_number[5] = {0};
+  uint8_t pid_system_hw_number[10] = {0};
+  uint8_t pid_system_sw_number[10] = {0};
+  uint8_t pid_f1a2[8] = {0};
+  uint8_t pid_f1aa[5] = {0};
+
   CAN_frame MG4_4F3_FD = {.FD = true,
                           .ext_ID = false,
                           .DLC = 8,

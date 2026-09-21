@@ -175,6 +175,20 @@ static uint16_t ocv_to_soc(uint16_t voltage_mV) {
   return 10000;
 }
 
+// Renders characters if printable, otherwise as [xx] hex.
+static void print_chars_or_hex(char* buf, const uint8_t* data, uint16_t length) {
+  int ptr = 0;
+  for (int i = 0; i < length && ptr < 62; i++) {
+    if (data[i] >= 32 && data[i] <= 126) {
+      buf[ptr++] = (char)data[i];
+    } else {
+      int written = sprintf(buf + ptr, "[%02x]", data[i]);
+      ptr += written;
+    }
+  }
+  buf[ptr] = '\0';
+}
+
 static uint16_t soc_to_ocv(uint16_t soc_in_centipercent) {
   const uint16_t* voltages;
   if (datalayer.battery.info.chemistry == battery_chemistry_enum::LFP) {
@@ -1377,7 +1391,51 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
     case POLL_MAX_CELL_TEMPERATURE:
       datalayer.battery.status.temperature_max_dC = ((int32_t)value - 20000) / 50;
       temp_freshness = 10;
-      break;  // End of cycle
+      break;
+    case POLL_BATTERY_VEHICLE_HW_NUMBER:
+      if (value == 0) {
+        // Retry until we get a valid vehicle hardware number (0 is invalid)
+        return POLL_BATTERY_VEHICLE_HW_NUMBER;
+      }
+      memcpy(pid_vehicle_hw_number, data,
+             length > sizeof(pid_vehicle_hw_number) ? sizeof(pid_vehicle_hw_number) : length);
+      break;
+    case POLL_BATTERY_TYPE:  // Battery type
+      if (value == 0) {
+        // Retry until we get a valid battery type (0 is invalid)
+        return POLL_BATTERY_TYPE;
+      }
+      memcpy(pid_f18a, data, length > sizeof(pid_f18a) ? sizeof(pid_f18a) : length);
+      break;
+    case 0xF120:
+      memcpy(pid_f120, data, length > sizeof(pid_f120) ? sizeof(pid_f120) : length);
+      break;
+    case 0xB18C:
+      memcpy(pid_b18c, data, length > sizeof(pid_b18c) ? sizeof(pid_b18c) : length);
+      break;
+    case POLL_BATTERY_FINGERPRINT:
+      memcpy(pid_fingerprint, data, length > sizeof(pid_fingerprint) ? sizeof(pid_fingerprint) : length);
+      break;
+    case POLL_BATTERY_MFR_DATE:
+      memcpy(pid_mfr_date, data, length > sizeof(pid_mfr_date) ? sizeof(pid_mfr_date) : length);
+      break;
+    case POLL_BATTERY_VIN:
+      memcpy(pid_vin, data, length > sizeof(pid_vin) ? sizeof(pid_vin) : length);
+      break;
+    case POLL_BATTERY_SYSTEM_HW_NUMBER:
+      memcpy(pid_system_hw_number, data, length > sizeof(pid_system_hw_number) ? sizeof(pid_system_hw_number) : length);
+      break;
+    case POLL_BATTERY_SYSTEM_SW_NUMBER:
+      memcpy(pid_system_sw_number, data, length > sizeof(pid_system_sw_number) ? sizeof(pid_system_sw_number) : length);
+      break;
+    case 0xF1A2:
+      memcpy(pid_f1a2, data, length > sizeof(pid_f1a2) ? sizeof(pid_f1a2) : length);
+      break;
+    case 0xF1AA:
+      memcpy(pid_f1aa, data, length > sizeof(pid_f1aa) ? sizeof(pid_f1aa) : length);
+      // Finished reading the static identifiers; switch to steady-state polling.
+      set_pid_scan_list(UDS_STEADY_PID_LIST, sizeof(UDS_STEADY_PID_LIST) / sizeof(UDS_STEADY_PID_LIST[0]));
+      return UDS_STEADY_PID_LIST[0];  // Jump to the first steady PID (the scan list was just reset)
   }
   return 0;  // Continue normal PID cycling
 }
@@ -1386,10 +1444,9 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   setup_uds(0x7E5, 0);
   fd_uds_requests = true;
 
-  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_BATTERY_VOLTAGE, POLL_MIN_CELL_TEMPERATURE,
-                                       POLL_MAX_CELL_TEMPERATURE};
-
-  set_pid_scan_list(POLL_LIST, sizeof(POLL_LIST) / sizeof(POLL_LIST[0]));
+  // Read the battery identifiers first (same DIDs as MG-GEN1-BATTERY), then
+  // switch to the steady-state poll list.
+  set_pid_scan_list(UDS_BOOT_PID_LIST, sizeof(UDS_BOOT_PID_LIST) / sizeof(UDS_BOOT_PID_LIST[0]));
   dtc = &datalayer.battery.dtc;
 
   strncpy(datalayer.system.info.battery_protocol, Name, 63);
@@ -1459,14 +1516,57 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
 }
 
 String Mg4Battery::get_uds_info_html() {
-  // Pack-reported precharge/contactor state (0x15B byte[21]&0xF)
-  String html = "<h3>Precharge/contactor state</h3>";
-  html += "<div style='border: 1px solid #ccc; padding: 5px;'>";
-  html += "<span style='display: inline-block; width: 14px; height: 14px; background-color: " +
-          String(pack_contactors.color()) + "; margin-right: 6px;'></span>";
-  html += "State: " + String(pack_contactors.received ? String(pack_contactors.state) : String("n/a")) + " (" +
-          pack_contactors.label() + ")";
-  html += "</div>";
+  String ret = String();
+  ret.reserve(512);  //Pre-allocate some memory to avoid fragmentation
 
-  return html;
+  char buf[128];
+
+  // Battery identifiers read over UDS (same DIDs as MG-GEN1-BATTERY)
+  ret += "UDS address: ";
+  ret += String(uds_address, 16);
+  ret += "<br>VIN: ";
+  print_chars_or_hex(buf, pid_vin, 17);
+  ret += buf;
+  ret += "<br>MfrDate: ";
+  sprintf(buf, "20%02X-%02X-%02X", pid_mfr_date[0], pid_mfr_date[1], pid_mfr_date[2]);
+  ret += buf;
+  ret += "<br>Fingerprint: ";
+  print_chars_or_hex(buf, pid_fingerprint, 10);
+  ret += buf;
+  ret += "<br>VehHWNo: ";
+  print_chars_or_hex(buf, pid_vehicle_hw_number, 5);
+  ret += buf;
+  ret += "<br>SysHWNo: ";
+  print_chars_or_hex(buf, pid_system_hw_number, 10);
+  ret += buf;
+  ret += "<br>SysSWNo: ";
+  print_chars_or_hex(buf, pid_system_sw_number, 10);
+  ret += buf;
+  ret += "<br>F18A: ";
+  print_chars_or_hex(buf, pid_f18a, 8);
+  ret += buf;
+  ret += "<br>F120: ";
+  print_chars_or_hex(buf, pid_f120, 16);
+  ret += buf;
+  ret += "<br>B18C: ";
+  print_chars_or_hex(buf, pid_b18c, 24);
+  ret += buf;
+  ret += "<br>F1A2: ";
+  print_chars_or_hex(buf, pid_f1a2, 8);
+  ret += buf;
+  ret += "<br>F1AA: ";
+  print_chars_or_hex(buf, pid_f1aa, 5);
+  ret += buf;
+  ret += "<br>";
+
+  // Pack-reported precharge/contactor state (0x15B byte[21]&0xF)
+  ret += "<h3>Precharge/contactor state</h3>";
+  ret += "<div style='border: 1px solid #ccc; padding: 5px;'>";
+  ret += "<span style='display: inline-block; width: 14px; height: 14px; background-color: " +
+         String(pack_contactors.color()) + "; margin-right: 6px;'></span>";
+  ret += "State: " + String(pack_contactors.received ? String(pack_contactors.state) : String("n/a")) + " (" +
+         pack_contactors.label() + ")";
+  ret += "</div>";
+
+  return ret;
 }
