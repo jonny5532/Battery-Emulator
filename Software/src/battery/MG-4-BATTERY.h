@@ -126,10 +126,9 @@ class Mg4Battery : public UdsCanBattery {
   bool coulombCounting = false;
   ContactorState contactorState = ContactorState::WAITING_FOR_PACK;
   PackContactorFeedback pack_contactors;
-  unsigned long contactorWaitStartMillis = 0;  // Grace timer base while WAITING_FOR_PACK
-  int replayFrameIndex047_08A = 0;             // Master cursor through the message cycle; the
-                                               // 313/314/315 index is derived from it (see cpp)
-  int wakeupCounter = 0;                       // Paces the 0x4F3 FD wakeup keep-alive
+  int replayFrameIndex047_08A = 0;  // Master cursor through the message cycle; the
+                                    // 313/314/315 index is derived from it (see cpp)
+  int wakeupCounter = 0;            // Paces the 0x4F3 FD wakeup keep-alive
 
   void contactor_state_tick(unsigned long currentMillis);
 

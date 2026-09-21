@@ -1282,10 +1282,9 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
         logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
         replayFrameIndex047_08A = 0;
         contactorState = ContactorState::OPENING;
-      } else if (pack_contactors.received || currentMillis - contactorWaitStartMillis >= CONTACTOR_STARTUP_GRACE_MS) {
-        // We now know the pack state, or have given up waiting for it.
+      } else if (pack_contactors.received) {
+        // We now know the pack state
 
-        contactorWaitStartMillis = 0;
         if (pack_contactors.isClosed()) {
           // Pack contactors were already closed (eg, we rebooted without opening them).
           // Keep them closed.
@@ -1299,9 +1298,6 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
           replayFrameIndex047_08A = 0;
           contactorState = ContactorState::CLOSING;
         }
-      } else if (contactorWaitStartMillis == 0) {
-        // Start the grace period timer
-        contactorWaitStartMillis = currentMillis;
       }
       break;
 
@@ -1347,7 +1343,6 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
         // opening got).
 
         logging.printf("[MG4] Closing re-enabled, waiting for pack contactor state\n");
-        contactorWaitStartMillis = 0;
         contactorState = ContactorState::WAITING_FOR_PACK;
       }
       break;
