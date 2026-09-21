@@ -779,6 +779,9 @@ static const uint8_t BASE_047_B[12] = {0x00, 0x01, 0x48, 0x08, 0x00, 0x00, 0x6A,
 // so `voltage_dV` comes from datalayer.battery.status.voltage_dV.
 static void build_frame_047(int i, uint16_t voltage_dV, uint8_t out[24]) {
   uint32_t target = ((uint32_t)voltage_dV * VAL12_047_A_SCALE_NUM) / VAL12_047_A_SCALE_DEN;
+  if (i < PRECHARGE_DELAY_FRAMES) {
+    target = 0;
+  }
   if (target < VAL12_047_A_DC) {
     target = VAL12_047_A_DC;
   } else if (target > VAL12_047_A_FIELD_MAX) {
@@ -788,7 +791,9 @@ static void build_frame_047(int i, uint16_t voltage_dV, uint8_t out[24]) {
   // Rolling counter: 0xF0..0xFE, starting at 0xFB on frame 0 (skips 0xFF)
   uint8_t cnt = rolling_counter(0xF0, i, 11);
 
-  uint16_t val12 = shape_value(precharge_shape_q16((uint32_t)i), VAL12_047_A_DC, (uint16_t)target);
+  //uint16_t val12 = shape_value(precharge_shape_q16((uint32_t)i), VAL12_047_A_DC, (uint16_t)target);
+  //uint32_t target
+  uint16_t val12 = target;
   //uint16_t mod = rle_lookup(VAL12_047_A_MOD_RLE, i);
   uint16_t mod = 0x01;
   //uint16_t flag = rle_lookup(VAL12_047_B_FLAG_RLE, i);
