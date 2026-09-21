@@ -175,10 +175,11 @@ static uint16_t ocv_to_soc(uint16_t voltage_mV) {
   return 10000;
 }
 
-// Renders characters if printable, otherwise as [xx] hex.
-static void print_chars_or_hex(char* buf, const uint8_t* data, uint16_t length) {
+// Renders characters if printable, otherwise as [xx] hex. Truncates rather
+// than overflowing buf_size.
+static void print_chars_or_hex(char* buf, uint16_t buf_size, const uint8_t* data, uint16_t length) {
   int ptr = 0;
-  for (int i = 0; i < length && ptr < 62; i++) {
+  for (int i = 0; i < length && ptr < buf_size - 5; i++) {
     if (data[i] >= 32 && data[i] <= 126) {
       buf[ptr++] = (char)data[i];
     } else {
@@ -187,6 +188,48 @@ static void print_chars_or_hex(char* buf, const uint8_t* data, uint16_t length) 
     }
   }
   buf[ptr] = '\0';
+}
+
+// Renders the results of the DID sweep in HTML columns of
+// DID_SWEEP_RESULTS_PER_COLUMN results each, returning "n/a" if no DID
+// answered.
+static String render_did_sweep_results(const std::vector<Mg4Battery::DidSweepResult>& results) {
+  if (results.empty()) {
+    return "n/a<br>";
+  }
+
+  const uint16_t per_col = Mg4Battery::DID_SWEEP_RESULTS_PER_COLUMN;
+  uint16_t max_columns = Mg4Battery::DID_SWEEP_MAX_RESULTS / per_col;
+  uint16_t columns = (results.size() + per_col - 1) / per_col;
+  if (columns > max_columns) {
+    columns = max_columns;
+  }
+
+  char buf[256];
+  String html = "<div style='display: flex; gap: 24px;'>";
+  size_t index = 0;
+  size_t remaining = results.size();
+  for (uint16_t col = 0; col < columns; col++) {
+    // This column's share of the remaining results (rounded up).
+    size_t take = (remaining + (columns - col - 1)) / (columns - col);
+    html += "<div>";
+    for (size_t i = 0; i < take; i++, index++) {
+      const Mg4Battery::DidSweepResult& result = results[index];
+      sprintf(buf, "DID %04X: ", result.did);
+      html += buf;
+      print_chars_or_hex(buf, sizeof(buf), result.data, result.len);
+      html += buf;
+      html += "<br>";
+    }
+    html += "</div>";
+    remaining -= take;
+  }
+  html += "</div>";
+  if (results.size() > (size_t)columns * per_col) {
+    sprintf(buf, "(+%u more not shown)<br>", (unsigned)(results.size() - (size_t)columns * per_col));
+    html += buf;
+  }
+  return html;
 }
 
 static uint16_t soc_to_ocv(uint16_t soc_in_centipercent) {
@@ -1366,7 +1409,24 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
 }
 
 uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* data, uint16_t length) {
-  // Currently unused
+  // Record every successful response for the DID sweep report. Responses from
+  // the runtime poll list land here too, refreshing their entries in place.
+  record_did_sweep_result(pid, data, length);
+
+  // Gently sweep the 0xB0xx/0xF1xx DID ranges in the background: every other
+  // response injects one out-of-sequence (detour) request for the next
+  // untried DID, leaving the runtime poll list running in between. A DID that
+  // times out or is rejected is simply never retried - its slot was consumed
+  // when it was handed out, so the sweep still finishes after one pass over
+  // the ranges.
+  if (did_sweep_active) {
+    did_sweep_toggle = !did_sweep_toggle;
+    if (did_sweep_toggle) {
+      const uint16_t detour = did_sweep_next;
+      did_sweep_advance();
+      return detour;
+    }
+  }
 
   switch (pid) {
     case POLL_BATTERY_SOH:
@@ -1392,61 +1452,63 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
       datalayer.battery.status.temperature_max_dC = ((int32_t)value - 20000) / 50;
       temp_freshness = 10;
       break;
-    case POLL_BATTERY_VEHICLE_HW_NUMBER:
-      if (value == 0) {
-        // Retry until we get a valid vehicle hardware number (0 is invalid)
-        return POLL_BATTERY_VEHICLE_HW_NUMBER;
-      }
-      memcpy(pid_vehicle_hw_number, data,
-             length > sizeof(pid_vehicle_hw_number) ? sizeof(pid_vehicle_hw_number) : length);
-      break;
-    case POLL_BATTERY_TYPE:  // Battery type
-      if (value == 0) {
-        // Retry until we get a valid battery type (0 is invalid)
-        return POLL_BATTERY_TYPE;
-      }
-      memcpy(pid_f18a, data, length > sizeof(pid_f18a) ? sizeof(pid_f18a) : length);
-      break;
-    case 0xF120:
-      memcpy(pid_f120, data, length > sizeof(pid_f120) ? sizeof(pid_f120) : length);
-      break;
-    case 0xB18C:
-      memcpy(pid_b18c, data, length > sizeof(pid_b18c) ? sizeof(pid_b18c) : length);
-      break;
-    case POLL_BATTERY_FINGERPRINT:
-      memcpy(pid_fingerprint, data, length > sizeof(pid_fingerprint) ? sizeof(pid_fingerprint) : length);
-      break;
-    case POLL_BATTERY_MFR_DATE:
-      memcpy(pid_mfr_date, data, length > sizeof(pid_mfr_date) ? sizeof(pid_mfr_date) : length);
-      break;
-    case POLL_BATTERY_VIN:
-      memcpy(pid_vin, data, length > sizeof(pid_vin) ? sizeof(pid_vin) : length);
-      break;
-    case POLL_BATTERY_SYSTEM_HW_NUMBER:
-      memcpy(pid_system_hw_number, data, length > sizeof(pid_system_hw_number) ? sizeof(pid_system_hw_number) : length);
-      break;
-    case POLL_BATTERY_SYSTEM_SW_NUMBER:
-      memcpy(pid_system_sw_number, data, length > sizeof(pid_system_sw_number) ? sizeof(pid_system_sw_number) : length);
-      break;
-    case 0xF1A2:
-      memcpy(pid_f1a2, data, length > sizeof(pid_f1a2) ? sizeof(pid_f1a2) : length);
-      break;
-    case 0xF1AA:
-      memcpy(pid_f1aa, data, length > sizeof(pid_f1aa) ? sizeof(pid_f1aa) : length);
-      // Finished reading the static identifiers; switch to steady-state polling.
-      set_pid_scan_list(UDS_STEADY_PID_LIST, sizeof(UDS_STEADY_PID_LIST) / sizeof(UDS_STEADY_PID_LIST[0]));
-      return UDS_STEADY_PID_LIST[0];  // Jump to the first steady PID (the scan list was just reset)
   }
   return 0;  // Continue normal PID cycling
+}
+
+void Mg4Battery::did_sweep_advance() {
+  // Advance to the next DID to hand out. Hops over the gap between the two
+  // swept ranges and ends the sweep after the last DID of the second range.
+  did_sweep_next++;
+  if (did_sweep_next > DID_SWEEP_LAST_F1) {
+    // 0xF1FF was the last DID: every DID has been handed out once, so stop
+    // sweeping (and never re-add any DID).
+    did_sweep_active = false;
+  } else if (did_sweep_next > DID_SWEEP_LAST_B0 && did_sweep_next < DID_SWEEP_FIRST_F1) {
+    // Skip the gap between the ranges.
+    did_sweep_next = DID_SWEEP_FIRST_F1;
+  }
+}
+
+void Mg4Battery::record_did_sweep_result(uint16_t did, const uint8_t* data, uint16_t length) {
+  // Update the existing entry for this DID if there is one - DIDs polled
+  // regularly by the runtime list keep their entries fresh, and a DID that
+  // already answered can never be duplicated.
+  for (DidSweepResult& result : did_sweep_results) {
+    if (result.did == did) {
+      result.len = length > DID_SWEEP_MAX_DATA_LEN ? DID_SWEEP_MAX_DATA_LEN : length;
+      memcpy(result.data, data, result.len);
+      return;
+    }
+  }
+
+  if (did_sweep_results.size() >= DID_SWEEP_MAX_RESULTS) {
+    // Table full. Don't push_back: growth beyond DID_SWEEP_MAX_RESULTS would
+    // attempt an allocation (and the firmware builds with exceptions
+    // disabled).
+    return;
+  }
+  if (did_sweep_results.size() == did_sweep_results.capacity()) {
+    // Grow the storage in chunks of DID_SWEEP_RESERVE_CHUNK entries (bounded
+    // by DID_SWEEP_MAX_RESULTS). This is the only place that allocates, one
+    // allocation per full chunk, so emplace_back() below never grows.
+    size_t new_capacity = did_sweep_results.capacity() + DID_SWEEP_RESERVE_CHUNK;
+    if (new_capacity > DID_SWEEP_MAX_RESULTS) {
+      new_capacity = DID_SWEEP_MAX_RESULTS;
+    }
+    did_sweep_results.reserve(new_capacity);
+  }
+  DidSweepResult& result = did_sweep_results.emplace_back();
+  result.did = did;
+  result.len = length > DID_SWEEP_MAX_DATA_LEN ? DID_SWEEP_MAX_DATA_LEN : length;
+  memcpy(result.data, data, result.len);
 }
 
 void Mg4Battery::setup(void) {  // Performs one time setup at startup
   setup_uds(0x7E5, 0);
   fd_uds_requests = true;
 
-  // Read the battery identifiers first (same DIDs as MG-GEN1-BATTERY), then
-  // switch to the steady-state poll list.
-  set_pid_scan_list(UDS_BOOT_PID_LIST, sizeof(UDS_BOOT_PID_LIST) / sizeof(UDS_BOOT_PID_LIST[0]));
+  set_pid_scan_list(UDS_STEADY_PID_LIST, sizeof(UDS_STEADY_PID_LIST) / sizeof(UDS_STEADY_PID_LIST[0]));
   dtc = &datalayer.battery.dtc;
 
   strncpy(datalayer.system.info.battery_protocol, Name, 63);
@@ -1517,47 +1579,33 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
 
 String Mg4Battery::get_uds_info_html() {
   String ret = String();
-  ret.reserve(512);  //Pre-allocate some memory to avoid fragmentation
+  ret.reserve(2048);  //Pre-allocate some memory to avoid fragmentation
 
   char buf[128];
 
-  // Battery identifiers read over UDS (same DIDs as MG-GEN1-BATTERY)
-  ret += "UDS address: ";
-  ret += String(uds_address, 16);
-  ret += "<br>VIN: ";
-  print_chars_or_hex(buf, pid_vin, 17);
+  // Background DID sweep progress. Every DID in the two swept ranges is
+  // handed out exactly once, so the count is the hand-out position minus the
+  // range start (plus the 256 DIDs of the first range once in the second).
+  uint32_t did_sweep_tried;
+  if (!did_sweep_active) {
+    did_sweep_tried = DID_SWEEP_TOTAL;
+  } else if (did_sweep_next <= DID_SWEEP_LAST_B0) {
+    did_sweep_tried = did_sweep_next - DID_SWEEP_FIRST_B0;
+  } else {
+    did_sweep_tried = 256 + (did_sweep_next - DID_SWEEP_FIRST_F1);
+  }
+  if (did_sweep_active) {
+    sprintf(buf, "Background DID sweep: %lu/%u DIDs tried, next 0x%04X<br>", (unsigned long)did_sweep_tried,
+            (unsigned)DID_SWEEP_TOTAL, did_sweep_next);
+  } else {
+    sprintf(buf, "Background DID sweep complete<br>");
+  }
   ret += buf;
-  ret += "<br>MfrDate: ";
-  sprintf(buf, "20%02X-%02X-%02X", pid_mfr_date[0], pid_mfr_date[1], pid_mfr_date[2]);
-  ret += buf;
-  ret += "<br>Fingerprint: ";
-  print_chars_or_hex(buf, pid_fingerprint, 10);
-  ret += buf;
-  ret += "<br>VehHWNo: ";
-  print_chars_or_hex(buf, pid_vehicle_hw_number, 5);
-  ret += buf;
-  ret += "<br>SysHWNo: ";
-  print_chars_or_hex(buf, pid_system_hw_number, 10);
-  ret += buf;
-  ret += "<br>SysSWNo: ";
-  print_chars_or_hex(buf, pid_system_sw_number, 10);
-  ret += buf;
-  ret += "<br>F18A: ";
-  print_chars_or_hex(buf, pid_f18a, 8);
-  ret += buf;
-  ret += "<br>F120: ";
-  print_chars_or_hex(buf, pid_f120, 16);
-  ret += buf;
-  ret += "<br>B18C: ";
-  print_chars_or_hex(buf, pid_b18c, 24);
-  ret += buf;
-  ret += "<br>F1A2: ";
-  print_chars_or_hex(buf, pid_f1a2, 8);
-  ret += buf;
-  ret += "<br>F1AA: ";
-  print_chars_or_hex(buf, pid_f1aa, 5);
-  ret += buf;
-  ret += "<br>";
+
+  // Results of the DID sweep. Only DIDs that answered with data (no negative
+  // response / timeout) are listed, in the usual alpha-or-hex form.
+  ret += "<h3>UDS DID sweep results</h3>";
+  ret += render_did_sweep_results(did_sweep_results);
 
   // Pack-reported precharge/contactor state (0x15B byte[21]&0xF)
   ret += "<h3>Precharge/contactor state</h3>";

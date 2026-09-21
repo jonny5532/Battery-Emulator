@@ -130,3 +130,83 @@ TEST_F(Mg4BatteryTest, CoulombCountAndLimitsTest) {
   // Should be floored at 1% (since min cell voltage is still above working min)
   EXPECT_EQ(soc_after_discharge, 100);
 }
+
+// handle_pid alternates between returning 0 (runtime poll list continues) and
+// the next untried DID (one background sweep request), starting at 0xB000.
+TEST_F(Mg4BatteryTest, HandlePidAlternatesDetourAndZero) {
+  const uint8_t data[] = {0x00};
+
+  // First response: detour for the first sweep DID.
+  EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0xB000u);
+  // Next response: 0, the runtime poll list continues.
+  EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0x0000u);
+  // And so on, one DID at a time.
+  EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0xB001u);
+  EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0x0000u);
+  EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0xB002u);
+}
+
+// DIDs that answer are recorded and rendered in the alpha-or-hex format, and a
+// re-answered DID updates its entry instead of duplicating it.
+TEST_F(Mg4BatteryTest, SweepRecordsAndRendersResponses) {
+  const uint8_t data1[] = {'A', 'B', 0x00};
+  const uint8_t data2[] = {'O', 'K'};
+  const uint8_t data3[] = {'X'};
+
+  // Drive some sweep traffic through handle_pid (detour returns ignored) and
+  // pretend 0xB042 and 0xB061 answered.
+  battery->handle_pid(0xB042, 0x414200, data1, sizeof(data1));  // -> detour 0xB000
+  battery->handle_pid(0xB000, 0, data1, sizeof(data1));         // -> 0
+  battery->handle_pid(0xB061, 0x4F4B, data2, sizeof(data2));    // -> detour 0xB001
+
+  String html = battery->get_uds_info_html();
+  EXPECT_NE(std::string(html.c_str()).find("Background DID sweep: 2/512"), std::string::npos);
+  EXPECT_NE(std::string(html.c_str()).find("DID B042: AB[00]"), std::string::npos);
+  EXPECT_NE(std::string(html.c_str()).find("DID B061: OK"), std::string::npos);
+
+  // Re-answer of an already-recorded DID updates in place.
+  battery->handle_pid(0xB042, 0x58, data3, sizeof(data3));
+  html = battery->get_uds_info_html();
+  EXPECT_NE(std::string(html.c_str()).find("DID B042: X"), std::string::npos);
+  EXPECT_EQ(std::string(html.c_str()).find("DID B042: AB[00]"), std::string::npos);
+}
+
+// Once 0xF1FF has been handed out every DID in the two swept ranges has been
+// tried exactly once (the gap between the ranges is skipped); handle_pid then
+// always returns 0 (no DID is re-added) and the page reports the sweep as
+// complete.
+TEST_F(Mg4BatteryTest, SweepStopsAfterBothRanges) {
+  const uint8_t data[] = {0x00};
+
+  uint16_t expected = 0xB000;
+  uint32_t detour_count = 0;
+  bool done = false;
+  // Alternation means roughly two calls per DID; run until 0xF1FF has been
+  // handed out, then keep going to prove the sweep has stopped.
+  for (uint32_t i = 0; i < 2u * 512u + 100; i++) {
+    uint16_t ret = battery->handle_pid(0xB061, 0, data, sizeof(data));
+    if (done) {
+      // Full range handed out: no detours may be returned anymore.
+      EXPECT_EQ(ret, 0x0000u);
+    } else if (ret != 0) {
+      detour_count++;
+      // Detours must be sequential within each range, hopping the gap.
+      EXPECT_EQ(ret, expected);
+      if (ret == 0xB0FF) {
+        expected = 0xF100;  // Skip the gap between the ranges.
+      } else if (ret == 0xF1FF) {
+        done = true;  // Last DID of the second range: sweep complete.
+      } else {
+        expected++;
+      }
+    }
+  }
+
+  // Exactly one detour per DID in 0xB000-0xB0FF and 0xF100-0xF1FF.
+  EXPECT_TRUE(done);
+  EXPECT_EQ(detour_count, 512u);
+
+  String html = battery->get_uds_info_html();
+  EXPECT_NE(std::string(html.c_str()).find("Background DID sweep complete"), std::string::npos);
+  EXPECT_EQ(std::string(html.c_str()).find("Background DID sweep: "), std::string::npos);
+}

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "UdsCanBattery.h"
 
 class Mg4Battery : public UdsCanBattery {
@@ -14,6 +16,34 @@ class Mg4Battery : public UdsCanBattery {
   //virtual uint32_t calculate_pack_voltage_limit_max_dV();
 
   static constexpr const char* Name = "MG4 battery";
+
+  // ---- Background DID sweep ----
+  // The exact DID map of this BMS is unknown (the MG-GEN1 identifier DIDs
+  // don't work here), so handle_pid() alternately returns 0 (continue the
+  // runtime poll list, so the pack keeps operating normally) and the next
+  // untried DID as an out-of-sequence detour request, gently sweeping the
+  // 0xB000-0xB0FF and 0xF100-0xF1FF DID ranges in the background (the same
+  // ranges MG-GEN1 uses; the gap in between is skipped). Every DID that
+  // returns data (no negative response / timeout) is recorded and shown on
+  // the battery info page in the usual alpha-or-hex format.
+  // Max payload bytes kept per DID that answered.
+  static constexpr uint8_t DID_SWEEP_MAX_DATA_LEN = 32;
+  // Maximum number of answering DIDs we keep.
+  static constexpr uint16_t DID_SWEEP_MAX_RESULTS = 192;
+  // The result storage grows in chunks of this many entries (one allocation
+  // per chunk, first one on first use), up to the maximum. Never reallocated
+  // beyond that (the firmware builds without exceptions, so an out-of-memory
+  // growth would abort). Further answering DIDs are dropped.
+  static constexpr uint16_t DID_SWEEP_RESERVE_CHUNK = 32;
+  // Number of results per HTML column on the info page.
+  static constexpr uint8_t DID_SWEEP_RESULTS_PER_COLUMN = 32;
+
+  // One answering DID recorded during the sweep.
+  struct DidSweepResult {
+    uint16_t did = 0;  // the DID that answered
+    uint8_t len = 0;   // number of payload bytes in data
+    uint8_t data[DID_SWEEP_MAX_DATA_LEN] = {0};
+  };
 
   String get_uds_info_html() override;
   const char* get_dtc_json_filename() override { return "mg_dtc.json"; }
@@ -116,6 +146,33 @@ class Mg4Battery : public UdsCanBattery {
   uint32_t* nonvolatile_total_discharge_dC = 0;
   static const uint32_t NONVOLATILE_COOKIE_VALUE = 0x7734b1f5;
 
+  // ---- Background DID sweep state ----
+  // Swept DID ranges: 0xB000-0xB0FF followed by 0xF100-0xF1FF (512 DIDs
+  // total, the gap in between is skipped).
+  static constexpr uint16_t DID_SWEEP_FIRST_B0 = 0xB000;
+  static constexpr uint16_t DID_SWEEP_LAST_B0 = 0xB0FF;
+  static constexpr uint16_t DID_SWEEP_FIRST_F1 = 0xF100;
+  static constexpr uint16_t DID_SWEEP_LAST_F1 = 0xF1FF;
+  static constexpr uint16_t DID_SWEEP_TOTAL = 512;
+
+  // DIDs that answered, in ascending order (i.e. hand-out order). Grows in
+  // DID_SWEEP_RESERVE_CHUNK-entry allocations up to DID_SWEEP_MAX_RESULTS;
+  // empty (no RAM used) until the first DID answers.
+  std::vector<DidSweepResult> did_sweep_results;
+  // The next DID to hand out as a detour request. DIDs are handed out exactly
+  // once: the sweep starts at 0xB000, hops from 0xB0FF to 0xF100, and stops
+  // (did_sweep_active = false) once 0xF1FF has been handed out, so no DID is
+  // ever re-added.
+  uint16_t did_sweep_next = DID_SWEEP_FIRST_B0;
+  // Cleared once every DID in the ranges has been handed out once.
+  bool did_sweep_active = true;
+  // Alternates handle_pid() return values between 0 (runtime poll list
+  // continues) and the next sweep DID (detour request).
+  bool did_sweep_toggle = false;
+
+  void did_sweep_advance();
+  void record_did_sweep_result(uint16_t did, const uint8_t* data, uint16_t length);
+
   static const uint16_t POLL_BATTERY_VOLTAGE = 0xB042;
   static const uint16_t POLL_BATTERY_CURRENT = 0xB043;
   static const uint16_t POLL_BATTERY_SOC = 0xB046;
@@ -123,43 +180,9 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t POLL_MAX_CELL_TEMPERATURE = 0xB056;
   static const uint16_t POLL_BATTERY_SOH = 0xB061;
 
-  // Identifier PIDs, same DIDs as MG-GEN1-BATTERY
-  static const uint16_t POLL_BATTERY_TYPE = 0xF18A;
-  static const uint16_t POLL_BATTERY_VIN = 0xF190;
-  static const uint16_t POLL_BATTERY_MFR_DATE = 0xF18B;
-  static const uint16_t POLL_BATTERY_FINGERPRINT = 0xF183;
-  static const uint16_t POLL_BATTERY_VEHICLE_HW_NUMBER = 0xF191;
-  static const uint16_t POLL_BATTERY_SYSTEM_HW_NUMBER = 0xF192;
-  static const uint16_t POLL_BATTERY_SYSTEM_SW_NUMBER = 0xF194;
-
-  // PIDs read at boot time only (battery identifiers)
-  static constexpr uint16_t UDS_BOOT_PID_LIST[] = {POLL_BATTERY_VEHICLE_HW_NUMBER,
-                                                   POLL_BATTERY_TYPE,
-                                                   0xF120,
-                                                   0xB18C,
-                                                   POLL_BATTERY_FINGERPRINT,
-                                                   POLL_BATTERY_MFR_DATE,
-                                                   POLL_BATTERY_VIN,
-                                                   POLL_BATTERY_SYSTEM_HW_NUMBER,
-                                                   POLL_BATTERY_SYSTEM_SW_NUMBER,
-                                                   0xF1A2,
-                                                   0xF1AA};
   // PIDs read regularly
   static constexpr uint16_t UDS_STEADY_PID_LIST[] = {POLL_BATTERY_SOH, POLL_BATTERY_VOLTAGE, POLL_MIN_CELL_TEMPERATURE,
                                                      POLL_MAX_CELL_TEMPERATURE};
-
-  // Identifier PID payloads
-  uint8_t pid_f18a[8] = {0};
-  uint8_t pid_f120[16] = {0};
-  uint8_t pid_b18c[24] = {0};
-  uint8_t pid_fingerprint[10] = {0};
-  uint8_t pid_mfr_date[3] = {0};
-  uint8_t pid_vin[17] = {0};
-  uint8_t pid_vehicle_hw_number[5] = {0};
-  uint8_t pid_system_hw_number[10] = {0};
-  uint8_t pid_system_sw_number[10] = {0};
-  uint8_t pid_f1a2[8] = {0};
-  uint8_t pid_f1aa[5] = {0};
 
   CAN_frame MG4_4F3_FD = {.FD = true,
                           .ext_ID = false,
