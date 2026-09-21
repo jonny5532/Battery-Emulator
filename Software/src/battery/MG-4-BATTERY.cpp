@@ -1323,15 +1323,15 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
     if (currentMillis - previousMillis100 >= INTERVAL_100_MS) {
       previousMillis100 = currentMillis;
 
-      if (contactorState != ContactorState::WAITING_FOR_PACK) {
-        int replayFrameIndex313_314_315 = replayFrameIndex047_08A / 10;
-        build_frame_313(replayFrameIndex313_314_315, datalayer.battery.status.voltage_dV, MG4_313_FD.data.u8);
-        build_frame_314(replayFrameIndex313_314_315, MG4_314_FD.data.u8);
-        build_frame_315(replayFrameIndex313_314_315, datalayer.battery.status.voltage_dV, MG4_315_FD.data.u8);
-        transmit_can_frame(&MG4_313_FD);
-        transmit_can_frame(&MG4_314_FD);
-        transmit_can_frame(&MG4_315_FD);
-      }
+      // if (contactorState != ContactorState::WAITING_FOR_PACK) {
+      //   int replayFrameIndex313_314_315 = replayFrameIndex047_08A / 10;
+      //   build_frame_313(replayFrameIndex313_314_315, datalayer.battery.status.voltage_dV, MG4_313_FD.data.u8);
+      //   build_frame_314(replayFrameIndex313_314_315, MG4_314_FD.data.u8);
+      //   build_frame_315(replayFrameIndex313_314_315, datalayer.battery.status.voltage_dV, MG4_315_FD.data.u8);
+      //   transmit_can_frame(&MG4_313_FD);
+      //   transmit_can_frame(&MG4_314_FD);
+      //   transmit_can_frame(&MG4_315_FD);
+      // }
     }
 
     // 0x4F3 (FD) wakeup keep-alive, every 100ms. This was the only live part
