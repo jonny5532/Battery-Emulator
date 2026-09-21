@@ -654,8 +654,8 @@ static const uint32_t CURVE_ONE = 1u << 16;  // 1.0 in Q16
 // --- Delayed exponential precharge curve (0x047 VAL12 / 0x313 VAL16) -------
 // The plateau this approaches is not fixed: the frame builders scale the live
 // pack voltage (datalayer.battery.status.voltage_dV) by a per-frame factor.
-static const uint32_t PRECHARGE_DELAY_FRAMES = 250;  // 10 ms frames before the ramp
-static const uint32_t PRECHARGE_RATE = 66;           // ~0.258 of the gap per frame
+static const uint32_t PRECHARGE_DELAY_FRAMES = 250 - 173;  // 10 ms frames before the ramp
+static const uint32_t PRECHARGE_RATE = 66;                 // ~0.258 of the gap per frame
 static const uint32_t PRECHARGE_RATE_SHIFT = 8;
 static const uint32_t PRECHARGE_RAMP_STEPS = 50;  // tabulated ramp steps
 
@@ -725,8 +725,8 @@ static const int VAL_RAMP_START = 44;
 static const int VAL_RAMP_END = 59;
 
 // Frame-segment lengths (number of frames in each generated segment).
-static const int CYCLE_LEN_047 = 800;
-static const int CYCLE_LEN_08A = 800;
+static const int CYCLE_LEN_047 = 800 - 173;
+static const int CYCLE_LEN_08A = 800 - 173;
 static const int CYCLE_LEN_313 = 80;
 static const int CYCLE_LEN_314 = 80;
 static const int CYCLE_LEN_315 = 80;
@@ -841,14 +841,14 @@ static const RleRun S118_08A_VAL_RLE[102] = {
 
 // Subfield 2: MODE payload byte (0x00/0x01/0x21), 3 runs
 static const RleRun S100_08A_MODE_RLE[3] = {
-    {0x00, 190},
+    {0x00, 190 - 173},
     {0x01, 119},
     {0x21, 491},
 };
 
 // Subfield 2: FLAG payload byte (0x00/0x08), 3 runs
 static const RleRun S100_08A_FLAG_RLE[3] = {
-    {0x00, 188},
+    {0x00, 188 - 173},
     {0x08, 219},
     {0x00, 393},
 };
@@ -895,7 +895,7 @@ static const RleRun S100_08A_LSB_RLE[351] = {
 
 // Subfield 3: LEVEL payload byte (0x00/0x20/0x40), 3 runs
 static const RleRun S153_08A_LEVEL_RLE[3] = {
-    {0x00, 307},
+    {0x00, 307 - 173},
     {0x20, 30},
     {0x40, 463},
 };
@@ -1206,7 +1206,7 @@ static void build_frame_315(int i, uint16_t voltage_dV, uint8_t out[48]) {
 //   - once the pack confirms closed (0x15B state == 7) the cycle restarts from
 //     the already-closed tail instead, which would otherwise open and reclose
 //     the contactors every time the loop wrapped.
-static constexpr int OPEN_LOOP_LEN_047_08A = 150;                  // first 1.5s of the cycle
+static constexpr int OPEN_LOOP_LEN_047_08A = 15;                   // first 1.5s of the cycle
 static constexpr int CLOSED_TAIL_START_047_08A = 304;              // already-closed tail of the cycle
 static constexpr unsigned long CONTACTOR_STARTUP_GRACE_MS = 5000;  // max wait for the first 0x15B state
 // 0x313/0x314/0x315 run at 1/10th the 047/08A rate; their closed-tail start
