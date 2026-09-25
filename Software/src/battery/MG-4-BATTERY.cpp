@@ -2,7 +2,295 @@
 #include <soc/soc.h>
 #include <cmath>    //For unit test
 #include <cstring>  //For unit test
-#include "MG-4-FD-GENERATORS.h"
+// ===== BEGIN MG4 FD frame generators (migrated from MG-4-FD-GENERATORS.h) =====
+// Standalone block: only needs <cstdint>/<cstring>. Each FD payload is a
+// sequence of back-to-back 12-byte subfields with the layout:
+//     [3-byte subaddr][len = 0x08][CRC-8][7 payload bytes]
+// CRC-8: poly 0x1D, init 0x00, MSB-first, no reflection, no xorout, computed
+// over the 7 payload bytes that follow the CRC.
+// Only the fields actually used by transmit_can() below live here; dead
+// replay tables and the superseded precharge exponential were left behind.
+
+// Run-length encoded field: `value` is held for `count` consecutive frames.
+struct Mg4RleRun {
+  uint16_t value;
+  uint16_t count;
+};
+
+static uint8_t mg4_crc8(const uint8_t* d) {
+  uint8_t crc = 0x00;
+  for (uint8_t i = 0; i < 7; i++) {
+    crc ^= d[i];
+    for (uint8_t b = 0; b < 8; b++) {
+      crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x1D) : (uint8_t)(crc << 1);
+    }
+  }
+  return crc;
+}
+
+template <size_t N>
+static uint16_t mg4_rle_lookup(const Mg4RleRun (&runs)[N], int i) {
+  for (size_t r = 0; r < N; r++) {
+    if (i < (int)runs[r].count) {
+      return runs[r].value;
+    }
+    i -= runs[r].count;
+  }
+  return 0;  // index past end of segment - should not happen
+}
+
+static const uint32_t MG4_CURVE_ONE = 1u << 16;  // 1.0 in Q16
+
+// Linear ramp: 0 for t <= start, straight line to MG4_CURVE_ONE at t == end,
+// held afterwards.
+static uint32_t mg4_linear_shape_q16(uint32_t t, uint32_t start, uint32_t end) {
+  if (t <= start) {
+    return 0;
+  }
+  if (t >= end) {
+    return MG4_CURVE_ONE;
+  }
+  return (uint32_t)(((uint64_t)(t - start) * MG4_CURVE_ONE) / (end - start));
+}
+
+// Map a normalised shape into [dc, scale] (rounded to nearest; scale >= dc).
+static uint16_t mg4_shape_value(uint32_t shape_q16, uint16_t dc, uint16_t scale) {
+  uint32_t range = (uint32_t)(scale - dc);
+  return (uint16_t)(dc + ((range * shape_q16 + MG4_CURVE_ONE / 2) >> 16));
+}
+
+// Step precharge curve: dc before the edge, scale at/after it. The edge at
+// frame 252 straddles the old exponential's midway point (29436 at t = 251,
+// 38743 at t = 252, half = 32768). Time base is 0x047 10 ms frames, so 0x313
+// callers passing decimated t16 stay aligned.
+static const uint32_t MG4_PRECHARGE_STEP_FRAME = 252;  // first frame at plateau
+
+static uint16_t mg4_precharge_step_value(uint32_t t, uint16_t dc, uint16_t scale) {
+  return (t < MG4_PRECHARGE_STEP_FRAME) ? dc : scale;
+}
+
+// Number of frames in the generated 0x047/0x08A segment (shared cursor).
+static const int MG4_CYCLE_LEN_047_08A = 800;
+
+// Rolling counters (15 values cycling with wrap, 0xFF-style slot skipped).
+static uint8_t mg4_counter_047_08A(uint8_t base, int i) {
+  return (uint8_t)(base + ((i + 11) % 15));
+}
+
+static uint8_t mg4_counter_313_314(uint8_t base, int i) {
+  return (uint8_t)(base + ((i + 7) % 15));
+}
+
+// --- 0x047 (24-byte FD payload, two 12-byte subfields) ----------------------
+static const uint16_t VAL12_DC_047 = 45;        // idle / DC offset
+static const uint32_t VAL12_SCALE_NUM_047 = 2;  // frame value = 0.4 x voltage_dV
+static const uint32_t VAL12_SCALE_DEN_047 = 5;
+static const uint16_t VAL12_FIELD_MAX_047 = 0xFFF;  // 12-bit payload field saturation
+
+static const uint8_t BASE_047_A[12] = {0x00, 0x01, 0x27, 0x08, 0x00, 0x00, 0x80, 0x04, 0x00, 0x00, 0x00, 0x00};
+static const uint8_t BASE_047_B[12] = {0x00, 0x01, 0x48, 0x08, 0x00, 0x00, 0x6A, 0x06, 0x00, 0xFF, 0xF0, 0xFF};
+
+// The 12-bit VAL12 plateau tracks the live pack voltage (0.4 x voltage_dV).
+static void build_mg4_047(int i, uint16_t voltage_dV, uint8_t out[24]) {
+  uint32_t target = ((uint32_t)voltage_dV * VAL12_SCALE_NUM_047) / VAL12_SCALE_DEN_047;
+  if (target < VAL12_DC_047) {
+    target = VAL12_DC_047;
+  } else if (target > VAL12_FIELD_MAX_047) {
+    target = VAL12_FIELD_MAX_047;
+  }
+
+  // Rolling counter: 0xF0..0xFE, starting at 0xFB on frame 0 (skips 0xFF)
+  uint8_t cnt = mg4_counter_047_08A(0xF0, i);
+
+  uint16_t val12 = mg4_precharge_step_value((uint32_t)i, VAL12_DC_047, (uint16_t)target);
+
+  // Subfield A
+  uint8_t a[12];
+  memcpy(a, BASE_047_A, 12);
+  a[5] = cnt;
+  a[9] = (uint8_t)(val12 >> 4);                    // VAL12 high 8 bits
+  a[10] = (uint8_t)(((val12 & 0xF) << 4) | 0x0C);  // VAL12 low 4 bits + static 0xC nibble
+  a[11] = 0x01;                                    // MOD value
+  a[4] = mg4_crc8(&a[5]);
+
+  // Subfield B
+  uint8_t b[12];
+  memcpy(b, BASE_047_B, 12);
+  b[5] = cnt;
+  b[8] = 0x9F;  // flag byte
+  b[4] = mg4_crc8(&b[5]);
+
+  memcpy(out, a, 12);
+  memcpy(out + 12, b, 12);
+}
+
+// --- 0x08A (48-byte FD payload, four 12-byte subfields) ----------------------
+// Subfield 2: MODE payload byte (0x00/0x01/0x21), 3 runs
+static const Mg4RleRun RLE_08A_S100_MODE[3] = {
+    {0x00, 190},
+    {0x01, 119},
+    {0x21, 491},
+};
+
+// Subfield 2: FLAG payload byte (0x00/0x08), 3 runs
+static const Mg4RleRun RLE_08A_S100_FLAG[3] = {
+    {0x00, 188},
+    {0x08, 219},
+    {0x00, 393},
+};
+
+// Subfield 3: LEVEL payload byte (0x00/0x20/0x40), 3 runs
+static const Mg4RleRun RLE_08A_S153_LEVEL[3] = {
+    {0x00, 307},
+    {0x20, 30},
+    {0x40, 463},
+};
+
+static const uint8_t BASE_08A_S118[12] = {0x00, 0x01, 0x18, 0x08, 0x00, 0x00, 0x75, 0x00, 0x75, 0x30, 0x75, 0x30};
+static const uint8_t BASE_08A_S100[12] = {0x00, 0x01, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7F, 0x00};
+static const uint8_t BASE_08A_S153[12] = {0x00, 0x01, 0x53, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+static void build_mg4_08a(int i, uint8_t out[48]) {
+  uint8_t s1[12], s2[12], s3[12];
+
+  // Subfield 1 (00 01 18)
+  memcpy(s1, BASE_08A_S118, 12);
+  s1[5] = mg4_counter_047_08A(0x30, i);
+  s1[7] = 0x2F;
+  s1[4] = mg4_crc8(&s1[5]);
+
+  // Subfield 2 (00 01 00)
+  memcpy(s2, BASE_08A_S100, 12);
+  s2[5] = mg4_counter_047_08A(0x40, i);
+  s2[7] = (uint8_t)mg4_rle_lookup(RLE_08A_S100_MODE, i);
+  s2[8] = (uint8_t)mg4_rle_lookup(RLE_08A_S100_FLAG, i);
+  s2[11] = 0xFF;
+  s2[4] = mg4_crc8(&s2[5]);
+
+  // Subfield 3 (00 01 53) - CRC slot stays 0x00, as captured
+  memcpy(s3, BASE_08A_S153, 12);
+  s3[6] = (uint8_t)mg4_rle_lookup(RLE_08A_S153_LEVEL, i);
+
+  memcpy(out, s1, 12);
+  memcpy(out + 12, s2, 12);
+  memcpy(out + 24, s3, 12);
+  memset(out + 36, 0, 12);  // subfield 4: all-zero padding
+}
+
+// --- 0x313 (48-byte FD payload, four 12-byte subfields) ----------------------
+// Subfield 1 (00 04 02): STAT payload byte (0x01/0x03/0x05), 3 runs
+static const Mg4RleRun RLE_313_S1_STAT[3] = {
+    {0x01, 10},
+    {0x03, 23},
+    {0x05, 47},
+};
+
+// Subfield 2 (00 04 00): VALA and VALC share a linear ramp shape, each with
+// its own maximum.
+static const int RAMP_START_313_S2 = 32;  // first frame off the idle value
+static const int RAMP_END_313_S2 = 78;    // frame the ramp reaches MAX
+static const uint16_t VALA_MAX_313_S2 = 77;
+static const uint16_t VALC_MAX_313_S2 = 90;
+
+// Subfield 3 (00 04 01): VAL16 precharge step sampled every 10th 0x047 frame.
+// Its plateau tracks the live pack voltage, 12.5x larger than 0x047 VAL12:
+// the 0x313 value is 5 x voltage_dV at full precharge.
+static const uint16_t VAL16_DC_313 = 562;   // 12.5 x 45, idle
+static const uint32_t VAL16_SCALE_313 = 5;  // frame value = 5 x voltage_dV
+static const uint16_t VAL16_FIELD_MAX_313 = 0xFFFF;
+static const int VAL16_SKIP_313 = 2;  // 313 frames of capture offset
+
+static const uint8_t BASE_313_S1[12] = {0x00, 0x04, 0x02, 0x08, 0x00, 0x00, 0x3D, 0x00, 0x00, 0xF2, 0x00, 0x00};
+static const uint8_t BASE_313_S2[12] = {0x00, 0x04, 0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x80, 0x08, 0x00, 0x00};
+static const uint8_t BASE_313_S3[12] = {0x00, 0x04, 0x01, 0x08, 0x00, 0x00, 0xFF, 0x4C, 0x00, 0x00, 0x00, 0x00};
+
+// VAL16 plateau tracks the live pack voltage (5 x voltage_dV).
+static void build_mg4_313(int i, uint16_t voltage_dV, uint8_t out[48]) {
+  uint8_t s1[12], s2[12], s3[12];
+
+  // Subfield 1 (00 04 02)
+  memcpy(s1, BASE_313_S1, 12);
+  s1[5] = mg4_counter_313_314(0xF0, i);
+  s1[7] = 0x54;
+  s1[8] = 0x55;
+  s1[10] = (uint8_t)mg4_rle_lookup(RLE_313_S1_STAT, i);
+  s1[11] = 0xE7;
+  s1[4] = mg4_crc8(&s1[5]);
+
+  // Subfield 2 (00 04 00) - CRC slot stays 0x00 and byte 5 stays 0x01, as captured
+  uint32_t ramp = mg4_linear_shape_q16((uint32_t)i, (uint32_t)RAMP_START_313_S2, (uint32_t)RAMP_END_313_S2);
+  uint16_t valc = mg4_shape_value(ramp, 0, VALC_MAX_313_S2);
+  memcpy(s2, BASE_313_S2, 12);
+  s2[6] = (uint8_t)mg4_shape_value(ramp, 0, VALA_MAX_313_S2);
+  s2[7] = 0x78;
+  s2[8] = (uint8_t)(0x80 | (valc >> 4));          // static hi nibble 8 + VALC hi nibble
+  s2[9] = (uint8_t)(((valc & 0xF) << 4) | 0x08);  // VALC lo nibble + static lo nibble 8
+  s2[10] = 0x69;
+
+  // Subfield 3 (00 04 01)
+  uint32_t target16 = (uint32_t)voltage_dV * VAL16_SCALE_313;
+  if (target16 < VAL16_DC_313) {
+    target16 = VAL16_DC_313;
+  } else if (target16 > VAL16_FIELD_MAX_313) {
+    target16 = VAL16_FIELD_MAX_313;
+  }
+  uint32_t t16 = (i > VAL16_SKIP_313) ? (uint32_t)(i - VAL16_SKIP_313) * 10u : 0u;
+  uint16_t val16 = mg4_precharge_step_value(t16, VAL16_DC_313, (uint16_t)target16);
+  memcpy(s3, BASE_313_S3, 12);
+  s3[5] = mg4_counter_313_314(0x30, i);
+  s3[8] = (uint8_t)(val16 >> 8);    // VAL16 high byte
+  s3[9] = (uint8_t)(val16 & 0xFF);  // VAL16 low byte
+  s3[4] = mg4_crc8(&s3[5]);
+
+  memcpy(out, s1, 12);
+  memcpy(out + 12, s2, 12);
+  memcpy(out + 24, s3, 12);
+  memset(out + 36, 0, 12);  // subfield 4: all-zero padding
+}
+
+// --- 0x314 (24-byte FD payload, two 12-byte subfields) ----------------------
+// Subfield 1 (00 04 04): VAL payload byte, 5 runs
+static const Mg4RleRun RLE_314_S1_VAL[5] = {
+    {0x02, 27}, {0x2E, 1}, {0x4C, 1}, {0x56, 35}, {0x57, 16},
+};
+
+// Subfield 1 (00 04 04): HI payload byte (top 2 bits vary, low 6 static 0x08)
+static const Mg4RleRun RLE_314_S1_HI[7] = {
+    {0xC8, 27}, {0x08, 1}, {0xC8, 1}, {0x48, 2}, {0x88, 1}, {0xC8, 32}, {0x08, 16},
+};
+
+// Subfield 2 (00 04 05): VAL ramps from idle to a peak, then holds.
+static const int RAMP_START_314_S2 = 44;  // first frame off the idle value
+static const int RAMP_END_314_S2 = 59;    // frame the ramp reaches MAX
+static const uint16_t VAL_MAX_314_S2 = 48;
+
+static const uint8_t BASE_314_S1[12] = {0x00, 0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x56};
+static const uint8_t BASE_314_S2[12] = {0x00, 0x04, 0x05, 0x08, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xE0, 0x41};
+
+static void build_mg4_314(int i, uint8_t out[24]) {
+  uint8_t s1[12], s2[12];
+
+  // Subfield 1 (00 04 04)
+  memcpy(s1, BASE_314_S1, 12);
+  s1[5] = mg4_counter_313_314(0x40, i);
+  s1[6] = (uint8_t)mg4_rle_lookup(RLE_314_S1_VAL, i);
+  s1[7] = (uint8_t)mg4_rle_lookup(RLE_314_S1_HI, i);
+  s1[8] = 0x7F;
+  s1[9] = 0xE4;
+  s1[4] = mg4_crc8(&s1[5]);
+
+  // Subfield 2 (00 04 05)
+  memcpy(s2, BASE_314_S2, 12);
+  s2[5] = mg4_counter_313_314(0x70, i);
+  s2[6] = (uint8_t)mg4_shape_value(
+      mg4_linear_shape_q16((uint32_t)i, (uint32_t)RAMP_START_314_S2, (uint32_t)RAMP_END_314_S2), 0, VAL_MAX_314_S2);
+  s2[9] = 0x04;
+  s2[4] = mg4_crc8(&s2[5]);
+
+  memcpy(out, s1, 12);
+  memcpy(out + 12, s2, 12);
+}
+// ===== END MG4 FD frame generators =====
 //#include "esp_timer.h"
 #include "../battery/BATTERIES.h"
 #include "../communication/can/comm_can.h"
@@ -601,7 +889,8 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
 }
 
 // --- Contactor state machine constants -------------------------------------
-// Geometry of the generated message cycle (frames; see MG-4-FD-GENERATORS.h):
+// Geometry of the generated message cycle (frames; generators at the top of
+// this file):
 // 0x047/0x08A are generated at 10ms, 0x313/0x314 at 100ms, all driven from one
 // master cursor (replayFrameIndex047_08A).
 //
@@ -717,14 +1006,14 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
     contactor_state_tick(currentMillis);
 
     if (contactorState != ContactorState::WAITING_FOR_PACK) {
-      mg4_fd::gen047::build(replayFrameIndex047_08A, datalayer.battery.status.voltage_dV, MG4_047_FD.data.u8);
-      mg4_fd::gen08a::build(replayFrameIndex047_08A, MG4_08A_FD.data.u8);
+      build_mg4_047(replayFrameIndex047_08A, datalayer.battery.status.voltage_dV, MG4_047_FD.data.u8);
+      build_mg4_08a(replayFrameIndex047_08A, MG4_08A_FD.data.u8);
       transmit_can_frame(&MG4_047_FD);
       transmit_can_frame(&MG4_08A_FD);
 
       // Calculate the start/end indices for the replay
       int wrap_start = (contactorState == ContactorState::CLOSED) ? CLOSED_TAIL_START_047_08A : 0;
-      int wrap_limit = (contactorState == ContactorState::OPENING) ? OPEN_LOOP_LEN_047_08A : mg4_fd::LEN_047;
+      int wrap_limit = (contactorState == ContactorState::OPENING) ? OPEN_LOOP_LEN_047_08A : MG4_CYCLE_LEN_047_08A;
       // Wrap if necessary
       if (++replayFrameIndex047_08A >= wrap_limit) {
         replayFrameIndex047_08A = wrap_start;
@@ -736,8 +1025,8 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
 
       if (contactorState != ContactorState::WAITING_FOR_PACK) {
         int replayFrameIndex313_314 = replayFrameIndex047_08A / 10;
-        mg4_fd::gen313::build(replayFrameIndex313_314, datalayer.battery.status.voltage_dV, MG4_313_FD.data.u8);
-        mg4_fd::gen314::build(replayFrameIndex313_314, MG4_314_FD.data.u8);
+        build_mg4_313(replayFrameIndex313_314, datalayer.battery.status.voltage_dV, MG4_313_FD.data.u8);
+        build_mg4_314(replayFrameIndex313_314, MG4_314_FD.data.u8);
         transmit_can_frame(&MG4_313_FD);
         transmit_can_frame(&MG4_314_FD);
       }
