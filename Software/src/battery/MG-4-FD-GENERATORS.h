@@ -326,19 +326,19 @@ inline void build(int i, uint8_t out[48]) {
 namespace gen313 {
 
 // Subfield 1 (00 04 02): VAL1 payload byte (0x52-0x54), 3 runs
-static const RleRun S1_VAL1_RLE[3] = {
-    {0x52, 9},
-    {0x53, 24},
-    {0x54, 47},
-};
+// static const RleRun S1_VAL1_RLE[3] = {
+//     {0x52, 9},
+//     {0x53, 24},
+//     {0x54, 47},
+// };
 
 // Subfield 1 (00 04 02): VAL2 payload byte (0x53-0x56), 4 runs
-static const RleRun S1_VAL2_RLE[4] = {
-    {0x53, 5},
-    {0x54, 21},
-    {0x55, 37},
-    {0x56, 17},
-};
+// static const RleRun S1_VAL2_RLE[4] = {
+//     {0x53, 5},
+//     {0x54, 21},
+//     {0x55, 37},
+//     {0x56, 17},
+// };
 
 // Subfield 1 (00 04 02): STAT payload byte (0x01/0x03/0x05), 3 runs
 static const RleRun S1_STAT_RLE[3] = {
@@ -348,10 +348,10 @@ static const RleRun S1_STAT_RLE[3] = {
 };
 
 // Subfield 1 (00 04 02): FLAG payload byte (0xE3/0xE7), 2 runs
-static const RleRun S1_FLAG_RLE[2] = {
-    {0xE3, 33},
-    {0xE7, 47},
-};
+// static const RleRun S1_FLAG_RLE[2] = {
+//     {0xE3, 33},
+//     {0xE7, 47},
+// };
 
 // Subfield 2 (00 04 00): VALA and VALC share a linear ramp shape, each with
 // its own maximum.
@@ -361,16 +361,16 @@ static const uint16_t S2_VALA_MAX = 77;
 static const uint16_t S2_VALC_MAX = 90;
 
 // Subfield 2 (00 04 00): VALB payload byte (0x75-0x79), 14 runs
-static const RleRun S2_VALB_RLE[14] = {
-    {0x78, 37}, {0x79, 1}, {0x78, 1}, {0x76, 2}, {0x78, 2}, {0x79, 1}, {0x78, 3},
-    {0x77, 9},  {0x76, 8}, {0x77, 1}, {0x76, 7}, {0x75, 1}, {0x76, 2}, {0x75, 5},
-};
+// static const RleRun S2_VALB_RLE[14] = {
+//     {0x78, 37}, {0x79, 1}, {0x78, 1}, {0x76, 2}, {0x78, 2}, {0x79, 1}, {0x78, 3},
+//     {0x77, 9},  {0x76, 8}, {0x77, 1}, {0x76, 7}, {0x75, 1}, {0x76, 2}, {0x75, 5},
+// };
 
 // Subfield 2 (00 04 00): VALD payload byte (0x68/0x69), 2 runs
-static const RleRun S2_VALD_RLE[2] = {
-    {0x68, 1},
-    {0x69, 79},
-};
+// static const RleRun S2_VALD_RLE[2] = {
+//     {0x68, 1},
+//     {0x69, 79},
+// };
 
 // Subfield 3 (00 04 01): VAL16 is the same delayed-exponential precharge
 // curve as 0x047's A_VAL12, sampled every 10th 0x047 frame. Its plateau also
@@ -398,10 +398,10 @@ inline void build(int i, uint16_t voltage_dV, uint8_t out[48]) {
   // Subfield 1 (00 04 02)
   memcpy(s1, BASE_S1, 12);
   s1[5] = counter313(0xF0, i);
-  s1[7] = (uint8_t)rle_lookup(S1_VAL1_RLE, i);
-  s1[8] = (uint8_t)rle_lookup(S1_VAL2_RLE, i);
+  s1[7] = 0x54;  //(uint8_t)rle_lookup(S1_VAL1_RLE, i);
+  s1[8] = 0x55;  //(uint8_t)rle_lookup(S1_VAL2_RLE, i);
   s1[10] = (uint8_t)rle_lookup(S1_STAT_RLE, i);
-  s1[11] = (uint8_t)rle_lookup(S1_FLAG_RLE, i);
+  s1[11] = 0xE7;  //(uint8_t)rle_lookup(S1_FLAG_RLE, i);
   s1[4] = crc8(&s1[5]);
 
   // Subfield 2 (00 04 00) - CRC slot stays 0x00 and byte 5 stays 0x01, as captured
@@ -409,10 +409,10 @@ inline void build(int i, uint16_t voltage_dV, uint8_t out[48]) {
   uint16_t valc = shape_value(ramp, 0, S2_VALC_MAX);
   memcpy(s2, BASE_S2, 12);
   s2[6] = (uint8_t)shape_value(ramp, 0, S2_VALA_MAX);
-  s2[7] = (uint8_t)rle_lookup(S2_VALB_RLE, i);
+  s2[7] = 0x78;                                   //(uint8_t)rle_lookup(S2_VALB_RLE, i);
   s2[8] = (uint8_t)(0x80 | (valc >> 4));          // static hi nibble 8 + VALC hi nibble
   s2[9] = (uint8_t)(((valc & 0xF) << 4) | 0x08);  // VALC lo nibble + static lo nibble 8
-  s2[10] = (uint8_t)rle_lookup(S2_VALD_RLE, i);
+  s2[10] = 0x69;                                  //(uint8_t)rle_lookup(S2_VALD_RLE, i);
 
   // Subfield 3 (00 04 01)
   uint32_t target16 = (uint32_t)voltage_dV * S3_VAL16_SCALE;
@@ -453,19 +453,19 @@ static const RleRun S1_HI_RLE[7] = {
 };
 
 // Subfield 1 (00 04 04): FLAG payload byte (0x7F/0x80), 3 runs
-static const RleRun S1_FLAG_RLE[3] = {
-    {0x7F, 57},
-    {0x80, 7},
-    {0x7F, 16},
-};
+// static const RleRun S1_FLAG_RLE[3] = {
+//     {0x7F, 57},
+//     {0x80, 7},
+//     {0x7F, 16},
+// };
 
 // Subfield 1 (00 04 04): STAT payload byte (0x04/0xE0/0xE4), 4 runs
-static const RleRun S1_STAT_RLE[4] = {
-    {0xE0, 32},
-    {0xE4, 25},
-    {0x04, 7},
-    {0xE4, 16},
-};
+// static const RleRun S1_STAT_RLE[4] = {
+//     {0xE0, 32},
+//     {0xE4, 25},
+//     {0x04, 7},
+//     {0xE4, 16},
+// };
 
 // Subfield 2 (00 04 05): VAL ramps from idle to a peak, then holds.
 static const int S2_VAL_RAMP_START = 44;  // first frame off the idle value
@@ -473,9 +473,9 @@ static const int S2_VAL_RAMP_END = 59;    // frame the ramp reaches MAX
 static const uint16_t S2_VAL_MAX = 48;
 
 // Subfield 2 (00 04 05): CNT2 payload byte (0x00-0x04), 5 runs
-static const RleRun S2_CNT2_RLE[5] = {
-    {0x00, 48}, {0x01, 3}, {0x02, 4}, {0x03, 2}, {0x04, 23},
-};
+// static const RleRun S2_CNT2_RLE[5] = {
+//     {0x00, 48}, {0x01, 3}, {0x02, 4}, {0x03, 2}, {0x04, 23},
+// };
 
 static const uint8_t BASE_S1[12] = {0x00, 0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x56};
 static const uint8_t BASE_S2[12] = {0x00, 0x04, 0x05, 0x08, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xE0, 0x41};
@@ -496,7 +496,7 @@ inline void build(int i, uint8_t out[24]) {
   s1[7] = (uint8_t)rle_lookup(S1_HI_RLE, i);
   //s1[8] = (uint8_t)rle_lookup(S1_FLAG_RLE, i);
   s1[8] = 0x7F;
-  s1[9] = (uint8_t)rle_lookup(S1_STAT_RLE, i);
+  s1[9] = 0xE4;  // (uint8_t)rle_lookup(S1_STAT_RLE, i);
   s1[4] = crc8(&s1[5]);
 
   // Subfield 2 (00 04 05)
@@ -504,7 +504,7 @@ inline void build(int i, uint8_t out[24]) {
   s2[5] = counter314(0x70, i);
   s2[6] = (uint8_t)shape_value(linear_shape_q16((uint32_t)i, (uint32_t)S2_VAL_RAMP_START, (uint32_t)S2_VAL_RAMP_END), 0,
                                S2_VAL_MAX);
-  s2[9] = (uint8_t)rle_lookup(S2_CNT2_RLE, i);
+  s2[9] = 0x04;  //(uint8_t)rle_lookup(S2_CNT2_RLE, i);
   s2[4] = crc8(&s2[5]);
 
   memcpy(out, s1, 12);
