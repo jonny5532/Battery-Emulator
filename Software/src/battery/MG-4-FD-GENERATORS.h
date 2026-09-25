@@ -104,6 +104,18 @@ inline uint16_t shape_value(uint32_t shape_q16, uint16_t dc, uint16_t scale) {
   return (uint16_t)(dc + ((range * shape_q16 + CURVE_ONE / 2) >> 16));
 }
 
+// --- Step precharge curve (replaces delayed exponential above) ----------------
+// Edge aligned to the old exponential's midway (50%) point: old shape is
+// 29436 (< 32768) at t = 251 and 38743 (> 32768) at t = 252, so the step at
+// t = 252 straddles 50% on the same frame. Time base is unchanged (0x047
+// 10 ms frames), so 0x313 callers passing decimated t16 stay aligned.
+static const uint32_t PRECHARGE_STEP_FRAME = 252;  // first frame at plateau
+
+// Direct scaled step value: dc before the edge, scale at/after it.
+inline uint16_t precharge_step_value(uint32_t t, uint16_t dc, uint16_t scale) {
+  return (t < PRECHARGE_STEP_FRAME) ? dc : scale;
+}
+
 // Frame-segment lengths (number of frames in each generated segment).
 static const int LEN_047 = 800;
 static const int LEN_08A = 800;
@@ -168,7 +180,7 @@ inline void build(int i, uint16_t voltage_dV, uint8_t out[24]) {
   // Rolling counter: 0xF0..0xFE, starting at 0xFB on frame 0 (skips 0xFF)
   uint8_t cnt = (uint8_t)(0xF0 + ((i + 11) % 15));
 
-  uint16_t val12 = shape_value(precharge_shape_q16((uint32_t)i), A_VAL12_DC, (uint16_t)target);
+  uint16_t val12 = precharge_step_value((uint32_t)i, A_VAL12_DC, (uint16_t)target);
   //uint16_t mod = rle_lookup(A_MOD_RLE, i);
   uint16_t mod = 0x01;
   //uint16_t flag = rle_lookup(B_FLAG_RLE, i);
@@ -422,7 +434,7 @@ inline void build(int i, uint16_t voltage_dV, uint8_t out[48]) {
     target16 = S3_VAL16_FIELD_MAX;
   }
   uint32_t t16 = (i > S3_VAL16_SKIP) ? (uint32_t)(i - S3_VAL16_SKIP) * 10u : 0u;
-  uint16_t val16 = shape_value(precharge_shape_q16(t16), S3_VAL16_DC, (uint16_t)target16);
+  uint16_t val16 = precharge_step_value(t16, S3_VAL16_DC, (uint16_t)target16);
   memcpy(s3, BASE_S3, 12);
   s3[5] = counter313(0x30, i);
   s3[8] = (uint8_t)(val16 >> 8);    // VAL16 high byte
