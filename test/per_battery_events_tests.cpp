@@ -37,6 +37,7 @@ const EVENTS_ENUM_TYPE kDriverEventBases[] = {
     EVENT_BYD_CONTACTOR_OPEN_REQ,
     EVENT_BYD_CONTACTOR_CLOSE_REQ,
     EVENT_BYD_CONTACTOR_CLOSE_BLOCKED,
+    EVENT_CONTACTOR_RECLOSE_FAULT,
 };
 
 class PerBatteryEventsTest : public ::testing::Test {
