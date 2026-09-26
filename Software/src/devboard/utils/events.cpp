@@ -215,6 +215,7 @@ void init_events(void) {
   set_battery_event_level(EVENT_BYD_CONTACTOR_OPEN_REQ, EVENT_LEVEL_INFO);
   set_battery_event_level(EVENT_BYD_CONTACTOR_CLOSE_REQ, EVENT_LEVEL_INFO);
   set_battery_event_level(EVENT_BYD_CONTACTOR_CLOSE_BLOCKED, EVENT_LEVEL_INFO);
+  set_battery_event_level(EVENT_CONTACTOR_RECLOSE_FAULT, EVENT_LEVEL_ERROR);
   set_battery_event_level(EVENT_BATTERY_SOC_RESET_SUCCESS, EVENT_LEVEL_INFO);
   set_battery_event_level(EVENT_BATTERY_SOC_RESET_FAIL, EVENT_LEVEL_INFO);
   events.entries[EVENT_VOLTAGE_DIFFERENCE_BAT2].level = EVENT_LEVEL_INFO;
@@ -526,6 +527,8 @@ static String get_event_base_message(EVENTS_ENUM_TYPE event) {
              "pending open.";
     case EVENT_BYD_CONTACTOR_CLOSE_BLOCKED:
       return "Contactor close blocked. Data bits: 1 = equipment stop, 2 = inverter denied, 4 = system fault.";
+    case EVENT_CONTACTOR_RECLOSE_FAULT:
+      return "Contactors have reopened after closing too many times, stopping.";
     case EVENT_BATTERY_SOC_RESET_SUCCESS:
       return "SOC reset routine was successful.";
     case EVENT_BATTERY_SOC_RESET_FAIL:

@@ -3,6 +3,7 @@
 #include "../../Software/src/battery/BATTERIES.h"
 #include "../../Software/src/battery/MG-4-BATTERY.h"
 #include "../../Software/src/datalayer/datalayer.h"
+#include "../../Software/src/devboard/utils/events.h"
 
 // TX frame capture injected by the emulated CAN layer (see test/emul/can.cpp).
 void clear_transmitted_frames();
@@ -19,6 +20,10 @@ class Mg4BatteryTest : public ::testing::Test {
     memset(&datalayer, 0, sizeof(datalayer));
     user_selected_battery_chemistry = battery_chemistry_enum::NMC;
     battery->setup();
+    // Event levels / states are process-global: reset so the reclose tests
+    // observe this fixture's events only.
+    init_events();
+    reset_all_events();
     // Set some default info since setup sets some but not all
     datalayer.battery.info.total_capacity_Wh = 51000;  // 51kWh pack
     datalayer.battery.info.number_of_cells = 104;
@@ -212,6 +217,7 @@ TEST_F(Mg4BatteryTest, ContactorDoesNotRecloseWhenUnidentified) {
   send_15b_fd(3);
   step_10ms(1);
   EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_OPEN)->state, EVENT_STATE_ACTIVE);
   for (int i = 0; i < 50; i++) {
     step_10ms(1);
     auto s = battery->contactor_state_for_test();
@@ -233,6 +239,112 @@ TEST_F(Mg4BatteryTest, ContactorFaultOpensAndReleaseReturnsToWaiting) {
   datalayer.system.status.system_status = ACTIVE;
   step_10ms(1);
   EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::WAITING_FOR_PACK);
+}
+
+TEST_F(Mg4BatteryTest, ContactorRecloseLoopTripsFatalEvent) {
+  // Identified pack closes normally, then opens by itself (e.g. HV
+  // isolation fault) 10 times in quick succession: the 10th reclose must
+  // latch open and raise the fatal reclose event instead of closing again.
+  identify_as_64kwh_nmc();
+  send_15b_fd(7);
+  step_10ms(3);
+  ASSERT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+
+  for (int k = 0; k < 10; k++) {
+    send_15b_fd(3);  // pack opens by itself
+    step_10ms(2);
+    if (k < 9) {
+      EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+      EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_OPEN)->state, EVENT_STATE_ACTIVE);
+      send_15b_fd(7);  // pack closes again
+      step_10ms(2);
+      EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+      EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_OPEN)->state, EVENT_STATE_INACTIVE);
+    }
+  }
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_TRUE(battery->reclose_blocked_for_test());
+  EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_OPEN)->state, EVENT_STATE_ACTIVE);
+  EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_RECLOSE_FAULT)->state, EVENT_STATE_ACTIVE);
+  EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_RECLOSE_FAULT)->data, 10);
+  EXPECT_EQ(datalayer.system.status.system_status, FAULT);
+
+  // Latched: a pack that stays open must not re-enter CLOSING.
+  send_15b_fd(3);
+  step_10ms(50);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_TRUE(battery->reclose_blocked_for_test());
+}
+
+TEST_F(Mg4BatteryTest, SparseReclosesDoNotTrip) {
+  // 9 rapid self-opens stay under the trip count, then 301 s pass with the
+  // pack closed: the next reclose falls outside the 300 s window, so the
+  // drive must reclose normally instead of tripping.
+  identify_as_64kwh_nmc();
+  send_15b_fd(7);
+  step_10ms(3);
+  ASSERT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+
+  for (int k = 0; k < 9; k++) {
+    send_15b_fd(3);
+    step_10ms(2);
+    EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+    send_15b_fd(7);
+    step_10ms(2);
+    EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  }
+  clear_transmitted_frames();
+  step_10ms(30100);  // 301 s, pack stays closed
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+
+  send_15b_fd(3);
+  step_10ms(2);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+  EXPECT_FALSE(battery->reclose_blocked_for_test());
+  EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_RECLOSE_FAULT)->state, EVENT_STATE_INACTIVE);
+}
+
+TEST_F(Mg4BatteryTest, ManualEstopCycleResetsRecloseFault) {
+  // Trip the latch first.
+  identify_as_64kwh_nmc();
+  send_15b_fd(7);
+  step_10ms(3);
+  ASSERT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  for (int k = 0; k < 10; k++) {
+    send_15b_fd(3);
+    step_10ms(2);
+    if (k < 9) {
+      send_15b_fd(7);
+      step_10ms(2);
+    }
+  }
+  ASSERT_TRUE(battery->reclose_blocked_for_test());
+  ASSERT_EQ(get_event_pointer(EVENT_CONTACTOR_RECLOSE_FAULT)->state, EVENT_STATE_ACTIVE);
+
+  // Manual open via the homepage button / estop (flag plus the
+  // EQUIPMENT_STOP event, exactly as setBatteryPause() drives it) clears
+  // the latch and event, while the estop itself holds the drive open.
+  datalayer.system.info.equipment_stop_active = true;
+  set_event(EVENT_EQUIPMENT_STOP, 1);
+  step_10ms(2);
+  EXPECT_FALSE(battery->reclose_blocked_for_test());
+  EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_RECLOSE_FAULT)->state, EVENT_STATE_INACTIVE);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+
+  // Manual close resumes the normal flow (pack still reports open).
+  datalayer.system.info.equipment_stop_active = false;
+  clear_event(EVENT_EQUIPMENT_STOP);
+  step_10ms(3);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+
+  // Fresh tracker: one self-open recloses instead of tripping.
+  send_15b_fd(7);
+  step_10ms(2);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  send_15b_fd(3);
+  step_10ms(2);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+  EXPECT_FALSE(battery->reclose_blocked_for_test());
 }
 
 TEST_F(Mg4BatteryTest, StoresAndDisplaysEcuPartNumbers) {
