@@ -29,6 +29,7 @@ class Mg4Battery : public UdsCanBattery {
   // Test hooks: read-only view of the contactor/identification state.
   ContactorState contactor_state_for_test() const { return contactorState; }
   bool battery_identified_for_test() const { return batteryIdentified; }
+  bool reclose_blocked_for_test() const { return reclose_blocked; }
 
  private:
   static const uint16_t MAX_CELL_DEVIATION_LFP_MV = 400;
@@ -117,12 +118,29 @@ class Mg4Battery : public UdsCanBattery {
   unsigned long contactorWaitStartMillis = 0;  // Grace timer base while WAITING_FOR_PACK
   int replayFrameIndex047_08A = 0;             // Master cursor through the message cycle; the
                                                // 313/314 index is derived from it (see cpp)
-  int wakeupCounter = 0;                       // Paces the 0x4F3 FD wakeup keep-alive
+
+  // Automatic-reclose guard. A pack that opens by itself (e.g. HV isolation
+  // fault) must not be reclosed forever: reclose timestamps form a sliding
+  // window, and RECLOSE_TRIP_COUNT recloses within RECLOSE_WINDOW_MS latches
+  // the drive in OPENING and raises a fatal event. A manual open/close
+  // (homepage button / estop) resets the tracker so the user can retry.
+  static constexpr int RECLOSE_TRIP_COUNT = 10;
+  static constexpr unsigned long RECLOSE_WINDOW_MS = 300000;  // 300 s
+  unsigned long reclose_times[RECLOSE_TRIP_COUNT] = {0};
+  int reclose_count = 0;  // valid entries in reclose_times
+  int reclose_pos = 0;    // next write index (oldest entry when full)
+  bool reclose_blocked = false;
+  bool last_equipment_stop = false;
+
+  void reset_reclose_tracker();
+  // Records an automatic reclose at now_ms; true when it completes
+  // RECLOSE_TRIP_COUNT recloses inside RECLOSE_WINDOW_MS.
+  bool record_contactor_reclose(unsigned long now_ms);
 
   void identify_battery();
 
-  void refresh_047_08a(int i);
-  void refresh_313_314(int i);
+  void update_047_08a(int i);
+  void update_313_314(int i);
 
   void contactor_state_tick(unsigned long currentMillis);
 
