@@ -278,9 +278,8 @@ static uint16_t soc_to_ocv(uint16_t soc_in_centipercent) {
 
 uint32_t Mg4Battery::calculate_max_discharge_power_W() {
   // Fail-closed: no fresh cell voltages or temperatures means we cannot
-  // prove the pack is safe, so allow no power. This also covers the
-  // non-FD bus (which never reports cells/temps) and the boot window
-  // before the first 0x12C/0x159 frame.
+  // prove the pack is safe, so allow no power. This also covers the boot
+  // window before the first 0x12C/0x159 frame.
   if (cell_voltage_freshness <= 0 || temp_freshness <= 0) {
     return 0;
   }
@@ -534,182 +533,152 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
   uint16_t current_raw;
   uint32_t soc_times_ten;
 
-  if (rx_frame.DLC > 8) {
-    // FD bus frames
-    switch (rx_frame.ID) {
-      case 0x12C:
-        datalayer.battery.status.CAN_battery_still_alive = CAN_STILL_ALIVE;
+  switch (rx_frame.ID) {
+    case 0x12C:
+      datalayer.battery.status.CAN_battery_still_alive = CAN_STILL_ALIVE;
 
-        datalayer.battery.status.voltage_dV = (((rx_frame.data.u8[8] << 4) | (rx_frame.data.u8[9] >> 4)) * 5) / 2;
-        current_raw = ((rx_frame.data.u8[6] << 8) | rx_frame.data.u8[7]);
-        if (current_raw <= 40000) {
-          // Only allow plausible values (-1000A to +1000A)
-          datalayer.battery.status.current_dA = -((current_raw - 20000) / 2);
+      datalayer.battery.status.voltage_dV = (((rx_frame.data.u8[8] << 4) | (rx_frame.data.u8[9] >> 4)) * 5) / 2;
+      current_raw = ((rx_frame.data.u8[6] << 8) | rx_frame.data.u8[7]);
+      if (current_raw <= 40000) {
+        // Only allow plausible values (-1000A to +1000A)
+        datalayer.battery.status.current_dA = -((current_raw - 20000) / 2);
+      }
+
+      datalayer.battery.status.cell_min_voltage_mV = ((rx_frame.data.u8[30] << 8) | (rx_frame.data.u8[31])) / 8;
+      datalayer.battery.status.cell_max_voltage_mV = ((rx_frame.data.u8[32] << 8) | (rx_frame.data.u8[33])) / 8;
+
+      datalayer.battery.status.temperature_max_dC = ((int)rx_frame.data.u8[19] * 5) - 400;
+      datalayer.battery.status.temperature_min_dC = ((int)rx_frame.data.u8[22] * 5) - 400;
+      temp_freshness = 10;
+
+      cell_voltage_freshness = 10;
+
+      break;
+    case 0x159:
+      // Cellvoltages/temps
+
+      // Loop through the subframes in the message
+      for (int i = 0; i < rx_frame.DLC; i += 12) {
+        uint8_t length = rx_frame.data.u8[i + 3];
+        if (length != 8) {
+          // Unexpected length, give up
+          break;
         }
+        // Get the subframe address and data
+        uint32_t addr = (rx_frame.data.u8[i] << 16) | (rx_frame.data.u8[i + 1] << 8) | rx_frame.data.u8[i + 2];
+        const uint8_t* sub = &rx_frame.data.u8[i + 4];
 
-        datalayer.battery.status.cell_min_voltage_mV = ((rx_frame.data.u8[30] << 8) | (rx_frame.data.u8[31])) / 8;
-        datalayer.battery.status.cell_max_voltage_mV = ((rx_frame.data.u8[32] << 8) | (rx_frame.data.u8[33])) / 8;
+        if (addr == 0x509 || addr == 0x510) {
+          // Cell voltages
 
-        datalayer.battery.status.temperature_max_dC = ((int)rx_frame.data.u8[19] * 5) - 400;
-        datalayer.battery.status.temperature_min_dC = ((int)rx_frame.data.u8[22] * 5) - 400;
-        temp_freshness = 10;
+          uint8_t mux = sub[7];
+          // 0x509 frames cover cells 1-80, 0x510 frames cover cells 81-104
+          int celloffset = (addr == 0x509) ? (mux - 1) : 20 + (mux - 1);
 
-        cell_voltage_freshness = 10;
-        reportsFDVoltages = true;
+          // Unpack the 4 cell voltages
+          uint16_t c0 = (sub[0] << 5) | ((sub[1] & 0xF8) >> 3);
+          uint16_t c1 = (sub[2] << 5) | ((sub[3] & 0xF8) >> 3);
+          uint16_t c2 = ((sub[3] & 0x07) << 10) | (sub[4] << 2) | ((sub[5] & 0xC0) >> 6);
+          uint16_t c3 = ((sub[5] & 0x1F) << 8) | sub[6];
 
-        break;
-      case 0x159:
-        // Cellvoltages/temps
-
-        // Loop through the subframes in the message
-        for (int i = 0; i < rx_frame.DLC; i += 12) {
-          uint8_t length = rx_frame.data.u8[i + 3];
-          if (length != 8) {
-            // Unexpected length, give up
-            break;
+          int idx = celloffset * 4;
+          if (idx + 3 < MAX_AMOUNT_CELLS) {
+            // This seemingly arbitrary ordering is guessed based on the
+            // min/max cell indices given in the 12C messages.
+            datalayer.battery.status.cell_voltages_mV[idx + 0] = c2;
+            datalayer.battery.status.cell_voltages_mV[idx + 1] = c3;
+            datalayer.battery.status.cell_voltages_mV[idx + 2] = c1;
+            datalayer.battery.status.cell_voltages_mV[idx + 3] = c0;
           }
-          // Get the subframe address and data
-          uint32_t addr = (rx_frame.data.u8[i] << 16) | (rx_frame.data.u8[i + 1] << 8) | rx_frame.data.u8[i + 2];
+        } else if (addr == 0x511) {
+          // Temps
+
+          uint8_t mux = sub[7];
+          int module_idx = mux - 1;
+
+          for (int j = 0; j < 6; j++) {
+            int16_t temp_dC = (sub[j + 1] - 40) * 10;  // Convert from -40..215 range to dC
+            int idx = (module_idx * 6) + j;
+            if (idx < 12) {
+              module_temperatures_dC[idx] = temp_dC;
+            }
+          }
+
+          if (module_temps_received == module_idx) {
+            // Record that we have valid temps for this module. Will saturate
+            // at 2 once we have them all.
+            module_temps_received++;
+          }
+
+          if (mux == 2 && module_temps_received == 2) {
+            // Update the overall min/max temps based on the module temps once we have them all
+            int16_t temp_min_dC = module_temperatures_dC[0];
+            int16_t temp_max_dC = module_temperatures_dC[0];
+            for (int j = 0; j < 12; j++) {
+              if (module_temperatures_dC[j] < temp_min_dC) {
+                temp_min_dC = module_temperatures_dC[j];
+              }
+              if (module_temperatures_dC[j] > temp_max_dC) {
+                temp_max_dC = module_temperatures_dC[j];
+              }
+            }
+            datalayer.battery.status.temperature_min_dC = temp_min_dC;
+            datalayer.battery.status.temperature_max_dC = temp_max_dC;
+            temp_freshness = 10;
+          }
+        }
+        // Cell module temps are in 0x511
+      }
+      break;
+    case 0x15B:
+      // SoC
+
+      //00050108001A21 01 80 00000000050508... ~10% SoC
+      //00050108007B9A 49 64 00000000050508... ~60% SoC
+      //                ^ ^^
+      //          bits: 4 42
+
+      soc_times_ten = ((rx_frame.data.u8[7] << 6) | (rx_frame.data.u8[8] >> 2)) & 0x3FF;
+      if (!coulombCounting) {
+        update_soc(soc_times_ten * 10);
+        soc_freshness = 10;
+      }
+
+      // Precharge/contactor state, confirmed against a real vehicle
+      // capture: 3=idle, 11=precharge active, 7=closed/charging. Single
+      // source of truth for the contactor state machine, the
+      // contactors_engaged reporting and the UDS info page.
+      if ((rx_frame.data.u8[21] & 0x0F) != pack_contactors.state) {
+        pack_contactors.state = rx_frame.data.u8[21] & 0x0F;
+        logging.printf("[MG4] Precharge/contactor state changed to %d\n", pack_contactors.state);
+      }
+      pack_contactors.received = true;
+
+      // Reflect the pack's own contactor state on the main BE page.
+      datalayer.system.status.contactors_engaged = pack_contactors.contactsEngaged();
+      break;
+    case 0x308:
+      // Pack serial (NTSC identifier): subfield 000554 has no CRC slot,
+      // it carries 7 ASCII bytes + 1 index byte per frame over 4 frames.
+      for (int i = 0; i + 12 <= rx_frame.DLC; i += 12) {
+        if (rx_frame.data.u8[i + 3] != 8) {
+          break;
+        }
+        uint32_t addr = (rx_frame.data.u8[i] << 16) | (rx_frame.data.u8[i + 1] << 8) | rx_frame.data.u8[i + 2];
+        if (addr == 0x554) {
           const uint8_t* sub = &rx_frame.data.u8[i + 4];
-
-          if (addr == 0x509 || addr == 0x510) {
-            // Cell voltages
-
-            uint8_t mux = sub[7];
-            // 0x509 frames cover cells 1-80, 0x510 frames cover cells 81-104
-            int celloffset = (addr == 0x509) ? (mux - 1) : 20 + (mux - 1);
-
-            // Unpack the 4 cell voltages
-            uint16_t c0 = (sub[0] << 5) | ((sub[1] & 0xF8) >> 3);
-            uint16_t c1 = (sub[2] << 5) | ((sub[3] & 0xF8) >> 3);
-            uint16_t c2 = ((sub[3] & 0x07) << 10) | (sub[4] << 2) | ((sub[5] & 0xC0) >> 6);
-            uint16_t c3 = ((sub[5] & 0x1F) << 8) | sub[6];
-
-            int idx = celloffset * 4;
-            if (idx + 3 < MAX_AMOUNT_CELLS) {
-              // This seemingly arbitrary ordering is guessed based on the
-              // min/max cell indices given in the 12C messages.
-              datalayer.battery.status.cell_voltages_mV[idx + 0] = c2;
-              datalayer.battery.status.cell_voltages_mV[idx + 1] = c3;
-              datalayer.battery.status.cell_voltages_mV[idx + 2] = c1;
-              datalayer.battery.status.cell_voltages_mV[idx + 3] = c0;
+          if (sub[7] < 4) {
+            for (int j = 0; j < 7; j++) {
+              uint8_t c = sub[j];
+              ntsc_serial[sub[7] * 7 + j] = (c == 0xFF) ? 0 : (char)c;
             }
-          } else if (addr == 0x511) {
-            // Temps
-
-            uint8_t mux = sub[7];
-            int module_idx = mux - 1;
-
-            for (int j = 0; j < 6; j++) {
-              int16_t temp_dC = (sub[j + 1] - 40) * 10;  // Convert from -40..215 range to dC
-              int idx = (module_idx * 6) + j;
-              if (idx < 12) {
-                module_temperatures_dC[idx] = temp_dC;
-              }
-            }
-
-            if (module_temps_received == module_idx) {
-              // Record that we have valid temps for this module. Will saturate
-              // at 2 once we have them all.
-              module_temps_received++;
-            }
-
-            if (mux == 2 && module_temps_received == 2) {
-              // Update the overall min/max temps based on the module temps once we have them all
-              int16_t temp_min_dC = module_temperatures_dC[0];
-              int16_t temp_max_dC = module_temperatures_dC[0];
-              for (int j = 0; j < 12; j++) {
-                if (module_temperatures_dC[j] < temp_min_dC) {
-                  temp_min_dC = module_temperatures_dC[j];
-                }
-                if (module_temperatures_dC[j] > temp_max_dC) {
-                  temp_max_dC = module_temperatures_dC[j];
-                }
-              }
-              datalayer.battery.status.temperature_min_dC = temp_min_dC;
-              datalayer.battery.status.temperature_max_dC = temp_max_dC;
-              temp_freshness = 10;
-            }
-          }
-          // Cell module temps are in 0x511
-        }
-        break;
-      case 0x15B:
-        // SoC
-
-        //00050108001A21 01 80 00000000050508... ~10% SoC
-        //00050108007B9A 49 64 00000000050508... ~60% SoC
-        //                ^ ^^
-        //          bits: 4 42
-
-        soc_times_ten = ((rx_frame.data.u8[7] << 6) | (rx_frame.data.u8[8] >> 2)) & 0x3FF;
-        if (!coulombCounting) {
-          update_soc(soc_times_ten * 10);
-          soc_freshness = 10;
-        }
-
-        // Precharge/contactor state, confirmed against a real vehicle
-        // capture: 3=idle, 11=precharge active, 7=closed/charging. Single
-        // source of truth for the contactor state machine, the
-        // contactors_engaged reporting and the UDS info page.
-        if ((rx_frame.data.u8[21] & 0x0F) != pack_contactors.state) {
-          pack_contactors.state = rx_frame.data.u8[21] & 0x0F;
-          logging.printf("[MG4] Precharge/contactor state changed to %d\n", pack_contactors.state);
-        }
-        pack_contactors.received = true;
-
-        // Reflect the pack's own contactor state on the main BE page.
-        datalayer.system.status.contactors_engaged = pack_contactors.contactsEngaged();
-        break;
-      case 0x308:
-        // Pack serial (NTSC identifier): subfield 000554 has no CRC slot,
-        // it carries 7 ASCII bytes + 1 index byte per frame over 4 frames.
-        for (int i = 0; i + 12 <= rx_frame.DLC; i += 12) {
-          if (rx_frame.data.u8[i + 3] != 8) {
-            break;
-          }
-          uint32_t addr = (rx_frame.data.u8[i] << 16) | (rx_frame.data.u8[i + 1] << 8) | rx_frame.data.u8[i + 2];
-          if (addr == 0x554) {
-            const uint8_t* sub = &rx_frame.data.u8[i + 4];
-            if (sub[7] < 4) {
-              for (int j = 0; j < 7; j++) {
-                uint8_t c = sub[j];
-                ntsc_serial[sub[7] * 7 + j] = (c == 0xFF) ? 0 : (char)c;
-              }
-              ntsc_serial[28] = 0;
-            }
+            ntsc_serial[28] = 0;
           }
         }
-        break;
-      default:
-        break;
-    }
-  } else {
-    // Non-FD bus frames
-    switch (rx_frame.ID) {
-      case 0x12C:
-        datalayer.battery.status.CAN_battery_still_alive = CAN_STILL_ALIVE;
-
-        if (!reportsFDVoltages) {
-          datalayer.battery.status.voltage_dV = (((rx_frame.data.u8[4] << 4) | (rx_frame.data.u8[5] >> 4)) * 5) / 2;
-          datalayer.battery.status.current_dA = -(((rx_frame.data.u8[2] << 8) | rx_frame.data.u8[3]) - 20000) / 2;
-        }
-        break;
-      case 0x401:
-        soc_times_ten = ((rx_frame.data.u8[6] << 8) | rx_frame.data.u8[7]) & 0x3FF;
-
-        if (soc_times_ten <= 1000) {
-          if (!coulombCounting) {
-            update_soc(soc_times_ten * 10);
-            soc_freshness = 10;
-          }
-          reportsSoC = true;
-        }
-
-        break;
-      default:
-        break;
-    }
+      }
+      break;
+    default:
+      break;
   }
 }
 
@@ -1053,10 +1022,7 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
       //datalayer.battery.status.current_dA = (value - 40000) / -4;
       break;
     case POLL_BATTERY_SOC:
-      // Only use SoC from PIDs if we don't get it from 401 messages.
-      if (!reportsSoC) {
-        //update_soc(value * 10);
-      }
+      // SoC arrives on the FD 0x15B frame; the PID value is unused.
       break;
     case POLL_MIN_CELL_TEMPERATURE:
       datalayer.battery.status.temperature_min_dC = ((int32_t)value - 20000) / 50;
