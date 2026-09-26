@@ -105,8 +105,6 @@ class Mg4Battery : public UdsCanBattery {
     }
   };
 
-  bool reportsFDVoltages = false;
-  bool reportsSoC = false;
   bool batteryIdentified = false;
   // Pack serial (NTSC identifier) from 0x308 subfield 000554: 7 ASCII bytes
   // + 1 index byte per frame over 4 frames; FF-padded tail, NUL-terminated.
