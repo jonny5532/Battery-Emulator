@@ -130,3 +130,41 @@ TEST_F(Mg4BatteryTest, CoulombCountAndLimitsTest) {
   // Should be floored at 1% (since min cell voltage is still above working min)
   EXPECT_EQ(soc_after_discharge, 100);
 }
+
+TEST_F(Mg4BatteryTest, ParsesPackSerialFrom308) {
+  // Captured 0x308 payloads from mg4_dev/308.log: subfield 000554 has no
+  // CRC slot, it carries 7 ASCII bytes + 1 index byte per frame.
+  static const char* frames[4] = {
+      "0005150800000083FC0000080005160800001700000000000005290826F1FFFDFFFC00FF000554083041465045463200",
+      "0005150800000083FC00000800051608000017000000000000052908C1F2FFFDFFFC00FF000554083038373837303301",
+      "0005150800000083FC000008000516080000170000000000000529089CF3FFFDFFFC00FF000554084437383230303002",
+      "0005150800000083FC0000080005160800001700000000000005290812F4FFFDFFFC00FF00055408343937FFFFFFFF03",
+  };
+  // Deliver out of order to prove index-based assembly, then repeat frame 0
+  // to prove reassembly is idempotent.
+  for (int k : {2, 0, 3, 1, 0}) {
+    CAN_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.ID = 0x308;
+    frame.FD = true;
+    frame.DLC = 48;
+    for (int b = 0; b < 48; b++) {
+      unsigned v = 0;
+      sscanf(frames[k] + 2 * b, "%2x", &v);
+      frame.data.u8[b] = (uint8_t)v;
+    }
+    battery->handle_incoming_can_frame(frame);
+  }
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("0AFPEF20878703D782000497"), std::string::npos);
+}
+
+TEST_F(Mg4BatteryTest, StoresAndDisplaysEcuPartNumbers) {
+  const uint8_t hw[10] = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '0'};
+  const uint8_t sw[10] = {'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'};
+  battery->handle_pid(0xF192, 0, hw, sizeof(hw));
+  battery->handle_pid(0xF194, 0, sw, sizeof(sw));
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("1234567890"), std::string::npos);
+  EXPECT_NE(html.find("ABCDEFGHIJ"), std::string::npos);
+}

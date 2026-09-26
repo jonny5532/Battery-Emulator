@@ -19,7 +19,16 @@ class Mg4Battery : public UdsCanBattery {
   const char* get_dtc_json_filename() override { return "mg_dtc.json"; }
 
  private:
-  static const uint16_t MAX_CELL_DEVIATION_MV = 150;
+  static const uint16_t MAX_CELL_DEVIATION_LFP_MV = 400;
+  static const uint16_t MAX_CELL_DEVIATION_NMC_MV = 150;
+
+  static const uint16_t WORKING_MAX_MARGIN_MV = 10;
+  static const uint16_t WORKING_MIN_MARGIN_MV = 300;
+
+  static const uint16_t MAX_CELL_VOLTAGE_LFP_MV = 3750 + WORKING_MAX_MARGIN_MV;
+  static const uint16_t MIN_CELL_VOLTAGE_LFP_MV = 2500;
+  static const uint16_t MAX_CELL_VOLTAGE_NMC_MV = 4200 + WORKING_MAX_MARGIN_MV;
+  static const uint16_t MIN_CELL_VOLTAGE_NMC_MV = 2700;
 
   int32_t working_cell_min_mV = 0;
   int32_t working_cell_recharge_threshold_mV = 0;
@@ -93,6 +102,11 @@ class Mg4Battery : public UdsCanBattery {
 
   bool reportsFDVoltages = false;
   bool reportsSoC = false;
+  bool batteryIdentified = false;
+  // Pack serial (NTSC identifier) from 0x308 subfield 000554: 7 ASCII bytes
+  // + 1 index byte per frame over 4 frames; FF-padded tail, NUL-terminated.
+  // Eg: 0AFPEG10879103D7N3000095
+  char ntsc_serial[29] = {0};
   bool coulombCounting = false;
   ContactorState contactorState = ContactorState::WAITING_FOR_PACK;
   PackContactorFeedback pack_contactors;
@@ -100,6 +114,8 @@ class Mg4Battery : public UdsCanBattery {
   int replayFrameIndex047_08A = 0;             // Master cursor through the message cycle; the
                                                // 313/314 index is derived from it (see cpp)
   int wakeupCounter = 0;                       // Paces the 0x4F3 FD wakeup keep-alive
+
+  void identify_battery();
 
   void refresh_047_08a(int i);
   void refresh_313_314(int i);
@@ -125,6 +141,12 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t POLL_MIN_CELL_TEMPERATURE = 0xB057;
   static const uint16_t POLL_MAX_CELL_TEMPERATURE = 0xB056;
   static const uint16_t POLL_BATTERY_SOH = 0xB061;
+  static const uint16_t POLL_ECU_HARDWARE_NUMBER = 0xF192;
+  static const uint16_t POLL_ECU_SOFTWARE_NUMBER = 0xF194;
+
+  // ECU identifier payloads (10 ASCII characters each)
+  uint8_t pid_ecu_hw_number[10] = {0};
+  uint8_t pid_ecu_sw_number[10] = {0};
 
   CAN_frame MG4_4F3_FD = {.FD = true,
                           .ext_ID = false,
