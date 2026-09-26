@@ -305,13 +305,21 @@ static uint16_t soc_to_ocv(uint16_t soc_in_centipercent) {
 }
 
 uint32_t Mg4Battery::calculate_max_discharge_power_W() {
+  // Fail-closed: no fresh cell voltages or temperatures means we cannot
+  // prove the pack is safe, so allow no power. This also covers the
+  // non-FD bus (which never reports cells/temps) and the boot window
+  // before the first 0x12C/0x159 frame.
+  if (cell_voltage_freshness <= 0 || temp_freshness <= 0) {
+    return 0;
+  }
+
   int32_t max_discharge_power_W = MAX_DISCHARGE_POWER_W;
 
   // Cellvoltage-based power derating. Taper linearly to zero over the last
   // DISCHARGE_TAPER_MV above working_cell_min_mV, then latch at zero (with
   // hysteresis) until the cell voltage recovers past the trip threshold.
-  // Skipped if we have no fresh cell voltages (e.g. non-FD bus).
-  if (cell_voltage_freshness > 0) {
+  {
+    // Freshness already gated above.
     const int32_t cell_power_W = battery_discharge_power_by_cell_min(
         datalayer.battery.status.cell_min_voltage_mV, working_cell_min_mV, DISCHARGE_TAPER_MV, DISCHARGE_HYSTERESIS_MV,
         MAX_DISCHARGE_POWER_W, &voltageAtCellMin);
@@ -321,10 +329,9 @@ uint32_t Mg4Battery::calculate_max_discharge_power_W() {
   }
 
   // Temperature-based power derating: high temperature limits both charge and
-  // discharge. Skipped if we have no fresh temperature reading yet - a
-  // default/uninitialized value of 0 dC must not be mistaken for an actual
-  // at-limit reading.
-  if (temp_freshness > 0) {
+  // discharge. Freshness already gated above, so a default/uninitialized
+  // value of 0 dC can no longer slip through as an at-limit reading.
+  {
     const int32_t temp_high_power_W =
         battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_WATTS_PER_DC);
     if (temp_high_power_W < max_discharge_power_W) {
@@ -348,13 +355,18 @@ uint32_t Mg4Battery::calculate_max_discharge_power_W() {
 }
 
 uint32_t Mg4Battery::calculate_max_charge_power_W() {
+  // Fail-closed: see calculate_max_discharge_power_W().
+  if (cell_voltage_freshness <= 0 || temp_freshness <= 0) {
+    return 0;
+  }
+
   int32_t max_charge_power_W = MAX_CHARGE_POWER_W;
 
   // Cellvoltage-based power derating. Taper linearly to zero over the last
   // CHARGE_TAPER_MV below working_cell_max_mV, then latch at zero (with
   // hysteresis) until the cell voltage recovers past the trip threshold.
-  // Skipped if we have no fresh cell voltages (e.g. non-FD bus).
-  if (cell_voltage_freshness > 0) {
+  {
+    // Freshness already gated above.
     const int32_t cell_power_W =
         battery_charge_power_by_cell_max(datalayer.battery.status.cell_max_voltage_mV, working_cell_max_mV,
                                          CHARGE_TAPER_MV, CHARGE_HYSTERESIS_MV, MAX_CHARGE_POWER_W, &voltageAtCellMax);
@@ -364,12 +376,10 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
   }
 
   // Temperature-based power derating: high temperature limits both charge and
-  // discharge, low temperature limits charge only. Skipped if we have no
-  // fresh temperature reading yet - a default/uninitialized value of 0 dC
-  // must not be mistaken for an actual at-limit reading (this previously
-  // clamped LFP charge power to 0 W any time temperature hadn't been read
-  // yet, since MIN_TEMP_LFP_DC is also 0).
-  if (temp_freshness > 0) {
+  // discharge, low temperature limits charge only. Freshness already gated
+  // above, so a default/uninitialized value of 0 dC can no longer slip
+  // through as an at-limit reading.
+  {
     const int32_t MIN_TEMP_DC =
         datalayer.battery.info.chemistry == battery_chemistry_enum::LFP ? MIN_TEMP_LFP_DC : MIN_TEMP_NMC_DC;
     const int32_t temp_high_power_W =
@@ -826,6 +836,14 @@ void Mg4Battery::refresh_313_314(int i) {
 void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
   const bool open_requested = (datalayer.system.status.system_status == FAULT);
 
+  // Startup grace for riding through an already-closed pack while the battery
+  // is not yet identified (UDS F192 + NTSC serial pending). Before the wait
+  // timer starts, elapsed time since boot applies; afterwards the wait timer
+  // applies. Either way it expires CONTACTOR_STARTUP_GRACE_MS after start.
+  const bool startup_grace_expired = (contactorWaitStartMillis != 0)
+                                         ? (currentMillis - contactorWaitStartMillis >= CONTACTOR_STARTUP_GRACE_MS)
+                                         : (currentMillis >= CONTACTOR_STARTUP_GRACE_MS);
+
   switch (contactorState) {
     case ContactorState::WAITING_FOR_PACK:
       // We don't know the current pack state yet.
@@ -837,20 +855,52 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
         contactorState = ContactorState::OPENING;
       } else if (pack_contactors.received || currentMillis - contactorWaitStartMillis >= CONTACTOR_STARTUP_GRACE_MS) {
         // We now know the pack state, or have given up waiting for it.
-
-        contactorWaitStartMillis = 0;
+        // Closing from open requires a known pack: cell count, chemistry and
+        // voltage limits are guesses until identify_battery() runs.
         if (pack_contactors.isClosed()) {
-          // Pack contactors were already closed (eg, we rebooted without opening them).
-          // Keep them closed.
-          logging.printf("[MG4] Pack contactors already closed, resuming at closed tail\n");
-          replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
-          contactorState = ContactorState::CLOSED;
+          if (batteryIdentified) {
+            contactorWaitStartMillis = 0;
+            // Pack contactors were already closed (eg, we rebooted without opening them).
+            // Keep them closed.
+            logging.printf("[MG4] Pack contactors already closed, resuming at closed tail\n");
+            replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
+            contactorState = ContactorState::CLOSED;
+          } else if (!startup_grace_expired) {
+            // Already closed (eg, reboot): ride through until grace expires.
+            // Keep the wait timer running so CLOSED can expire it.
+            if (contactorWaitStartMillis == 0) {
+              contactorWaitStartMillis = currentMillis;
+            }
+            logging.printf("[MG4] Pack contactors already closed, unidentified pack riding through\n");
+            replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
+            contactorState = ContactorState::CLOSED;
+          } else {
+            // Unidentified past grace: drive open rather than trust the pack.
+            logging.printf("[MG4] Pack closed but unidentified past grace, opening\n");
+            replayFrameIndex047_08A = 0;
+            contactorState = ContactorState::OPENING;
+          }
         } else {
-          // Pack contactors are open, start the closing sequence from the beginning.
-          logging.printf("[MG4] Pack contactors open (state %d), starting closing sequence from the beginning\n",
-                         pack_contactors.received ? (int)pack_contactors.state : -1);
-          replayFrameIndex047_08A = 0;
-          contactorState = ContactorState::CLOSING;
+          if (batteryIdentified) {
+            contactorWaitStartMillis = 0;
+            // Pack contactors are open, start the closing sequence from the beginning.
+            logging.printf("[MG4] Pack contactors open (state %d), starting closing sequence from the beginning\n",
+                           pack_contactors.received ? (int)pack_contactors.state : -1);
+            replayFrameIndex047_08A = 0;
+            contactorState = ContactorState::CLOSING;
+          } else if (!pack_contactors.received && startup_grace_expired) {
+            // Unknown pack state past grace while unidentified: drive open
+            // rather than closing blind.
+            logging.printf("[MG4] Pack state unknown and unidentified past grace, opening\n");
+            replayFrameIndex047_08A = 0;
+            contactorState = ContactorState::OPENING;
+          } else {
+            // Hold open: stay silent in WAITING until identified. Pack is
+            // confirmed open (or grace still running), so nothing to drive.
+            if (contactorWaitStartMillis == 0) {
+              contactorWaitStartMillis = currentMillis;
+            }
+          }
         }
       } else if (contactorWaitStartMillis == 0) {
         // Start the grace period timer
@@ -864,6 +914,11 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
       if (open_requested) {
         // Open was requested, abort!
         logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
+        replayFrameIndex047_08A = 0;
+        contactorState = ContactorState::OPENING;
+      } else if (!batteryIdentified) {
+        // Must not close from open while unidentified.
+        logging.printf("[MG4] Aborting close, pack unidentified, looping open segment\n");
         replayFrameIndex047_08A = 0;
         contactorState = ContactorState::OPENING;
       } else if (pack_contactors.isClosed()) {
@@ -881,23 +936,38 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
         logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
         replayFrameIndex047_08A = 0;
         contactorState = ContactorState::OPENING;
-      } else if (pack_contactors.received && !pack_contactors.isClosed()) {
-        // The contactors opened by themselves. Try to reclose them by
-        // restarting the closing sequence.
-        logging.printf("[MG4] Pack contactors no longer closed (state %d), replaying closing sequence\n",
-                       (int)pack_contactors.state);
+      } else if (!batteryIdentified && startup_grace_expired) {
+        // Ride-through expired for an unidentified pack: open it.
+        logging.printf("[MG4] Unidentified pack past grace, opening\n");
         replayFrameIndex047_08A = 0;
-        contactorState = ContactorState::CLOSING;
+        contactorState = ContactorState::OPENING;
+      } else if (pack_contactors.received && !pack_contactors.isClosed()) {
+        if (batteryIdentified) {
+          // The contactors opened by themselves. Try to reclose them by
+          // restarting the closing sequence.
+          logging.printf("[MG4] Pack contactors no longer closed (state %d), replaying closing sequence\n",
+                         (int)pack_contactors.state);
+          replayFrameIndex047_08A = 0;
+          contactorState = ContactorState::CLOSING;
+        } else {
+          // Must not reclose while unidentified.
+          logging.printf("[MG4] Pack contactors opened while unidentified (state %d), opening\n",
+                         (int)pack_contactors.state);
+          replayFrameIndex047_08A = 0;
+          contactorState = ContactorState::OPENING;
+        }
       }
       break;
 
     case ContactorState::OPENING:
-      // We're waiting for contactors to open.
+      // We're driving the open segment of the message cycle.
 
-      if (!open_requested) {
-        // Close was requested during opening. Go to the waiting state until
-        // we've figured out what the pack is doing (we don't know how far the
-        // opening got).
+      if (!open_requested && batteryIdentified) {
+        // Close re-enabled and the pack is known. Go to the waiting state
+        // until we've figured out what the pack is doing (we don't know how
+        // far the opening got). While unidentified we stay here and keep
+        // looping the open segment instead of alternating with silent
+        // WAITING ticks (which would also pin the replay index at 0).
 
         logging.printf("[MG4] Closing re-enabled, waiting for pack contactor state\n");
         contactorWaitStartMillis = 0;
