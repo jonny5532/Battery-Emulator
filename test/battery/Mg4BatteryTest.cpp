@@ -347,6 +347,32 @@ TEST_F(Mg4BatteryTest, ManualEstopCycleResetsRecloseFault) {
   EXPECT_FALSE(battery->reclose_blocked_for_test());
 }
 
+TEST_F(Mg4BatteryTest, IgnoresClassicCanFrames) {
+  // This driver is FD-only: classic-CAN 0x12C/0x401 must change nothing.
+  datalayer.battery.status.voltage_dV = 3600;
+  datalayer.battery.status.current_dA = 42;
+  datalayer.battery.status.real_soc = 5000;
+
+  CAN_frame frame;
+  memset(&frame, 0, sizeof(frame));
+  frame.ID = 0x12C;
+  frame.FD = false;
+  frame.DLC = 8;
+  memset(frame.data.u8, 0xFF, 8);  // garbage that the old fallback would parse
+  battery->handle_incoming_can_frame(frame);
+  EXPECT_EQ(datalayer.battery.status.voltage_dV, 3600);
+  EXPECT_EQ(datalayer.battery.status.current_dA, 42);
+
+  memset(&frame, 0, sizeof(frame));
+  frame.ID = 0x401;
+  frame.FD = false;
+  frame.DLC = 8;
+  frame.data.u8[6] = 0x03;
+  frame.data.u8[7] = 0xE8;  // 1000 = 100.0%
+  battery->handle_incoming_can_frame(frame);
+  EXPECT_EQ(datalayer.battery.status.real_soc, 5000);
+}
+
 TEST_F(Mg4BatteryTest, StoresAndDisplaysEcuPartNumbers) {
   const uint8_t hw[10] = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '0'};
   const uint8_t sw[10] = {'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'};
