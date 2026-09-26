@@ -42,6 +42,7 @@ const EVENTS_ENUM_TYPE kDriverEventBases[] = {
     EVENT_BATTERY_REQUESTS_HEAT,
     EVENT_BATTERY_TOO_LOW_TO_HEAT,
     EVENT_BATTERY_COLD,
+    EVENT_CONTACTOR_RECLOSE_FAULT,
 };
 
 class PerBatteryEventsTest : public ::testing::Test {
