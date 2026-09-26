@@ -1,6 +1,7 @@
 #include "MG-4-BATTERY.h"
 #include <soc/soc.h>
 #include <cmath>    //For unit test
+#include <cstdio>   //For sprintf
 #include <cstring>  //For unit test
 // ===== BEGIN MG4 FD frame generators =====
 // Each FD payload is back-to-back 12-byte subfields with the layout:
@@ -103,6 +104,7 @@ static const Mg4RleRun RLE_314_VAL[5] = {
 static const Mg4RleRun RLE_314_HI[7] = {
     {0xC8, 27}, {0x08, 1}, {0xC8, 1}, {0x48, 2}, {0x88, 1}, {0xC8, 32}, {0x08, 16},
 };
+
 // ===== END MG4 FD frame generators =====
 //#include "esp_timer.h"
 #include "../battery/BATTERIES.h"
@@ -338,6 +340,10 @@ uint32_t Mg4Battery::calculate_max_discharge_power_W() {
     max_discharge_power_W = soc_power_W;
   }
 
+  if (!batteryIdentified) {
+    max_discharge_power_W = 0;
+  }
+
   return max_discharge_power_W > 0 ? max_discharge_power_W : 0;
 }
 
@@ -384,6 +390,10 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
                                                           CHARGE_TRICKLE_POWER_W, DERATE_CHARGE_ABOVE_SOC);
   if (soc_power_W < max_charge_power_W) {
     max_charge_power_W = soc_power_W;
+  }
+
+  if (!batteryIdentified) {
+    max_charge_power_W = 0;
   }
 
   return max_charge_power_W > 0 ? max_charge_power_W : 0;
@@ -669,6 +679,26 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
         // Reflect the pack's own contactor state on the main BE page.
         datalayer.system.status.contactors_engaged = pack_contactors.contactsEngaged();
         break;
+      case 0x308:
+        // Pack serial (NTSC identifier): subfield 000554 has no CRC slot,
+        // it carries 7 ASCII bytes + 1 index byte per frame over 4 frames.
+        for (int i = 0; i + 12 <= rx_frame.DLC; i += 12) {
+          if (rx_frame.data.u8[i + 3] != 8) {
+            break;
+          }
+          uint32_t addr = (rx_frame.data.u8[i] << 16) | (rx_frame.data.u8[i + 1] << 8) | rx_frame.data.u8[i + 2];
+          if (addr == 0x554) {
+            const uint8_t* sub = &rx_frame.data.u8[i + 4];
+            if (sub[7] < 4) {
+              for (int j = 0; j < 7; j++) {
+                uint8_t c = sub[j];
+                ntsc_serial[sub[7] * 7 + j] = (c == 0xFF) ? 0 : (char)c;
+              }
+              ntsc_serial[28] = 0;
+            }
+          }
+        }
+        break;
       default:
         break;
     }
@@ -953,17 +983,87 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
     case POLL_MAX_CELL_TEMPERATURE:
       datalayer.battery.status.temperature_max_dC = ((int32_t)value - 20000) / 50;
       temp_freshness = 10;
+      break;
+    case POLL_ECU_HARDWARE_NUMBER:
+      memcpy(pid_ecu_hw_number, data, length > sizeof(pid_ecu_hw_number) ? sizeof(pid_ecu_hw_number) : length);
+      if (!batteryIdentified)
+        identify_battery();
+      break;
+    case POLL_ECU_SOFTWARE_NUMBER:
+      memcpy(pid_ecu_sw_number, data, length > sizeof(pid_ecu_sw_number) ? sizeof(pid_ecu_sw_number) : length);
       break;  // End of cycle
   }
   return 0;  // Continue normal PID cycling
+}
+
+void Mg4Battery::identify_battery() {
+  if (pid_ecu_hw_number[8] == 0 || pid_ecu_hw_number[9] == 0) {
+    // No valid ECU hardware number received yet
+    return;
+  }
+
+  if (ntsc_serial[4] == 0) {
+    // No valid NTSC serial chemistry received yet
+    return;
+  }
+
+  battery_chemistry_enum chemistry;
+  if (ntsc_serial[4] == 'B') {
+    chemistry = LFP;
+  } else {
+    chemistry = NMC;
+  }
+
+  uint8_t capacity = ((pid_ecu_hw_number[8] - '0') * 10) + (pid_ecu_hw_number[9] - '0');
+
+  auto setup_battery = [&](battery_chemistry_enum chem, uint32_t cap, uint8_t num_cells) {
+    datalayer.battery.info.chemistry = chem;
+    datalayer.battery.info.number_of_cells = num_cells;
+    datalayer.battery.info.total_capacity_Wh = cap;
+
+    if (chem == LFP) {
+      datalayer.battery.info.max_cell_voltage_mV = MAX_CELL_VOLTAGE_LFP_MV;
+      datalayer.battery.info.min_cell_voltage_mV = MIN_CELL_VOLTAGE_LFP_MV;
+    } else {
+      datalayer.battery.info.max_cell_voltage_mV = MAX_CELL_VOLTAGE_NMC_MV;
+      datalayer.battery.info.min_cell_voltage_mV = MIN_CELL_VOLTAGE_NMC_MV;
+    }
+
+    working_cell_max_mV = datalayer.battery.info.max_cell_voltage_mV - WORKING_MAX_MARGIN_MV;
+    working_cell_min_mV = datalayer.battery.info.min_cell_voltage_mV + WORKING_MIN_MARGIN_MV;
+    datalayer.battery.info.max_cell_voltage_deviation_mV =
+        (chem == LFP) ? MAX_CELL_DEVIATION_LFP_MV : MAX_CELL_DEVIATION_NMC_MV;
+
+    datalayer.battery.info.max_design_voltage_dV =
+        (datalayer.battery.info.max_cell_voltage_mV * (uint32_t)datalayer.battery.info.number_of_cells) / 100;
+    datalayer.battery.info.min_design_voltage_dV =
+        (datalayer.battery.info.min_cell_voltage_mV * (uint32_t)datalayer.battery.info.number_of_cells) / 100;
+
+    logging.printf("[MG4] Detected %ds %dWh %s battery\n", datalayer.battery.info.number_of_cells,
+                   datalayer.battery.info.total_capacity_Wh, chemistry == LFP ? "LFP" : "NMC");
+
+    batteryIdentified = true;
+  };
+
+  if (capacity == 49 && chemistry == LFP) {
+    setup_battery(chemistry, 49000, 100);
+  } else if (capacity == 51 && chemistry == LFP) {
+    setup_battery(chemistry, 51000, 104);
+  } else if (capacity == 64 && chemistry == NMC) {
+    setup_battery(chemistry, 64000, 104);
+  } else if (capacity == 77 && chemistry == NMC) {
+    setup_battery(chemistry, 77000, 108);
+  } else {
+    logging.printf("[MG4] Unknown battery: %d %c\n", capacity, ntsc_serial[4]);
+  }
 }
 
 void Mg4Battery::setup(void) {  // Performs one time setup at startup
   setup_uds(0x7E5, 0);
   fd_uds_requests = true;
 
-  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_BATTERY_VOLTAGE, POLL_MIN_CELL_TEMPERATURE,
-                                       POLL_MAX_CELL_TEMPERATURE};
+  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH,          POLL_BATTERY_VOLTAGE,     POLL_MIN_CELL_TEMPERATURE,
+                                       POLL_MAX_CELL_TEMPERATURE, POLL_ECU_HARDWARE_NUMBER, POLL_ECU_SOFTWARE_NUMBER};
 
   set_pid_scan_list(POLL_LIST, sizeof(POLL_LIST) / sizeof(POLL_LIST[0]));
   dtc = &datalayer.battery.dtc;
@@ -972,42 +1072,37 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   datalayer.system.info.battery_protocol[63] = '\0';
   datalayer.system.status.battery_allows_contactor_closing = true;
 
-  datalayer.battery.info.chemistry = user_selected_battery_chemistry;
-  datalayer.battery.info.number_of_cells = 104;
-  datalayer.battery.info.max_cell_voltage_deviation_mV = MAX_CELL_DEVIATION_MV;
+  //
+  datalayer.battery.info.chemistry = NMC;
+  datalayer.battery.info.number_of_cells = 108;
+  datalayer.battery.info.max_cell_voltage_deviation_mV = MAX_CELL_DEVIATION_LFP_MV;
 
-  // Danger limits
-  if (datalayer.battery.info.chemistry == battery_chemistry_enum::LFP) {
-    datalayer.battery.info.max_cell_voltage_mV = 3760;
-    datalayer.battery.info.min_cell_voltage_mV = 2500;
-  } else {
-    datalayer.battery.info.max_cell_voltage_mV = 4250;
-    datalayer.battery.info.min_cell_voltage_mV = 2700;
-  }
-
-  working_cell_max_mV = datalayer.battery.info.max_cell_voltage_mV - 10;
-  working_cell_min_mV = datalayer.battery.info.min_cell_voltage_mV + 300;
-  working_cell_recharge_threshold_mV = working_cell_max_mV - 100;
-  coulombCounting = user_selected_use_estimated_SOC;
-  if (coulombCounting) {
-    static const uint32_t MINIMUM_WORKING_RANGE_MV = 200;
-    if (user_selected_max_cell_voltage_mV > (datalayer.battery.info.min_cell_voltage_mV + MINIMUM_WORKING_RANGE_MV) &&
-        user_selected_max_cell_voltage_mV <= datalayer.battery.info.max_cell_voltage_mV) {
-      working_cell_max_mV = user_selected_max_cell_voltage_mV;
-      // Calculate threshold as 1% lower SoC than max, using ocv_to_soc
-      working_cell_recharge_threshold_mV = soc_to_ocv(ocv_to_soc(working_cell_max_mV) - 100);
-    } else {
-      logging.printf("[MG4] Invalid user-selected max cell voltage, using default of %d mV\n", working_cell_max_mV);
-    }
-    if (user_selected_min_cell_voltage_mV >= datalayer.battery.info.min_cell_voltage_mV &&
-        user_selected_min_cell_voltage_mV <= (working_cell_max_mV - MINIMUM_WORKING_RANGE_MV)) {
-      working_cell_min_mV = user_selected_min_cell_voltage_mV;
-    } else {
-      logging.printf("[MG4] Invalid user-selected min cell voltage, using default of %d mV\n", working_cell_min_mV);
-    }
-    logging.printf("[MG4] Working cell voltage range: %d mV - %d mV, recharge threshold: %d mV\n", working_cell_min_mV,
-                   working_cell_max_mV, working_cell_recharge_threshold_mV);
-  }
+  // Start with wide voltage limits until we identify pack
+  datalayer.battery.info.max_cell_voltage_mV = MAX_CELL_VOLTAGE_NMC_MV;
+  datalayer.battery.info.min_cell_voltage_mV = MIN_CELL_VOLTAGE_LFP_MV;
+  working_cell_max_mV = datalayer.battery.info.max_cell_voltage_mV - WORKING_MAX_MARGIN_MV;
+  working_cell_min_mV = datalayer.battery.info.min_cell_voltage_mV + WORKING_MIN_MARGIN_MV;
+  // working_cell_recharge_threshold_mV = working_cell_max_mV - 100;
+  // coulombCounting = user_selected_use_estimated_SOC;
+  // if (coulombCounting) {
+  //   static const uint32_t MINIMUM_WORKING_RANGE_MV = 200;
+  //   if (user_selected_max_cell_voltage_mV > (datalayer.battery.info.min_cell_voltage_mV + MINIMUM_WORKING_RANGE_MV) &&
+  //       user_selected_max_cell_voltage_mV <= datalayer.battery.info.max_cell_voltage_mV) {
+  //     working_cell_max_mV = user_selected_max_cell_voltage_mV;
+  //     // Calculate threshold as 1% lower SoC than max, using ocv_to_soc
+  //     working_cell_recharge_threshold_mV = soc_to_ocv(ocv_to_soc(working_cell_max_mV) - 100);
+  //   } else {
+  //     logging.printf("[MG4] Invalid user-selected max cell voltage, using default of %d mV\n", working_cell_max_mV);
+  //   }
+  //   if (user_selected_min_cell_voltage_mV >= datalayer.battery.info.min_cell_voltage_mV &&
+  //       user_selected_min_cell_voltage_mV <= (working_cell_max_mV - MINIMUM_WORKING_RANGE_MV)) {
+  //     working_cell_min_mV = user_selected_min_cell_voltage_mV;
+  //   } else {
+  //     logging.printf("[MG4] Invalid user-selected min cell voltage, using default of %d mV\n", working_cell_min_mV);
+  //   }
+  //   logging.printf("[MG4] Working cell voltage range: %d mV - %d mV, recharge threshold: %d mV\n", working_cell_min_mV,
+  //                  working_cell_max_mV, working_cell_recharge_threshold_mV);
+  // }
 
   datalayer.battery.info.max_design_voltage_dV =
       (datalayer.battery.info.number_of_cells * datalayer.battery.info.max_cell_voltage_mV) / 100;
@@ -1034,6 +1129,20 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   // logging.printf("Nonvolatile cookie set to %lu\n", *nonvolatile_cookie);
 }
 
+// Renders characters if printable, otherwise as [xx] hex.
+static void print_chars_or_hex(char* buf, const uint8_t* data, uint16_t length) {
+  int ptr = 0;
+  for (int i = 0; i < length && ptr < 62; i++) {
+    if (data[i] >= 32 && data[i] <= 126) {
+      buf[ptr++] = (char)data[i];
+    } else {
+      int written = sprintf(buf + ptr, "[%02x]", data[i]);
+      ptr += written;
+    }
+  }
+  buf[ptr] = '\0';
+}
+
 String Mg4Battery::get_uds_info_html() {
   // Pack-reported precharge/contactor state (0x15B byte[21]&0xF)
   String html = "<h3>Precharge/contactor state</h3>";
@@ -1042,6 +1151,14 @@ String Mg4Battery::get_uds_info_html() {
           String(pack_contactors.color()) + "; margin-right: 6px;'></span>";
   html += "State: " + String(pack_contactors.received ? String(pack_contactors.state) : String("n/a")) + " (" +
           pack_contactors.label() + ")";
+  html += "<br>Pack serial: " + String(ntsc_serial);
+  char buf[64];
+  print_chars_or_hex(buf, pid_ecu_hw_number, sizeof(pid_ecu_hw_number));
+  html += "<br>ECU hardware: ";
+  html += buf;
+  print_chars_or_hex(buf, pid_ecu_sw_number, sizeof(pid_ecu_sw_number));
+  html += "<br>ECU software: ";
+  html += buf;
   html += "</div>";
 
   return html;
