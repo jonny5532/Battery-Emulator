@@ -18,6 +18,18 @@ class Mg4Battery : public UdsCanBattery {
   String get_uds_info_html() override;
   const char* get_dtc_json_filename() override { return "mg_dtc.json"; }
 
+  // Contactor management state machine (public so tests can assert transitions).
+  enum class ContactorState {
+    WAITING_FOR_PACK,  // Silent: waiting for the first 0x15B state (or grace expiry)
+    CLOSING,           // Replaying the full message cycle from index 0
+    CLOSED,            // Pack confirmed closed, replaying the end of the cycle
+    OPENING,           // Open requested, replaying the start of the cycle
+  };
+
+  // Test hooks: read-only view of the contactor/identification state.
+  ContactorState contactor_state_for_test() const { return contactorState; }
+  bool battery_identified_for_test() const { return batteryIdentified; }
+
  private:
   static const uint16_t MAX_CELL_DEVIATION_LFP_MV = 400;
   static const uint16_t MAX_CELL_DEVIATION_NMC_MV = 150;
@@ -90,14 +102,6 @@ class Mg4Battery : public UdsCanBattery {
           return "#9e9e9e";  // Grey
       }
     }
-  };
-
-  // Contactor management state machine.
-  enum class ContactorState {
-    WAITING_FOR_PACK,  // Silent: waiting for the first 0x15B state (or grace expiry)
-    CLOSING,           // Replaying the full message cycle from index 0
-    CLOSED,            // Pack confirmed closed, replaying the end of the cycle
-    OPENING,           // Open requested, replaying the start of the cycle
   };
 
   bool reportsFDVoltages = false;
