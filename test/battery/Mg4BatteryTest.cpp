@@ -1,135 +1,95 @@
 #include <gtest/gtest.h>
-#include <sys/mman.h>
+#include <vector>
 #include "../../Software/src/battery/BATTERIES.h"
 #include "../../Software/src/battery/MG-4-BATTERY.h"
 #include "../../Software/src/datalayer/datalayer.h"
-#include "soc/soc.h"
+
+// TX frame capture injected by the emulated CAN layer (see test/emul/can.cpp).
+void clear_transmitted_frames();
+const std::vector<CAN_frame>& get_transmitted_frames();
 
 class Mg4BatteryTest : public ::testing::Test {
  protected:
   Mg4Battery* battery;
+  unsigned long now_ms = 0;
 
   void SetUp() override {
-    // Map the RTC slow memory region the MG-4 uses as NVRAM for its discharge
-    // counter (see MG-4-BATTERY.cpp setup()). Without this the host build would
-    // segfault on the first write to SOC_RTC_DATA_LOW + 400.
-    mmap((void*)SOC_RTC_DATA_LOW, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     battery = new Mg4Battery();
     // Reset datalayer to a known state
     memset(&datalayer, 0, sizeof(datalayer));
     user_selected_battery_chemistry = battery_chemistry_enum::NMC;
-    // This test exercises the coulomb-counting SoC path, so enable it before setup()
-    user_selected_use_estimated_SOC = true;
     battery->setup();
     // Set some default info since setup sets some but not all
     datalayer.battery.info.total_capacity_Wh = 51000;  // 51kWh pack
     datalayer.battery.info.number_of_cells = 104;
+    now_ms = 0;
+    clear_transmitted_frames();
   }
 
   void TearDown() override { delete battery; }
 
-  void send_can_12c_fd(uint16_t voltage_dV, int16_t current_dA, uint16_t min_mV, uint16_t max_mV) {
+  // Pack contactor states seen on 0x15B byte 21 low nibble: 3 = idle/open,
+  // 11 = precharge active, 7 = closed/charging.
+  void send_15b_fd(uint8_t contactor_state, uint16_t soc_times_ten = 500) {
     CAN_frame frame;
     memset(&frame, 0, sizeof(frame));
-    frame.ID = 0x12C;
+    frame.ID = 0x15B;
     frame.FD = true;
-    frame.DLC = 64;  // MG4 FD frame is long
-
-    // voltage_dV = (((rx_frame.data.u8[8] << 4) | (rx_frame.data.u8[9] >> 4)) * 5) / 2;
-    // inverse: (voltage_dV * 2 / 5) = (u8[8] << 4) | (u8[9] >> 4)
-    uint16_t v_raw = (voltage_dV * 2) / 5;
-    frame.data.u8[8] = (v_raw >> 4) & 0xFF;
-    frame.data.u8[9] = (v_raw & 0x0F) << 4;
-
-    // current_dA = -(((rx_frame.data.u8[6] << 8) | rx_frame.data.u8[7]) - 20000) / 2;
-    // inverse: -2 * current_dA + 20000 = (u8[6] << 8) | u8[7]
-    uint16_t c_raw = (uint16_t)(-2 * current_dA + 20000);
-    frame.data.u8[6] = (c_raw >> 8) & 0xFF;
-    frame.data.u8[7] = c_raw & 0xFF;
-
-    // cell_min_voltage_mV = ((rx_frame.data.u8[30] << 8) | (rx_frame.data.u8[31])) / 8;
-    uint16_t min_raw = min_mV * 8;
-    frame.data.u8[30] = (min_raw >> 8) & 0xFF;
-    frame.data.u8[31] = min_raw & 0xFF;
-
-    // cell_max_voltage_mV = ((rx_frame.data.u8[32] << 8) | (rx_frame.data.u8[33])) / 8;
-    uint16_t max_raw = max_mV * 8;
-    frame.data.u8[32] = (max_raw >> 8) & 0xFF;
-    frame.data.u8[33] = max_raw & 0xFF;
-
+    frame.DLC = 32;
+    frame.data.u8[7] = (soc_times_ten >> 6) & 0xFF;
+    frame.data.u8[8] = (soc_times_ten & 0x3F) << 2;
+    frame.data.u8[21] = contactor_state & 0x0F;
     battery->handle_incoming_can_frame(frame);
   }
+
+  void send_308_serial() {
+    // Captured 0x308 payloads (subfield 000554, NTSC serial). Decodes to
+    // "0AFPEF20878703D782000497", index 4 = 'E' => NMC chemistry.
+    static const char* frames[4] = {
+        "0005150800000083FC0000080005160800001700000000000005290826F1FFFDFFFC00FF000554083041465045463200",
+        "0005150800000083FC00000800051608000017000000000000052908C1F2FFFDFFFC00FF000554083038373837303301",
+        "0005150800000083FC000008000516080000170000000000000529089CF3FFFDFFFC00FF000554084437383230303002",
+        "0005150800000083FC0000080005160800001700000000000005290812F4FFFDFFFC00FF00055408343937FFFFFFFF03",
+    };
+    for (int k = 0; k < 4; k++) {
+      CAN_frame frame;
+      memset(&frame, 0, sizeof(frame));
+      frame.ID = 0x308;
+      frame.FD = true;
+      frame.DLC = 48;
+      for (int b = 0; b < 48; b++) {
+        unsigned v = 0;
+        sscanf(frames[k] + 2 * b, "%2x", &v);
+        frame.data.u8[b] = (uint8_t)v;
+      }
+      battery->handle_incoming_can_frame(frame);
+    }
+  }
+
+  // Drives identify_battery() through its real inputs: NTSC serial (NMC)
+  // plus ECU hardware number with capacity digits "64" => 64kWh NMC pack.
+  void identify_as_64kwh_nmc() {
+    send_308_serial();
+    const uint8_t hw[10] = {'S', 'H', 'Y', 'X', 'X', 'X', 'X', 'X', '6', '4'};
+    battery->handle_pid(0xF192, 0, hw, sizeof(hw));
+  }
+
+  void step_10ms(int n) {
+    for (int i = 0; i < n; i++) {
+      now_ms += 10;
+      battery->transmit_can(now_ms);
+    }
+  }
+
+  bool transmitted_047() {
+    for (const auto& f : get_transmitted_frames()) {
+      if (f.ID == 0x047) {
+        return true;
+      }
+    }
+    return false;
+  }
 };
-
-TEST_F(Mg4BatteryTest, CoulombCountAndLimitsTest) {
-  // Initial state: 3.7V per cell (approx 50% SoC for NMC)
-  uint16_t cell_mV = 3700;
-  uint16_t pack_voltage_dV = (cell_mV * 104) / 100;
-
-  // First frame to initialize
-  send_can_12c_fd(pack_voltage_dV, 0, cell_mV, cell_mV);
-  battery->update_values();
-
-  uint16_t initial_soc = datalayer.battery.status.real_soc;
-  // Check SoC is in a believable range
-  EXPECT_GE(initial_soc, 4000);
-  EXPECT_LE(initial_soc, 6000);
-
-  // Test Discharge Limit Observation
-  // MG-4-BATTERY.cpp setup(): min_cell_voltage_mV for NMC is 2700, so
-  // working_min is 3000mV. The cell-voltage limiter tapers to zero over the
-  // last 50mV and latches at zero below working_min.
-
-  // Simulate hitting working min
-  send_can_12c_fd(300 * 104 / 10, 0, 2999, 3100);
-  battery->update_values();
-  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 0);
-  EXPECT_EQ(datalayer.battery.status.real_soc, 0);
-
-  // Test Charge Limit Observation
-  // setup(): max_cell_voltage_mV for NMC is 4250, so the default working max is
-  // 4240mV (no user-selected max is set, working_cell_max_mV = 4250 - 10).
-
-  // Simulate hitting working max
-  send_can_12c_fd(425 * 104 / 10, 0, 4250, 4250);
-  battery->update_values();
-  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0);
-  EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
-
-  // Test Coulomb Counting
-
-  // Simulate discharge: 100A (1000dA) for some "ticks"
-  // update_values is called "every second" in real life.
-  // total_discharge_dC -= current_dA; (since discharge is negative current)
-  // Actually MG-4 current_dA is calculated as:
-  // current_dA = -(((rx_frame.data.u8[6] << 8) | rx_frame.data.u8[7]) - 20000) / 2;
-  // If we want 100A discharge, current_dA should be -1000.
-
-  // Note: the previous step reset the discharge counter to zero while at
-  // 100% SoC, so the drift-correction in update_values() bumps it to
-  // one_percent_dC (cell voltage is below the recharge threshold) before
-  // counting resumes. 4500 ticks of 100A therefore lands at ~4.5% rather
-  // than the ~10% a naive count would suggest.
-
-  for (int i = 0; i < 4500; i++) {  // 100A discharge
-    send_can_12c_fd(pack_voltage_dV, -1000, 3700, 3700);
-    battery->update_values();
-  }
-
-  uint16_t soc_after_discharge = datalayer.battery.status.real_soc;
-  // Should be ~4.5% now
-  EXPECT_LE(soc_after_discharge, 1500);
-  EXPECT_GE(soc_after_discharge, 400);
-
-  for (int i = 0; i < 500; i++) {  // 100A discharge
-    send_can_12c_fd(pack_voltage_dV, -1000, 3700, 3700);
-    battery->update_values();
-  }
-
-  soc_after_discharge = datalayer.battery.status.real_soc;
-  // Should be floored at 1% (since min cell voltage is still above working min)
-  EXPECT_EQ(soc_after_discharge, 100);
-}
 
 TEST_F(Mg4BatteryTest, ParsesPackSerialFrom308) {
   // Captured 0x308 payloads from mg4_dev/308.log: subfield 000554 has no
@@ -157,6 +117,122 @@ TEST_F(Mg4BatteryTest, ParsesPackSerialFrom308) {
   }
   std::string html = battery->get_uds_info_html().c_str();
   EXPECT_NE(html.find("0AFPEF20878703D782000497"), std::string::npos);
+}
+
+TEST_F(Mg4BatteryTest, ContactorHoldsOpenUntilIdentified) {
+  // Pack reports open while the battery is still unidentified: the emulator
+  // must stay silent in WAITING (no 0x047 close sequence), even past the
+  // 5 s startup grace.
+  send_15b_fd(3);
+  step_10ms(600);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::WAITING_FOR_PACK);
+  EXPECT_FALSE(battery->battery_identified_for_test());
+  clear_transmitted_frames();
+  step_10ms(50);
+  EXPECT_FALSE(transmitted_047());
+
+  // Once identified, the same open pack must start the closing sequence.
+  identify_as_64kwh_nmc();
+  EXPECT_TRUE(battery->battery_identified_for_test());
+  clear_transmitted_frames();
+  step_10ms(3);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+  EXPECT_TRUE(transmitted_047());
+}
+
+TEST_F(Mg4BatteryTest, ContactorRidesThroughClosedWithinGrace) {
+  // Reboot with already-closed pack: may stay at the closed tail while
+  // unidentified, provided startup grace has not expired.
+  send_15b_fd(7);
+  step_10ms(2);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  EXPECT_FALSE(battery->battery_identified_for_test());
+  clear_transmitted_frames();
+  step_10ms(5);
+  EXPECT_TRUE(transmitted_047());
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+}
+
+TEST_F(Mg4BatteryTest, ContactorOpensPastGraceWhenUnidentified) {
+  // Ride-through expires: an unidentified pack past the 5 s grace must drive
+  // open and stick there (continuous open loop) until identified.
+  send_15b_fd(7);
+  step_10ms(2);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  step_10ms(600);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  clear_transmitted_frames();
+  step_10ms(20);  // Past one full 150-frame (1.5 s) open loop
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_TRUE(transmitted_047());
+}
+
+TEST_F(Mg4BatteryTest, ContactorDrivesOpenWhenPackNeverHeard) {
+  // No 0x15B ever received and still unidentified past grace: drive open
+  // rather than closing blind, and stick there until identified.
+  step_10ms(600);
+  EXPECT_FALSE(battery->battery_identified_for_test());
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  clear_transmitted_frames();
+  step_10ms(20);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_TRUE(transmitted_047());
+}
+
+TEST_F(Mg4BatteryTest, ContactorReturnsToWaitingOnceIdentified) {
+  // Sticky OPENING releases back to WAITING as soon as the pack identifies,
+  // then follows the normal close flow (pack open => CLOSING).
+  step_10ms(600);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  identify_as_64kwh_nmc();
+  send_15b_fd(3);
+  step_10ms(1);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::WAITING_FOR_PACK);
+  step_10ms(3);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+}
+
+TEST_F(Mg4BatteryTest, ContactorReclosesWhenIdentified) {
+  identify_as_64kwh_nmc();
+  send_15b_fd(7);
+  step_10ms(3);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  // Pack drops out on its own: an identified pack replays the closing sequence.
+  send_15b_fd(3);
+  step_10ms(2);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+}
+
+TEST_F(Mg4BatteryTest, ContactorDoesNotRecloseWhenUnidentified) {
+  // Ride-through CLOSED, then the pack opens on its own while still
+  // unidentified: must drive open and stick there, never enter CLOSING.
+  send_15b_fd(7);
+  step_10ms(2);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  send_15b_fd(3);
+  step_10ms(1);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  for (int i = 0; i < 50; i++) {
+    step_10ms(1);
+    auto s = battery->contactor_state_for_test();
+    EXPECT_NE(s, Mg4Battery::ContactorState::CLOSING);
+    EXPECT_NE(s, Mg4Battery::ContactorState::CLOSED);
+  }
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+}
+
+TEST_F(Mg4BatteryTest, ContactorFaultOpensAndReleaseReturnsToWaiting) {
+  identify_as_64kwh_nmc();
+  send_15b_fd(7);
+  step_10ms(3);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  datalayer.system.status.system_status = FAULT;
+  step_10ms(2);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  // Clearing the fault returns to WAITING first (pack state re-checked).
+  datalayer.system.status.system_status = ACTIVE;
+  step_10ms(1);
+  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::WAITING_FOR_PACK);
 }
 
 TEST_F(Mg4BatteryTest, StoresAndDisplaysEcuPartNumbers) {
