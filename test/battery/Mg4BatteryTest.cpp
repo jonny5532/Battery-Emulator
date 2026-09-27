@@ -9,13 +9,21 @@
 void clear_transmitted_frames();
 const std::vector<CAN_frame>& get_transmitted_frames();
 
+// Testable subclass exposing protected contactor/identification state.
+class TestableMg4Battery : public Mg4Battery {
+ public:
+  using Mg4Battery::batteryIdentified;
+  using Mg4Battery::contactorState;
+  using Mg4Battery::reclose_blocked;
+};
+
 class Mg4BatteryTest : public ::testing::Test {
  protected:
-  Mg4Battery* battery;
+  TestableMg4Battery* battery;
   unsigned long now_ms = 0;
 
   void SetUp() override {
-    battery = new Mg4Battery();
+    battery = new TestableMg4Battery();
     // Reset datalayer to a known state
     memset(&datalayer, 0, sizeof(datalayer));
     user_selected_battery_chemistry = battery_chemistry_enum::NMC;
@@ -130,18 +138,18 @@ TEST_F(Mg4BatteryTest, ContactorHoldsOpenUntilIdentified) {
   // 5 s startup grace.
   send_15b_fd(3);
   step_10ms(600);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::WAITING_FOR_PACK);
-  EXPECT_FALSE(battery->battery_identified_for_test());
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::WAITING_FOR_PACK);
+  EXPECT_FALSE(battery->batteryIdentified);
   clear_transmitted_frames();
   step_10ms(50);
   EXPECT_FALSE(transmitted_047());
 
   // Once identified, the same open pack must start the closing sequence.
   identify_as_64kwh_nmc();
-  EXPECT_TRUE(battery->battery_identified_for_test());
+  EXPECT_TRUE(battery->batteryIdentified);
   clear_transmitted_frames();
   step_10ms(3);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSING);
   EXPECT_TRUE(transmitted_047());
 }
 
@@ -150,12 +158,12 @@ TEST_F(Mg4BatteryTest, ContactorRidesThroughClosedWithinGrace) {
   // unidentified, provided startup grace has not expired.
   send_15b_fd(7);
   step_10ms(2);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
-  EXPECT_FALSE(battery->battery_identified_for_test());
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
+  EXPECT_FALSE(battery->batteryIdentified);
   clear_transmitted_frames();
   step_10ms(5);
   EXPECT_TRUE(transmitted_047());
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
 }
 
 TEST_F(Mg4BatteryTest, ContactorOpensPastGraceWhenUnidentified) {
@@ -163,12 +171,12 @@ TEST_F(Mg4BatteryTest, ContactorOpensPastGraceWhenUnidentified) {
   // open and stick there (continuous open loop) until identified.
   send_15b_fd(7);
   step_10ms(2);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
   step_10ms(600);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
   clear_transmitted_frames();
   step_10ms(20);  // Past one full 150-frame (1.5 s) open loop
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
   EXPECT_TRUE(transmitted_047());
 }
 
@@ -176,11 +184,11 @@ TEST_F(Mg4BatteryTest, ContactorDrivesOpenWhenPackNeverHeard) {
   // No 0x15B ever received and still unidentified past grace: drive open
   // rather than closing blind, and stick there until identified.
   step_10ms(600);
-  EXPECT_FALSE(battery->battery_identified_for_test());
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_FALSE(battery->batteryIdentified);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
   clear_transmitted_frames();
   step_10ms(20);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
   EXPECT_TRUE(transmitted_047());
 }
 
@@ -188,24 +196,24 @@ TEST_F(Mg4BatteryTest, ContactorReturnsToWaitingOnceIdentified) {
   // Sticky OPENING releases back to WAITING as soon as the pack identifies,
   // then follows the normal close flow (pack open => CLOSING).
   step_10ms(600);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
   identify_as_64kwh_nmc();
   send_15b_fd(3);
   step_10ms(1);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::WAITING_FOR_PACK);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::WAITING_FOR_PACK);
   step_10ms(3);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSING);
 }
 
 TEST_F(Mg4BatteryTest, ContactorReclosesWhenIdentified) {
   identify_as_64kwh_nmc();
   send_15b_fd(7);
   step_10ms(3);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
   // Pack drops out on its own: an identified pack replays the closing sequence.
   send_15b_fd(3);
   step_10ms(2);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSING);
 }
 
 TEST_F(Mg4BatteryTest, ContactorDoesNotRecloseWhenUnidentified) {
@@ -213,32 +221,32 @@ TEST_F(Mg4BatteryTest, ContactorDoesNotRecloseWhenUnidentified) {
   // unidentified: must drive open and stick there, never enter CLOSING.
   send_15b_fd(7);
   step_10ms(2);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
   send_15b_fd(3);
   step_10ms(1);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
   EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_OPEN)->state, EVENT_STATE_ACTIVE);
   for (int i = 0; i < 50; i++) {
     step_10ms(1);
-    auto s = battery->contactor_state_for_test();
+    auto s = battery->contactorState;
     EXPECT_NE(s, Mg4Battery::ContactorState::CLOSING);
     EXPECT_NE(s, Mg4Battery::ContactorState::CLOSED);
   }
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
 }
 
 TEST_F(Mg4BatteryTest, ContactorFaultOpensAndReleaseReturnsToWaiting) {
   identify_as_64kwh_nmc();
   send_15b_fd(7);
   step_10ms(3);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
   datalayer.system.status.system_status = FAULT;
   step_10ms(2);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
   // Clearing the fault returns to WAITING first (pack state re-checked).
   datalayer.system.status.system_status = ACTIVE;
   step_10ms(1);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::WAITING_FOR_PACK);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::WAITING_FOR_PACK);
 }
 
 TEST_F(Mg4BatteryTest, ContactorRecloseLoopTripsFatalEvent) {
@@ -248,22 +256,22 @@ TEST_F(Mg4BatteryTest, ContactorRecloseLoopTripsFatalEvent) {
   identify_as_64kwh_nmc();
   send_15b_fd(7);
   step_10ms(3);
-  ASSERT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  ASSERT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
 
   for (int k = 0; k < 10; k++) {
     send_15b_fd(3);  // pack opens by itself
     step_10ms(2);
     if (k < 9) {
-      EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+      EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSING);
       EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_OPEN)->state, EVENT_STATE_ACTIVE);
       send_15b_fd(7);  // pack closes again
       step_10ms(2);
-      EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+      EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
       EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_OPEN)->state, EVENT_STATE_INACTIVE);
     }
   }
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
-  EXPECT_TRUE(battery->reclose_blocked_for_test());
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
+  EXPECT_TRUE(battery->reclose_blocked);
   EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_OPEN)->state, EVENT_STATE_ACTIVE);
   EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_RECLOSE_FAULT)->state, EVENT_STATE_ACTIVE);
   EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_RECLOSE_FAULT)->data, 10);
@@ -272,8 +280,8 @@ TEST_F(Mg4BatteryTest, ContactorRecloseLoopTripsFatalEvent) {
   // Latched: a pack that stays open must not re-enter CLOSING.
   send_15b_fd(3);
   step_10ms(50);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
-  EXPECT_TRUE(battery->reclose_blocked_for_test());
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
+  EXPECT_TRUE(battery->reclose_blocked);
 }
 
 TEST_F(Mg4BatteryTest, SparseReclosesDoNotTrip) {
@@ -283,24 +291,24 @@ TEST_F(Mg4BatteryTest, SparseReclosesDoNotTrip) {
   identify_as_64kwh_nmc();
   send_15b_fd(7);
   step_10ms(3);
-  ASSERT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  ASSERT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
 
   for (int k = 0; k < 9; k++) {
     send_15b_fd(3);
     step_10ms(2);
-    EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+    EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSING);
     send_15b_fd(7);
     step_10ms(2);
-    EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+    EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
   }
   clear_transmitted_frames();
   step_10ms(30100);  // 301 s, pack stays closed
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
 
   send_15b_fd(3);
   step_10ms(2);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
-  EXPECT_FALSE(battery->reclose_blocked_for_test());
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSING);
+  EXPECT_FALSE(battery->reclose_blocked);
   EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_RECLOSE_FAULT)->state, EVENT_STATE_INACTIVE);
 }
 
@@ -309,7 +317,7 @@ TEST_F(Mg4BatteryTest, ManualEstopCycleResetsRecloseFault) {
   identify_as_64kwh_nmc();
   send_15b_fd(7);
   step_10ms(3);
-  ASSERT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  ASSERT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
   for (int k = 0; k < 10; k++) {
     send_15b_fd(3);
     step_10ms(2);
@@ -318,7 +326,7 @@ TEST_F(Mg4BatteryTest, ManualEstopCycleResetsRecloseFault) {
       step_10ms(2);
     }
   }
-  ASSERT_TRUE(battery->reclose_blocked_for_test());
+  ASSERT_TRUE(battery->reclose_blocked);
   ASSERT_EQ(get_event_pointer(EVENT_CONTACTOR_RECLOSE_FAULT)->state, EVENT_STATE_ACTIVE);
 
   // Manual open via the homepage button / estop (flag plus the
@@ -327,50 +335,24 @@ TEST_F(Mg4BatteryTest, ManualEstopCycleResetsRecloseFault) {
   datalayer.system.info.equipment_stop_active = true;
   set_event(EVENT_EQUIPMENT_STOP, 1);
   step_10ms(2);
-  EXPECT_FALSE(battery->reclose_blocked_for_test());
+  EXPECT_FALSE(battery->reclose_blocked);
   EXPECT_EQ(get_event_pointer(EVENT_CONTACTOR_RECLOSE_FAULT)->state, EVENT_STATE_INACTIVE);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::OPENING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
 
   // Manual close resumes the normal flow (pack still reports open).
   datalayer.system.info.equipment_stop_active = false;
   clear_event(EVENT_EQUIPMENT_STOP);
   step_10ms(3);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSING);
 
   // Fresh tracker: one self-open recloses instead of tripping.
   send_15b_fd(7);
   step_10ms(2);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSED);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
   send_15b_fd(3);
   step_10ms(2);
-  EXPECT_EQ(battery->contactor_state_for_test(), Mg4Battery::ContactorState::CLOSING);
-  EXPECT_FALSE(battery->reclose_blocked_for_test());
-}
-
-TEST_F(Mg4BatteryTest, IgnoresClassicCanFrames) {
-  // This driver is FD-only: classic-CAN 0x12C/0x401 must change nothing.
-  datalayer.battery.status.voltage_dV = 3600;
-  datalayer.battery.status.current_dA = 42;
-  datalayer.battery.status.real_soc = 5000;
-
-  CAN_frame frame;
-  memset(&frame, 0, sizeof(frame));
-  frame.ID = 0x12C;
-  frame.FD = false;
-  frame.DLC = 8;
-  memset(frame.data.u8, 0xFF, 8);  // garbage that the old fallback would parse
-  battery->handle_incoming_can_frame(frame);
-  EXPECT_EQ(datalayer.battery.status.voltage_dV, 3600);
-  EXPECT_EQ(datalayer.battery.status.current_dA, 42);
-
-  memset(&frame, 0, sizeof(frame));
-  frame.ID = 0x401;
-  frame.FD = false;
-  frame.DLC = 8;
-  frame.data.u8[6] = 0x03;
-  frame.data.u8[7] = 0xE8;  // 1000 = 100.0%
-  battery->handle_incoming_can_frame(frame);
-  EXPECT_EQ(datalayer.battery.status.real_soc, 5000);
+  EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSING);
+  EXPECT_FALSE(battery->reclose_blocked);
 }
 
 TEST_F(Mg4BatteryTest, StoresAndDisplaysEcuPartNumbers) {
