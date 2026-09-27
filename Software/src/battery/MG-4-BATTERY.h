@@ -109,7 +109,6 @@ class Mg4Battery : public UdsCanBattery {
 
   unsigned long previousMillis10 = 0;   // will store last time a 10ms CAN Message was send
   unsigned long previousMillis100 = 0;  // will store last time a 100ms CAN Message was send
-  unsigned long previousMillis200 = 0;  // will store last time a 200ms CAN Message was send
 
   uint32_t* nonvolatile_cookie = 0;
   uint32_t* nonvolatile_total_discharge_dC = 0;

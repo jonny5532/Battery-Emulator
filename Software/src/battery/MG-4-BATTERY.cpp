@@ -771,7 +771,7 @@ void Mg4Battery::reset_reclose_tracker() {
   if (reclose_blocked) {
     reclose_blocked = false;
     clear_event(EVENT_CONTACTOR_RECLOSE_FAULT, battery_index);
-    logging.printf("[MG4] Reclose fault cleared by manual open/close, retry allowed\n");
+    logging.printf("[MG4] Reclose fault cleared\n");
   }
 }
 
@@ -814,7 +814,7 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
 
       if (open_requested) {
         // If an open is requested, we should proceed with that immediately.
-        logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
+        logging.printf("[MG4] Req open\n");
         reset_reclose_tracker();
         replayFrameIndex047_08A = 0;
         contactorState = ContactorState::OPENING;
@@ -825,7 +825,7 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
             // Pack contactors were already closed (eg, we rebooted without opening them).
             // Keep them closed.
             contactorWaitStartMillis = 0;
-            logging.printf("[MG4] Pack contactors already closed, resuming at closed tail\n");
+            logging.printf("[MG4] Stay closed\n");
             clear_event(EVENT_CONTACTOR_OPEN, battery_index);
             replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
             contactorState = ContactorState::CLOSED;
@@ -837,14 +837,14 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
               // Start the wait timer for the grace period if needed.
               contactorWaitStartMillis = currentMillis;
             }
-            logging.printf("[MG4] Pack contactors already closed, unidentified pack riding through\n");
+            logging.printf("[MG4] Remaining closed\n");
             clear_event(EVENT_CONTACTOR_OPEN, battery_index);
             replayFrameIndex047_08A = CLOSED_TAIL_START_047_08A;
             contactorState = ContactorState::CLOSED;
           } else {
             // Grace period expired and we still don't know the battery
             // identity. Open contactors.
-            logging.printf("[MG4] Pack closed but unidentified past grace, opening\n");
+            logging.printf("[MG4] No ID, opening\n");
             replayFrameIndex047_08A = 0;
             contactorState = ContactorState::OPENING;
           }
@@ -852,14 +852,13 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
           if (batteryIdentified) {
             // Pack contactors are open, start the closing sequence from the beginning.
             contactorWaitStartMillis = 0;
-            logging.printf("[MG4] Pack contactors open (state %d), starting closing sequence from the beginning\n",
-                           pack_contactors.received ? (int)pack_contactors.state : -1);
+            logging.printf("[MG4] Closing\n");
             replayFrameIndex047_08A = 0;
             contactorState = ContactorState::CLOSING;
           } else if (!pack_contactors.received && startup_grace_expired) {
-            // We never identified the pack, and the grace period has expired,
-            // force contactors open.
-            logging.printf("[MG4] Pack state unknown and unidentified past grace, opening\n");
+            // Both ID and contactor state is still unknown, force contactors
+            // open.
+            logging.printf("[MG4] Unknown state and ID, opening\n");
             replayFrameIndex047_08A = 0;
             contactorState = ContactorState::OPENING;
           } else {
@@ -881,13 +880,13 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
 
       if (open_requested) {
         // Open was requested, abort!
-        logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
+        logging.printf("[MG4] Req open\n");
         reset_reclose_tracker();
         replayFrameIndex047_08A = 0;
         contactorState = ContactorState::OPENING;
       } else if (!batteryIdentified) {
         // Must not close from open while unidentified.
-        logging.printf("[MG4] Aborting close, pack unidentified, looping open segment\n");
+        logging.printf("[MG4] No ID, close aborted\n");
         replayFrameIndex047_08A = 0;
         contactorState = ContactorState::OPENING;
       } else if (pack_contactors.isClosed()) {
@@ -903,14 +902,14 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
 
       if (open_requested) {
         // Open requested, do that immediately.
-        logging.printf("[MG4] Contactor open requested, looping open segment of the message cycle\n");
+        logging.printf("[MG4] Req open\n");
         reset_reclose_tracker();
         replayFrameIndex047_08A = 0;
         contactorState = ContactorState::OPENING;
       } else if (!batteryIdentified && startup_grace_expired) {
         // We were staying closed over a reboot, but didn't identify the pack in
         // time. Open contactors.
-        logging.printf("[MG4] Unidentified pack past grace, opening\n");
+        logging.printf("[MG4] No ID, opening\n");
         replayFrameIndex047_08A = 0;
         contactorState = ContactorState::OPENING;
       } else if (pack_contactors.received && !pack_contactors.isClosed()) {
@@ -921,24 +920,21 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
             // The pack keeps opening by itself (e.g. HV isolation fault):
             // stop wearing out the contactors, hold open and raise a fatal
             // event. Only a manual open/close clears this latch.
-            logging.printf("[MG4] Pack opened %d times within %lu ms, latching contactors open\n", RECLOSE_TRIP_COUNT,
-                           RECLOSE_WINDOW_MS);
+            logging.printf("[MG4] Reclose fault, stay open\n");
             reclose_blocked = true;
             replayFrameIndex047_08A = 0;
             contactorState = ContactorState::OPENING;
             set_event(EVENT_CONTACTOR_RECLOSE_FAULT, RECLOSE_TRIP_COUNT, battery_index);
           } else {
             // Try to reclose them by restarting the closing sequence.
-            logging.printf("[MG4] Pack contactors no longer closed (state %d), replaying closing sequence\n",
-                           (int)pack_contactors.state);
+            logging.printf("[MG4] Opened, reclosing\n");
             replayFrameIndex047_08A = 0;
             contactorState = ContactorState::CLOSING;
           }
         } else {
           // Must not reclose while unidentified.
           set_event(EVENT_CONTACTOR_OPEN, 0, battery_index);
-          logging.printf("[MG4] Pack contactors opened while unidentified (state %d), opening\n",
-                         (int)pack_contactors.state);
+          logging.printf("[MG4] Opened, no ID\n");
           replayFrameIndex047_08A = 0;
           contactorState = ContactorState::OPENING;
         }
@@ -952,7 +948,7 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
       // If close was requested, only proceed if we've identified the pack and
       // reclose is not blocked.
       if (!open_requested && batteryIdentified && !reclose_blocked) {
-        logging.printf("[MG4] Closing requested, waiting for pack contactor state\n");
+        logging.printf("[MG4] Req close\n");
         contactorWaitStartMillis = 0;
         contactorState = ContactorState::WAITING_FOR_PACK;
       }
@@ -964,7 +960,6 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
   if (datalayer.system.status.bms_reset_status != BMS_RESET_IDLE) {
     // Transmitting towards battery is halted while BMS is being reset
     previousMillis10 = currentMillis;
-    previousMillis200 = currentMillis;
     return;
   }
 
@@ -1014,15 +1009,6 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
   switch (pid) {
     case POLL_BATTERY_SOH:
       datalayer.battery.status.soh_pptt = value;
-      break;
-    case POLL_BATTERY_VOLTAGE:
-      //datalayer.battery.status.voltage_dV = (value * 5) / 2;
-      break;
-    case POLL_BATTERY_CURRENT:
-      //datalayer.battery.status.current_dA = (value - 40000) / -4;
-      break;
-    case POLL_BATTERY_SOC:
-      // SoC arrives on the FD 0x15B frame; the PID value is unused.
       break;
     case POLL_MIN_CELL_TEMPERATURE:
       datalayer.battery.status.temperature_min_dC = ((int32_t)value - 20000) / 50;
@@ -1110,8 +1096,8 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   setup_uds(0x7E5, 0);
   fd_uds_requests = true;
 
-  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH,          POLL_BATTERY_VOLTAGE,     POLL_MIN_CELL_TEMPERATURE,
-                                       POLL_MAX_CELL_TEMPERATURE, POLL_ECU_HARDWARE_NUMBER, POLL_ECU_SOFTWARE_NUMBER};
+  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_MIN_CELL_TEMPERATURE, POLL_MAX_CELL_TEMPERATURE,
+                                       POLL_ECU_HARDWARE_NUMBER, POLL_ECU_SOFTWARE_NUMBER};
 
   set_pid_scan_list(POLL_LIST, sizeof(POLL_LIST) / sizeof(POLL_LIST[0]));
   dtc = &datalayer.battery.dtc;
