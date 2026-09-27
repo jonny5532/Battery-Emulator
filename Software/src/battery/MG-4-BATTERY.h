@@ -9,16 +9,13 @@ class Mg4Battery : public UdsCanBattery {
   virtual uint16_t handle_pid(uint16_t pid, uint32_t value, const uint8_t* data, uint16_t length);
   virtual void update_values();
   virtual void transmit_can(unsigned long currentMillis);
-  virtual uint32_t calculate_max_discharge_power_W();
-  virtual uint32_t calculate_max_charge_power_W();
-  //virtual uint32_t calculate_pack_voltage_limit_max_dV();
 
   static constexpr const char* Name = "MG4 battery";
 
   String get_uds_info_html() override;
   const char* get_dtc_json_filename() override { return "mg_dtc.json"; }
 
-  // Contactor management state machine (public so tests can assert transitions).
+  // Contactor management state machine
   enum class ContactorState {
     WAITING_FOR_PACK,  // Silent: waiting for the first 0x15B state (or grace expiry)
     CLOSING,           // Replaying the full message cycle from index 0
@@ -26,10 +23,11 @@ class Mg4Battery : public UdsCanBattery {
     OPENING,           // Open requested, replaying the start of the cycle
   };
 
-  // Test hooks: read-only view of the contactor/identification state.
-  ContactorState contactor_state_for_test() const { return contactorState; }
-  bool battery_identified_for_test() const { return batteryIdentified; }
-  bool reclose_blocked_for_test() const { return reclose_blocked; }
+ protected:
+  // Visible to tests via subclass; production code treats as private.
+  bool batteryIdentified = false;
+  ContactorState contactorState = ContactorState::WAITING_FOR_PACK;
+  bool reclose_blocked = false;
 
  private:
   static const uint16_t MAX_CELL_DEVIATION_LFP_MV = 400;
@@ -62,60 +60,26 @@ class Mg4Battery : public UdsCanBattery {
     uint8_t state = 0xFF;  // 0xFF = no data yet
     bool isClosed() const { return received && state == 7; }
     bool isPrecharging() const { return received && state == 11; }
-    // Value for datalayer.system.status.contactors_engaged (shown on the main
-    // BE contactor widget): 1=closed, 3=precharge active, 0=otherwise.
-    uint8_t contactsEngaged() const {
+    const char* label() const {
       if (isClosed()) {
-        return 1;
+        return "Closed";
       }
       if (isPrecharging()) {
-        return 3;
+        return "Precharge";
       }
-      return 0;
+      if (received && state == 3) {
+        return "Open";
+      }
+      return "Unknown";
     }
-    const char* label() const {
-      if (!received) {
-        return "No data received yet";
-      }
-      switch (state) {
-        case 7:
-          return "Closed / charging";
-        case 11:
-          return "Precharge active";
-        case 3:
-          return "Idle";
-        default:
-          return "Unknown";
-      }
-    }
-    const char* color() const {
-      if (!received) {
-        return "#9e9e9e";  // Grey
-      }
-      switch (state) {
-        case 7:
-          return "#4CAF50";  // Green
-        case 11:
-          return "#ff9800";  // Orange
-        case 3:
-          return "#f44336";  // Red
-        default:
-          return "#9e9e9e";  // Grey
-      }
-    }
+    uint8_t contactsEngaged() const { return isClosed() ? 1 : (isPrecharging() ? 3 : 0); }
   };
 
-  bool batteryIdentified = false;
-  // Pack serial (NTSC identifier) from 0x308 subfield 000554: 7 ASCII bytes
-  // + 1 index byte per frame over 4 frames; FF-padded tail, NUL-terminated.
-  // Eg: 0AFPEG10879103D7N3000095
-  char ntsc_serial[29] = {0};
+  char ntsc_serial[29] = {0};  // eg: 0AFPEG10879103D7N3000095
   bool coulombCounting = false;
-  ContactorState contactorState = ContactorState::WAITING_FOR_PACK;
   PackContactorFeedback pack_contactors;
-  unsigned long contactorWaitStartMillis = 0;  // Grace timer base while WAITING_FOR_PACK
-  int replayFrameIndex047_08A = 0;             // Master cursor through the message cycle; the
-                                               // 313/314 index is derived from it (see cpp)
+  unsigned long contactorWaitStartMillis = 0;
+  int replayFrameIndex047_08A = 0;
 
   // Automatic-reclose guard. A pack that opens by itself (e.g. HV isolation
   // fault) must not be reclosed forever: reclose timestamps form a sliding
@@ -127,20 +91,16 @@ class Mg4Battery : public UdsCanBattery {
   unsigned long reclose_times[RECLOSE_TRIP_COUNT] = {0};
   int reclose_count = 0;  // valid entries in reclose_times
   int reclose_pos = 0;    // next write index (oldest entry when full)
-  bool reclose_blocked = false;
   bool last_equipment_stop = false;
 
-  void reset_reclose_tracker();
-  // Records an automatic reclose at now_ms; true when it completes
-  // RECLOSE_TRIP_COUNT recloses inside RECLOSE_WINDOW_MS.
-  bool record_contactor_reclose(unsigned long now_ms);
-
+  uint32_t calculate_max_discharge_power_W();
+  uint32_t calculate_max_charge_power_W();
   void identify_battery();
-
   void update_047_08a(int i);
   void update_313_314(int i);
-
   void contactor_state_tick(unsigned long currentMillis);
+  void reset_reclose_tracker();
+  bool record_contactor_reclose(unsigned long now_ms);
 
   uint32_t total_discharge_dC = 0;  // in deci-Coulombs
   bool total_discharge_initialized = false;
