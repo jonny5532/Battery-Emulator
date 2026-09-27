@@ -1197,11 +1197,8 @@ static void print_chars_or_hex(char* buf, const uint8_t* data, uint16_t length) 
 String Mg4Battery::get_uds_info_html() {
   // Pack-reported precharge/contactor state (0x15B byte[21]&0xF)
   String html = "<h3>Precharge/contactor state</h3>";
-  html += "<div style='border: 1px solid #ccc; padding: 5px;'>";
-  html += "<span style='display: inline-block; width: 14px; height: 14px; background-color: " +
-          String(pack_contactors.color()) + "; margin-right: 6px;'></span>";
-  html += "State: " + String(pack_contactors.received ? String(pack_contactors.state) : String("n/a")) + " (" +
-          pack_contactors.label() + ")";
+  html += "State: ";
+  html += pack_contactors.label();
   html += "<br>Pack serial: " + String(ntsc_serial);
   char buf[64];
   print_chars_or_hex(buf, pid_ecu_hw_number, sizeof(pid_ecu_hw_number));
@@ -1210,12 +1207,6 @@ String Mg4Battery::get_uds_info_html() {
   print_chars_or_hex(buf, pid_ecu_sw_number, sizeof(pid_ecu_sw_number));
   html += "<br>ECU software: ";
   html += buf;
-  if (reclose_blocked) {
-    html += "<br><span style='color: #f44336;'>Reclose fault latched: pack opened " + String(RECLOSE_TRIP_COUNT) +
-            " times within " + String((unsigned long)(RECLOSE_WINDOW_MS / 1000)) +
-            " s. Toggle manual open/close after fixing the fault to retry.</span>";
-  }
-  html += "</div>";
 
   return html;
 }
