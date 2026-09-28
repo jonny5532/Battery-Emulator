@@ -216,6 +216,93 @@ TEST_F(Mg4BatteryTest, ContactorReclosesWhenIdentified) {
   EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSING);
 }
 
+TEST_F(Mg4BatteryTest, ClosedTailLoopKeepsCountersSeamless) {
+  // The CLOSED tail must loop a whole number of 15-count cycles on both the
+  // 10ms (047/08A) and 100ms (313/314) frames: 150 fast frames carry exactly
+  // 15 slow frames. Capture several real tail loops off the wire and require
+  // every rolling counter to advance by exactly one per frame, including
+  // across the wrap.
+  identify_as_64kwh_nmc();
+  send_15b_fd(7);
+  step_10ms(3);
+  ASSERT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
+  clear_transmitted_frames();
+  step_10ms(500);  // >3 full 150-frame (1.5s) tail loops
+  ASSERT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
+
+  std::vector<uint8_t> c047a, c047b, c08a1, c08a2, c313a, c313b, c314a, c314b;
+  for (const auto& f : get_transmitted_frames()) {
+    switch (f.ID) {
+      case 0x047:
+        c047a.push_back(f.data.u8[5]);
+        c047b.push_back(f.data.u8[17]);
+        break;
+      case 0x08A:
+        c08a1.push_back(f.data.u8[5]);
+        c08a2.push_back(f.data.u8[17]);
+        break;
+      case 0x313:
+        c313a.push_back(f.data.u8[5]);
+        c313b.push_back(f.data.u8[29]);
+        break;
+      case 0x314:
+        c314a.push_back(f.data.u8[5]);
+        c314b.push_back(f.data.u8[17]);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // 500 fast ticks => 500 047/08A frames; ~50 slow ticks => ~50 313/314.
+  // Use lower bounds so the test covers multiple wraps without depending on
+  // exact 100ms phasing.
+  EXPECT_GE(c047a.size(), 450u);
+  EXPECT_GE(c08a1.size(), 450u);
+  EXPECT_GE(c313a.size(), 40u);
+  EXPECT_GE(c314a.size(), 40u);
+  ASSERT_EQ(c047a.size(), c047b.size());
+  ASSERT_EQ(c08a1.size(), c08a2.size());
+  ASSERT_EQ(c313a.size(), c313b.size());
+  ASSERT_EQ(c314a.size(), c314b.size());
+
+  // Paired counters within one frame share the same phase on different bases.
+  for (size_t k = 0; k < c047a.size(); k++) {
+    EXPECT_EQ(c047a[k] - 0xF0, c047b[k] - 0xF0) << "047 pair mismatch at frame " << k;
+  }
+  for (size_t k = 0; k < c08a1.size(); k++) {
+    EXPECT_EQ(c08a1[k] - 0x30, c08a2[k] - 0x40) << "08A pair mismatch at frame " << k;
+  }
+  for (size_t k = 0; k < c313a.size(); k++) {
+    EXPECT_EQ(c313a[k] - 0xF0, c313b[k] - 0x30) << "313 pair mismatch at frame " << k;
+  }
+  for (size_t k = 0; k < c314a.size(); k++) {
+    EXPECT_EQ(c314a[k] - 0x40, c314b[k] - 0x70) << "314 pair mismatch at frame " << k;
+  }
+
+  // Every counter must step by exactly one (mod 15) per frame, with no
+  // duplicate/skip at the loop wrap.
+  auto expect_steps_by_one = [](const std::vector<uint8_t>& v, uint8_t base, const char* label) {
+    for (size_t k = 1; k < v.size(); k++) {
+      int prev = (int)v[k - 1] - base;
+      int cur = (int)v[k] - base;
+      ASSERT_GE(prev, 0) << label << " out of range at frame " << k - 1;
+      ASSERT_LT(prev, 15) << label << " out of range at frame " << k - 1;
+      ASSERT_GE(cur, 0) << label << " out of range at frame " << k;
+      ASSERT_LT(cur, 15) << label << " out of range at frame " << k;
+      EXPECT_EQ((cur - prev + 15) % 15, 1) << label << " jump at frame " << k;
+    }
+  };
+  expect_steps_by_one(c047a, 0xF0, "047[5]");
+  expect_steps_by_one(c047b, 0xF0, "047[17]");
+  expect_steps_by_one(c08a1, 0x30, "08A[5]");
+  expect_steps_by_one(c08a2, 0x40, "08A[17]");
+  expect_steps_by_one(c313a, 0xF0, "313[5]");
+  expect_steps_by_one(c313b, 0x30, "313[29]");
+  expect_steps_by_one(c314a, 0x40, "314[5]");
+  expect_steps_by_one(c314b, 0x70, "314[17]");
+}
+
 TEST_F(Mg4BatteryTest, ContactorDoesNotRecloseWhenUnidentified) {
   // Ride-through CLOSED, then the pack opens on its own while still
   // unidentified: must drive open and stick there, never enter CLOSING.
