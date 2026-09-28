@@ -547,8 +547,10 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
       datalayer.battery.status.cell_min_voltage_mV = ((rx_frame.data.u8[30] << 8) | (rx_frame.data.u8[31])) / 8;
       datalayer.battery.status.cell_max_voltage_mV = ((rx_frame.data.u8[32] << 8) | (rx_frame.data.u8[33])) / 8;
 
-      datalayer.battery.status.temperature_max_dC = ((int)rx_frame.data.u8[19] * 5) - 400;
-      datalayer.battery.status.temperature_min_dC = ((int)rx_frame.data.u8[22] * 5) - 400;
+      // [20] contains the max temperature sensor ID
+      // [21] contains the min temperature sensor ID
+      datalayer.battery.status.temperature_max_dC = ((int)rx_frame.data.u8[22] * 5) - 400;
+      datalayer.battery.status.temperature_min_dC = ((int)rx_frame.data.u8[23] * 5) - 400;
       temp_freshness = 10;
 
       cell_voltage_freshness = 10;
@@ -590,8 +592,9 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
             datalayer.battery.status.cell_voltages_mV[idx + 2] = c1;
             datalayer.battery.status.cell_voltages_mV[idx + 3] = c0;
           }
-        } else if (addr == 0x511) {
-          // Temps
+          /* We don't need temps here, we get them from 12C
+        } else if (addr == 0x511) {  
+          // Cell module temps are in 0x511
 
           uint8_t mux = sub[7];
           int module_idx = mux - 1;
@@ -626,8 +629,8 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
             datalayer.battery.status.temperature_max_dC = temp_max_dC;
             temp_freshness = 10;
           }
+        */
         }
-        // Cell module temps are in 0x511
       }
       break;
     case 0x15B:
@@ -684,8 +687,14 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
 
 // In contactors-open state, we loop the first 150 frames (1.5s) of the replay.
 static constexpr int OPEN_LOOP_LEN_047_08A = 150;
-// In contactors-closed state, we start replay from the already-closed tail.
-static constexpr int CLOSED_TAIL_START_047_08A = 304;
+// In contactors-closed state, we loop the last 150 frames (1.5s) of the replay.
+// 150 fast (10ms) frames carry exactly 15 slow (100ms) frames, so both the
+// 10ms and 100ms embedded 15-count rolling counters wrap seamlessly. The
+// start is 10-aligned so each slow value dwells a full 10 fast frames.
+static constexpr int CLOSED_TAIL_START_047_08A = 650;  // MG4_CYCLE_LEN_047_08A - 150
+static_assert((MG4_CYCLE_LEN_047_08A - CLOSED_TAIL_START_047_08A) == 150,
+              "closed tail must be exactly 150 fast frames");
+static_assert(CLOSED_TAIL_START_047_08A % 10 == 0, "closed tail start must be 10-aligned");
 
 // How long to wait for the contactor status on boot, before we start sending.
 // Allows us to keep contactors closed during BE reboots.
@@ -1010,14 +1019,14 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
     case POLL_BATTERY_SOH:
       datalayer.battery.status.soh_pptt = value;
       break;
-    case POLL_MIN_CELL_TEMPERATURE:
-      datalayer.battery.status.temperature_min_dC = ((int32_t)value - 20000) / 50;
-      temp_freshness = 10;
-      break;
-    case POLL_MAX_CELL_TEMPERATURE:
-      datalayer.battery.status.temperature_max_dC = ((int32_t)value - 20000) / 50;
-      temp_freshness = 10;
-      break;
+    // case POLL_MIN_CELL_TEMPERATURE:
+    //   datalayer.battery.status.temperature_min_dC = ((int32_t)value - 20000) / 50;
+    //   temp_freshness = 10;
+    //   break;
+    // case POLL_MAX_CELL_TEMPERATURE:
+    //   datalayer.battery.status.temperature_max_dC = ((int32_t)value - 20000) / 50;
+    //   temp_freshness = 10;
+    //   break;
     case POLL_ECU_HARDWARE_NUMBER:
       memcpy(pid_ecu_hw_number, data, length > sizeof(pid_ecu_hw_number) ? sizeof(pid_ecu_hw_number) : length);
       if (!batteryIdentified)
@@ -1096,7 +1105,9 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   setup_uds(0x7E5, 0);
   fd_uds_requests = true;
 
-  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_MIN_CELL_TEMPERATURE, POLL_MAX_CELL_TEMPERATURE,
+  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH,
+                                       // POLL_MIN_CELL_TEMPERATURE,
+                                       // POLL_MAX_CELL_TEMPERATURE,
                                        POLL_ECU_HARDWARE_NUMBER, POLL_ECU_SOFTWARE_NUMBER};
 
   set_pid_scan_list(POLL_LIST, sizeof(POLL_LIST) / sizeof(POLL_LIST[0]));
@@ -1185,7 +1196,9 @@ String Mg4Battery::get_uds_info_html() {
   String html = "<h3>Precharge/contactor state</h3>";
   html += "State: ";
   html += pack_contactors.label();
-  html += "<br>Pack serial: " + String(ntsc_serial);
+  html += " (";
+  html += pack_contactors.state;
+  html += ")<br>Pack serial: " + String(ntsc_serial);
   char buf[64];
   print_chars_or_hex(buf, pid_ecu_hw_number, sizeof(pid_ecu_hw_number));
   html += "<br>ECU hardware: ";
