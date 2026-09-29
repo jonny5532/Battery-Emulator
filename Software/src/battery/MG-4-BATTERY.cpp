@@ -276,6 +276,60 @@ static uint16_t soc_to_ocv(uint16_t soc_in_centipercent) {
   return voltage_low + ((voltage_high - voltage_low) * remainder) / 100;
 }
 
+void Mg4Battery::snap_tick() {
+  if (datalayer.battery.info.chemistry != battery_chemistry_enum::LFP) {
+    return;
+  }
+  if (cell_voltage_freshness <= 0) {
+    return;
+  }
+  uint16_t cell_max_mV = datalayer.battery.status.cell_max_voltage_mV;
+  if (cell_max_mV < SNAP_RESET_MV) {
+    snapEnded = false;
+    snap_over_s = 0;
+    snap_ema_dA = 0.0f;
+    snapVoltageTripped = false;
+    return;
+  }
+  if (snapEnded) {
+    return;
+  }
+  if (cell_max_mV >= SNAP_ABORT_MV) {
+    snapEnded = true;
+    return;
+  }
+  // Skip snapping if SoC is already high enough - no drift worth correcting.
+  if (cell_max_mV >= SNAP_SKIP_MV && datalayer.battery.status.real_soc >= SNAP_SKIP_SOC) {
+    snapEnded = true;
+    return;
+  }
+  snap_over_s = (cell_max_mV >= SNAP_OVER_MV) ? snap_over_s + 1 : 0;
+  // ~30s exponential moving average of charge current (+ = charging, clamp discharge to 0).
+  float chg_dA = (float)datalayer.battery.status.current_dA;
+  if (chg_dA < 0.0f) {
+    chg_dA = 0.0f;
+  }
+  snap_ema_dA += SNAP_EMA_ALPHA * (chg_dA - snap_ema_dA);
+  bool current_done = (cell_max_mV >= SNAP_ABSORB_MV) && (snap_ema_dA < (float)SNAP_MIN_DA);
+  if (snap_over_s >= SNAP_OVER_S || current_done) {
+    snapEnded = true;
+  }
+}
+
+bool Mg4Battery::snap_should_force_soc() {
+  return datalayer.battery.info.chemistry == battery_chemistry_enum::LFP && snapEnded && cell_voltage_freshness > 0 &&
+         datalayer.battery.status.cell_max_voltage_mV >= SNAP_ABSORB_MV;
+}
+
+int32_t Mg4Battery::snap_clamp_power_W() {
+  uint16_t v_dV = datalayer.battery.status.voltage_dV;
+  if (v_dV == 0) {
+    v_dV = (uint16_t)(datalayer.battery.info.number_of_cells * 33u);  // ~3.3V/cell fallback
+  }
+  int32_t w = ((int32_t)SNAP_MAX_DA * (int32_t)v_dV) / 100;
+  return w > 0 ? w : 0;
+}
+
 uint32_t Mg4Battery::calculate_max_discharge_power_W() {
   // Fail-closed: no fresh cell voltages or temperatures means we cannot
   // prove the pack is safe, so allow no power. This also covers the boot
@@ -336,11 +390,24 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
   // Cellvoltage-based power derating. Taper linearly to zero over the last
   // CHARGE_TAPER_MV below working_cell_max_mV, then latch at zero (with
   // hysteresis) until the cell voltage recovers past the trip threshold.
+  // LFP snap special-case: while !snapEnded and in absorption, open a 3800mV
+  // envelope clamped to 5A instead of the normal taper. working_cell_max_mV
+  // itself is never touched.
   {
     // Freshness already gated above.
-    const int32_t cell_power_W =
-        battery_charge_power_by_cell_max(datalayer.battery.status.cell_max_voltage_mV, working_cell_max_mV,
-                                         CHARGE_TAPER_MV, CHARGE_HYSTERESIS_MV, MAX_CHARGE_POWER_W, &voltageAtCellMax);
+    int32_t cell_power_W;
+    if (datalayer.battery.info.chemistry == battery_chemistry_enum::LFP && !snapEnded &&
+        datalayer.battery.status.cell_max_voltage_mV >= (uint16_t)SNAP_ABSORB_MV) {
+      const int32_t env_W = battery_charge_power_by_cell_max(datalayer.battery.status.cell_max_voltage_mV,
+                                                             SNAP_ENVELOPE_MV, CHARGE_TAPER_MV, CHARGE_HYSTERESIS_MV,
+                                                             MAX_CHARGE_POWER_W, &snapVoltageTripped);
+      const int32_t clamp_W = snap_clamp_power_W();
+      cell_power_W = (env_W < clamp_W) ? env_W : clamp_W;
+    } else {
+      cell_power_W = battery_charge_power_by_cell_max(datalayer.battery.status.cell_max_voltage_mV, working_cell_max_mV,
+                                                      CHARGE_TAPER_MV, CHARGE_HYSTERESIS_MV, MAX_CHARGE_POWER_W,
+                                                      &voltageAtCellMax);
+    }
     if (cell_power_W < max_charge_power_W) {
       max_charge_power_W = cell_power_W;
     }
@@ -511,6 +578,10 @@ void Mg4Battery::
     datalayer.battery.status.max_charge_power_W = calculate_max_charge_power_W();
     datalayer.battery.status.max_discharge_power_W = calculate_max_discharge_power_W();
   } else {
+    snap_tick();
+    if (snap_should_force_soc()) {
+      update_soc(10000);
+    }
     if (soc_freshness > 0) {
       soc_freshness--;
     }
@@ -645,6 +716,9 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
       if (!coulombCounting) {
         update_soc(soc_times_ten * 10);
         soc_freshness = 10;
+        if (snap_should_force_soc()) {
+          update_soc(10000);
+        }
       }
 
       // Precharge/contactor state, confirmed against a real vehicle
@@ -1198,7 +1272,9 @@ String Mg4Battery::get_uds_info_html() {
   html += pack_contactors.label();
   html += " (";
   html += pack_contactors.state;
-  html += ")<br>Pack serial: " + String(ntsc_serial);
+  html += ")<br>Snap attempt active: ";
+  html += snapEnded ? "NO" : "YES";
+  html += "<br>Pack serial: " + String(ntsc_serial);
   char buf[64];
   print_chars_or_hex(buf, pid_ecu_hw_number, sizeof(pid_ecu_hw_number));
   html += "<br>ECU hardware: ";
