@@ -29,6 +29,41 @@ class Mg4Battery : public UdsCanBattery {
   ContactorState contactorState = ContactorState::WAITING_FOR_PACK;
   bool reclose_blocked = false;
 
+  // Constants controlling the snapping attempt mechanism. The BMS will snap the
+  // SoC to 100% (resetting its internal coulomb counter) when a cell hits 3.75V
+  // briefly. We want to do this carefully to avoid charging cells to 3.75V on a
+  // regular basis:
+  // - Don't try the snap if the SoC is already high enough (drift not worth
+  //   correcting)
+  // - Set a max current limit of 5A during the attempt, but also a 3A min
+  //   average current limit, so we don't trickle charge the cells up to 3.75V.
+  //   The whole snapping cycle should be quick, and the cells should relax back
+  //   down to a sane voltage once it is over.
+  // - Give up if we're over 3.75V/cell for more than 30 seconds.
+  // - Abort if we ever hit 3.79V/cell.
+  // - If the attempt is ended prematurely, don't try again till we've
+  //   discharged back down a lower voltage.
+  static constexpr int32_t SNAP_ABSORB_MV = 3650;
+  static constexpr int32_t SNAP_ENVELOPE_MV = 3800;
+  static constexpr int32_t SNAP_OVER_MV = 3750;
+  static constexpr int32_t SNAP_OVER_S = 30;
+  static constexpr int32_t SNAP_ABORT_MV = 3790;
+  static constexpr int32_t SNAP_SKIP_MV = 3600;   // no-drift check threshold
+  static constexpr int32_t SNAP_SKIP_SOC = 9800;  // skip snap if BMS SoC here
+  static constexpr int32_t SNAP_RESET_MV = 3450;
+  static constexpr int32_t SNAP_MAX_DA = 50;  // 5A max during snap
+  static constexpr int32_t SNAP_MIN_DA = 30;  // 3A min during snap
+  static constexpr float SNAP_EMA_ALPHA = 1.0f / 30;
+
+  bool snapEnded = false;
+  int32_t snap_over_s = 0;
+  float snap_ema_dA = 0.0f;
+  bool snapVoltageTripped = false;
+
+  void snap_tick();
+  bool snap_should_force_soc();
+  int32_t snap_clamp_power_W();
+
  private:
   static const uint16_t MAX_CELL_DEVIATION_LFP_MV = 400;
   static const uint16_t MAX_CELL_DEVIATION_NMC_MV = 150;
