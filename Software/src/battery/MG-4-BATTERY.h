@@ -18,9 +18,9 @@ class Mg4Battery : public UdsCanBattery {
   // Contactor management state machine
   enum class ContactorState {
     WAITING_FOR_PACK,  // Silent: waiting for the first 0x15B state (or grace expiry)
-    CLOSING,           // Replaying the full message cycle from index 0
-    CLOSED,            // Pack confirmed closed, replaying the end of the cycle
-    OPENING,           // Open requested, replaying the start of the cycle
+    CLOSING,           // Driving the close sequencer from its start (free-running, see below)
+    CLOSED,            // Pack confirmed closed, holding the closed signal levels
+    OPENING,           // Open requested, holding the open signal levels
   };
 
  protected:
@@ -28,6 +28,57 @@ class Mg4Battery : public UdsCanBattery {
   bool batteryIdentified = false;
   ContactorState contactorState = ContactorState::WAITING_FOR_PACK;
   bool reclose_blocked = false;
+
+  // Free-running contactor-close sequencer. A single 10ms tick counts
+  // transmitted 047/08A frames since boot (paused while WAITING, so the
+  // first sequence always starts at 0). Rolling counters derive from the
+  // absolute tick so they never jump on state changes; every other signal
+  // derives from time-in-sequence (tick - mg4_seq_start) with its own
+  // thresholds below, saturating at its final level instead of looping.
+  // Threshold values preserve the legacy 800-frame capture timing exactly.
+  uint32_t mg4_seq_tick = 0;
+  uint32_t mg4_seq_start = 0;
+
+  static constexpr uint32_t SEQ_VAL12_STEP = 252;  // fast ticks till precharge plateau
+
+  static constexpr uint32_t SEQ_08A_REQ_T1 = 190;
+  static constexpr uint32_t SEQ_08A_REQ_T2 = 309;  // 190 + 119
+  static constexpr uint32_t SEQ_08A_FLAG_T1 = 188;
+  static constexpr uint32_t SEQ_08A_FLAG_T2 = 407;  // 188 + 219
+  static constexpr uint32_t SEQ_08A_LVL_T1 = 307;
+  static constexpr uint32_t SEQ_08A_LVL_T2 = 337;  // 307 + 30
+
+  static constexpr uint32_t SEQ_313_STAT_T1 = 10;
+  static constexpr uint32_t SEQ_313_STAT_T2 = 33;  // 10 + 23
+  static constexpr int SEQ_313_RAMP_START = 32;
+  static constexpr int SEQ_313_RAMP_END = 78;
+  static constexpr uint16_t SEQ_313_VALA_MAX = 77;
+  static constexpr uint16_t SEQ_313_VALC_MAX = 90;
+
+  static constexpr uint32_t SEQ_314_VAL_T1 = 27;
+  static constexpr uint32_t SEQ_314_VAL_T2 = 28;
+  static constexpr uint32_t SEQ_314_VAL_T3 = 29;
+  static constexpr uint32_t SEQ_314_VAL_T4 = 64;  // 29 + 35
+  static constexpr uint32_t SEQ_314_HI_T1 = 27;
+  static constexpr uint32_t SEQ_314_HI_T2 = 28;
+  static constexpr uint32_t SEQ_314_HI_T3 = 29;
+  static constexpr uint32_t SEQ_314_HI_T4 = 31;  // 29 + 2
+  static constexpr uint32_t SEQ_314_HI_T5 = 32;
+  static constexpr uint32_t SEQ_314_HI_T6 = 64;  // 32 + 32
+  static constexpr int SEQ_314_RAMP_START = 44;
+  static constexpr int SEQ_314_RAMP_END = 59;
+  static constexpr uint16_t SEQ_314_RAMP_MAX = 48;
+
+  static constexpr uint32_t SEQ_FAST_CNT_PHASE = 11;
+  static constexpr uint32_t SEQ_SLOW_CNT_PHASE = 7;
+
+  static uint8_t seq_08a_request(uint32_t t);
+  static uint8_t seq_08a_flag(uint32_t t);
+  static uint8_t seq_08a_level(uint32_t t);
+  static uint8_t seq_313_stat(uint32_t t);
+  static uint8_t seq_314_val(uint32_t t);
+  static uint8_t seq_314_hi(uint32_t t);
+  static uint8_t seq_cnt15(uint32_t tick, uint8_t base, uint32_t phase);
 
   // Constants controlling the snapping attempt mechanism. The BMS will snap the
   // SoC to 100% (resetting its internal coulomb counter) when a cell hits 3.75V
@@ -114,7 +165,6 @@ class Mg4Battery : public UdsCanBattery {
   bool coulombCounting = false;
   PackContactorFeedback pack_contactors;
   unsigned long contactorWaitStartMillis = 0;
-  int replayFrameIndex047_08A = 0;
 
   // Automatic-reclose guard. A pack that opens by itself (e.g. HV isolation
   // fault) must not be reclosed forever: reclose timestamps form a sliding
@@ -131,8 +181,8 @@ class Mg4Battery : public UdsCanBattery {
   uint32_t calculate_max_discharge_power_W();
   uint32_t calculate_max_charge_power_W();
   void identify_battery();
-  void update_047_08a(int i);
-  void update_313_314(int i);
+  void update_047_08a();
+  void update_313_314();
   void contactor_state_tick(unsigned long currentMillis);
   void reset_reclose_tracker();
   bool record_contactor_reclose(unsigned long now_ms);
@@ -167,8 +217,8 @@ class Mg4Battery : public UdsCanBattery {
                           .DLC = 8,
                           .ID = 0x4F3,
                           .data = {0xF3, 0x10, 0x48, 0x00, 0xFF, 0xFF, 0x00, 0x11}};
-  // Static templates for the generated frames. refresh_047_08a /
-  // refresh_313_314 patch only the dynamic bytes (counters, RLE steps,
+  // Static templates for the generated frames. update_047_08a /
+  // update_313_314 patch only the dynamic bytes (counters, sequenced steps,
   // ramps, voltage plateaus) plus CRCs; everything else here is sent as-is.
   CAN_frame MG4_047_FD = {.FD = true,
                           .ext_ID = false,
