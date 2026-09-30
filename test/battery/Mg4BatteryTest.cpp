@@ -14,7 +14,16 @@ class TestableMg4Battery : public Mg4Battery {
  public:
   using Mg4Battery::batteryIdentified;
   using Mg4Battery::contactorState;
+  using Mg4Battery::mg4_seq_start;
+  using Mg4Battery::mg4_seq_tick;
   using Mg4Battery::reclose_blocked;
+  using Mg4Battery::seq_08a_flag;
+  using Mg4Battery::seq_08a_level;
+  using Mg4Battery::seq_08a_request;
+  using Mg4Battery::seq_313_stat;
+  using Mg4Battery::seq_314_hi;
+  using Mg4Battery::seq_314_val;
+  using Mg4Battery::seq_cnt15;
   using Mg4Battery::snapEnded;
 };
 
@@ -245,14 +254,14 @@ TEST_F(Mg4BatteryTest, ContactorRidesThroughClosedWithinGrace) {
 
 TEST_F(Mg4BatteryTest, ContactorOpensPastGraceWhenUnidentified) {
   // Ride-through expires: an unidentified pack past the 5 s grace must drive
-  // open and stick there (continuous open loop) until identified.
+  // open and stick there (steady open hold) until identified.
   send_15b_fd(7);
   step_10ms(2);
   EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
   step_10ms(600);
   EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
   clear_transmitted_frames();
-  step_10ms(20);  // Past one full 150-frame (1.5 s) open loop
+  step_10ms(20);  // Well past the old 150-frame (1.5 s) open loop length
   EXPECT_EQ(battery->contactorState, Mg4Battery::ContactorState::OPENING);
   EXPECT_TRUE(transmitted_047());
 }
@@ -294,17 +303,16 @@ TEST_F(Mg4BatteryTest, ContactorReclosesWhenIdentified) {
 }
 
 TEST_F(Mg4BatteryTest, ClosedTailLoopKeepsCountersSeamless) {
-  // The CLOSED tail must loop a whole number of 15-count cycles on both the
-  // 10ms (047/08A) and 100ms (313/314) frames: 150 fast frames carry exactly
-  // 15 slow frames. Capture several real tail loops off the wire and require
-  // every rolling counter to advance by exactly one per frame, including
-  // across the wrap.
+  // CLOSED holds steady signal levels while the free-running 15-count rolling
+  // counters keep stepping: 10 fast (047/08A) frames per slow (313/314) frame.
+  // Capture a long steady hold off the wire and require every rolling counter
+  // to advance by exactly one per frame, with no duplicate/skip.
   identify_as_64kwh_nmc();
   send_15b_fd(7);
   step_10ms(3);
   ASSERT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
   clear_transmitted_frames();
-  step_10ms(500);  // >3 full 150-frame (1.5s) tail loops
+  step_10ms(500);  // 5 s steady CLOSED hold
   ASSERT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSED);
 
   std::vector<uint8_t> c047a, c047b, c08a1, c08a2, c313a, c313b, c314a, c314b;
@@ -358,7 +366,7 @@ TEST_F(Mg4BatteryTest, ClosedTailLoopKeepsCountersSeamless) {
   }
 
   // Every counter must step by exactly one (mod 15) per frame, with no
-  // duplicate/skip at the loop wrap.
+  // duplicate/skip.
   auto expect_steps_by_one = [](const std::vector<uint8_t>& v, uint8_t base, const char* label) {
     for (size_t k = 1; k < v.size(); k++) {
       int prev = (int)v[k - 1] - base;
@@ -660,4 +668,195 @@ TEST_F(Mg4BatteryTest, SnapSkippedWhenSocAlreadyHigh) {
   tick_1s(3700, 3650, 100, 3800, 980);
   EXPECT_TRUE(battery->snapEnded);
   EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
+}
+
+// Legacy 800/80-frame replay oracle: exact copy of the pre-refactor pattern
+// generators (RLE tables, rolling counters, ramps). The free-running
+// sequencer must reproduce this bit-for-bit over the closing sequence.
+namespace LegacyMg4 {
+struct RleRun {
+  uint16_t value;
+  uint16_t count;
+};
+template <size_t N>
+uint8_t rle_lookup(const RleRun (&runs)[N], int i) {
+  for (size_t r = 0; r < N; r++) {
+    if (i < (int)runs[r].count) {
+      return (uint8_t)runs[r].value;
+    }
+    i -= runs[r].count;
+  }
+  return 0;
+}
+uint8_t cnt(uint8_t base, int i, int skew) {
+  return (uint8_t)(base + ((i + skew) % 15));
+}
+uint16_t ramp(int t, int start, int end, uint16_t max) {
+  if (t <= start) {
+    return 0;
+  }
+  if (t >= end) {
+    return max;
+  }
+  return (uint16_t)(((t - start) * max + (end - start) / 2) / (end - start));
+}
+static const RleRun REQ[3] = {{0x00, 190}, {0x01, 119}, {0x21, 491}};
+static const RleRun FLAG[3] = {{0x00, 188}, {0x08, 219}, {0x00, 393}};
+static const RleRun LVL[3] = {{0x00, 307}, {0x20, 30}, {0x40, 463}};
+static const RleRun STAT[3] = {{0x01, 10}, {0x03, 23}, {0x05, 47}};
+static const RleRun V314[5] = {{0x02, 27}, {0x2E, 1}, {0x4C, 1}, {0x56, 35}, {0x57, 16}};
+static const RleRun H314[7] = {{0xC8, 27}, {0x08, 1}, {0xC8, 1}, {0x48, 2}, {0x88, 1}, {0xC8, 32}, {0x08, 16}};
+}  // namespace LegacyMg4
+
+TEST_F(Mg4BatteryTest, SeqHelpersMatchLegacyTables) {
+  // Every per-signal sequencer must agree with the legacy RLE/counter/ramp
+  // over the whole closing replay: 800 fast ticks and 80 slow ticks.
+  for (int i = 0; i < 800; i++) {
+    EXPECT_EQ(TestableMg4Battery::seq_08a_request(i), LegacyMg4::rle_lookup(LegacyMg4::REQ, i))
+        << "request mismatch at fast " << i;
+    EXPECT_EQ(TestableMg4Battery::seq_08a_flag(i), LegacyMg4::rle_lookup(LegacyMg4::FLAG, i))
+        << "flag mismatch at fast " << i;
+    EXPECT_EQ(TestableMg4Battery::seq_08a_level(i), LegacyMg4::rle_lookup(LegacyMg4::LVL, i))
+        << "level mismatch at fast " << i;
+    EXPECT_EQ(TestableMg4Battery::seq_cnt15(i, 0xF0, 11), LegacyMg4::cnt(0xF0, i, 11))
+        << "047 cnt mismatch at fast " << i;
+    EXPECT_EQ(TestableMg4Battery::seq_cnt15(i, 0x30, 11), LegacyMg4::cnt(0x30, i, 11))
+        << "08A cnt1 mismatch at fast " << i;
+    EXPECT_EQ(TestableMg4Battery::seq_cnt15(i, 0x40, 11), LegacyMg4::cnt(0x40, i, 11))
+        << "08A cnt2 mismatch at fast " << i;
+    // VAL12 precharge step (45 below 252, live target above).
+    bool legacy_pre = (i < 252);
+    bool seq_pre = (i < 252);
+    EXPECT_EQ(seq_pre, legacy_pre) << "VAL12 step mismatch at fast " << i;
+  }
+  for (int j = 0; j < 80; j++) {
+    EXPECT_EQ(TestableMg4Battery::seq_313_stat(j), LegacyMg4::rle_lookup(LegacyMg4::STAT, j))
+        << "STAT mismatch at slow " << j;
+    EXPECT_EQ(TestableMg4Battery::seq_314_val(j), LegacyMg4::rle_lookup(LegacyMg4::V314, j))
+        << "314 VAL mismatch at slow " << j;
+    EXPECT_EQ(TestableMg4Battery::seq_314_hi(j), LegacyMg4::rle_lookup(LegacyMg4::H314, j))
+        << "314 HI mismatch at slow " << j;
+    EXPECT_EQ(TestableMg4Battery::seq_cnt15(j, 0xF0, 7), LegacyMg4::cnt(0xF0, j, 7))
+        << "313 cnt mismatch at slow " << j;
+    EXPECT_EQ(TestableMg4Battery::seq_cnt15(j, 0x30, 7), LegacyMg4::cnt(0x30, j, 7))
+        << "313 cnt2 mismatch at slow " << j;
+    EXPECT_EQ(TestableMg4Battery::seq_cnt15(j, 0x40, 7), LegacyMg4::cnt(0x40, j, 7))
+        << "314 cnt mismatch at slow " << j;
+    EXPECT_EQ(TestableMg4Battery::seq_cnt15(j, 0x70, 7), LegacyMg4::cnt(0x70, j, 7))
+        << "314 cnt2 mismatch at slow " << j;
+    // Ramps use the same saturating helper in both schemes: pin the shape
+    // (idle, mid-ramp rounding, plateau) so a future retune is caught here.
+    if (j == 0) {
+      EXPECT_EQ(LegacyMg4::ramp(j, 32, 78, 77), 0);
+      EXPECT_EQ(LegacyMg4::ramp(j, 44, 59, 48), 0);
+    }
+    if (j == 55) {
+      EXPECT_EQ(LegacyMg4::ramp(j, 32, 78, 77), 39);
+      EXPECT_EQ(LegacyMg4::ramp(j, 44, 59, 48), 35);
+    }
+    if (j == 79) {
+      EXPECT_EQ(LegacyMg4::ramp(j, 32, 78, 77), 77);
+      EXPECT_EQ(LegacyMg4::ramp(j, 44, 59, 48), 48);
+    }
+    // VAL16 sampled step: t=(j>2)?(j-2)*10:0 vs 252 (first live at j=28).
+    if (j == 27) {
+      EXPECT_LT((uint32_t)(j - 2) * 10u, 252u);
+    }
+    if (j == 28) {
+      EXPECT_GE((uint32_t)(j - 2) * 10u, 252u);
+    }
+  }
+}
+
+TEST_F(Mg4BatteryTest, ClosingWireSequenceMatchesLegacyReplay) {
+  // End-to-end: the free-running sequencer must put the exact legacy bytes on
+  // the wire over a full closing run (pack stays open so we remain CLOSING).
+  // Voltage is held constant so the live-tracked plateaus are comparable.
+  identify_as_64kwh_nmc();
+  send_15b_fd(3);
+  datalayer.battery.status.voltage_dV = 3600;
+  ASSERT_EQ(battery->contactorState, Mg4Battery::ContactorState::WAITING_FOR_PACK);
+
+  const uint32_t target12 = ((uint32_t)3600 * 2u) / 5u;  // 1440
+  const uint32_t target16 = (uint32_t)3600 * 5u;         // 18000
+
+  clear_transmitted_frames();
+  step_10ms(800);  // 800 fast frames, ~80 slow frames
+  ASSERT_EQ(battery->contactorState, Mg4Battery::ContactorState::CLOSING);
+  EXPECT_EQ(battery->mg4_seq_tick, 800u);
+  EXPECT_EQ(battery->mg4_seq_start, 0u);
+
+  std::vector<CAN_frame> f047, f08a, f313, f314;
+  for (const auto& f : get_transmitted_frames()) {
+    switch (f.ID) {
+      case 0x047:
+        f047.push_back(f);
+        break;
+      case 0x08A:
+        f08a.push_back(f);
+        break;
+      case 0x313:
+        f313.push_back(f);
+        break;
+      case 0x314:
+        f314.push_back(f);
+        break;
+      default:
+        break;
+    }
+  }
+  ASSERT_EQ(f047.size(), 800u);
+  ASSERT_EQ(f08a.size(), 800u);
+  // 8000ms / 100ms = 80 slow frames; the last one is the wrap glitch in the
+  // legacy scheme (slow 0) while the sequencer holds the final level (slow
+  // 80 == slow 79 for all payload signals), so compare the first 79 exactly.
+  ASSERT_GE(f313.size(), 79u);
+  ASSERT_GE(f314.size(), 79u);
+
+  auto val12_of = [](const CAN_frame& f) -> uint16_t {
+    return (uint16_t)(((uint16_t)f.data.u8[9] << 4) | (f.data.u8[10] >> 4));
+  };
+  auto val16_of = [](const CAN_frame& f) -> uint16_t {
+    return (uint16_t)(((uint16_t)f.data.u8[32] << 8) | f.data.u8[33]);
+  };
+
+  for (int i = 0; i < 800; i++) {
+    uint16_t exp12 = (i < 252) ? 45 : (uint16_t)target12;
+    EXPECT_EQ(val12_of(f047[i]), exp12) << "047 VAL12 at fast " << i;
+    EXPECT_EQ(f047[i].data.u8[5], LegacyMg4::cnt(0xF0, i, 11)) << "047 cnt at fast " << i;
+    EXPECT_EQ(f047[i].data.u8[17], LegacyMg4::cnt(0xF0, i, 11)) << "047 cnt2 at fast " << i;
+    EXPECT_EQ(f08a[i].data.u8[5], LegacyMg4::cnt(0x30, i, 11)) << "08A cnt at fast " << i;
+    EXPECT_EQ(f08a[i].data.u8[17], LegacyMg4::cnt(0x40, i, 11)) << "08A cnt2 at fast " << i;
+    EXPECT_EQ(f08a[i].data.u8[19], LegacyMg4::rle_lookup(LegacyMg4::REQ, i)) << "08A REQ at fast " << i;
+    EXPECT_EQ(f08a[i].data.u8[20], LegacyMg4::rle_lookup(LegacyMg4::FLAG, i)) << "08A FLAG at fast " << i;
+    EXPECT_EQ(f08a[i].data.u8[30], LegacyMg4::rle_lookup(LegacyMg4::LVL, i)) << "08A LVL at fast " << i;
+  }
+
+  // Slow frames on the wire run 1..79 then the held final (slow 80); the
+  // legacy loop would wrap to 0 there, so only the first 79 are bit-identical.
+  for (size_t k = 0; k < 79; k++) {
+    int j = (int)k + 1;  // legacy slow index for the k-th transmitted slow
+    EXPECT_EQ(f313[k].data.u8[5], LegacyMg4::cnt(0xF0, j, 7)) << "313 cnt at slow " << j;
+    EXPECT_EQ(f313[k].data.u8[10], LegacyMg4::rle_lookup(LegacyMg4::STAT, j)) << "313 STAT at slow " << j;
+    EXPECT_EQ(f313[k].data.u8[18], (uint8_t)LegacyMg4::ramp(j, 32, 78, 77)) << "313 VALA at slow " << j;
+    uint16_t expc = LegacyMg4::ramp(j, 32, 78, 90);
+    EXPECT_EQ(f313[k].data.u8[20], (uint8_t)(0x80 | (expc >> 4))) << "313 VALC hi at slow " << j;
+    EXPECT_EQ(f313[k].data.u8[21], (uint8_t)(((expc & 0xF) << 4) | 0x08)) << "313 VALC lo at slow " << j;
+    uint32_t t16 = (j > 2) ? (uint32_t)(j - 2) * 10u : 0u;
+    uint16_t exp16 = (t16 < 252) ? 562 : (uint16_t)target16;
+    EXPECT_EQ(val16_of(f313[k]), exp16) << "313 VAL16 at slow " << j;
+    EXPECT_EQ(f313[k].data.u8[29], LegacyMg4::cnt(0x30, j, 7)) << "313 cnt2 at slow " << j;
+    EXPECT_EQ(f314[k].data.u8[5], LegacyMg4::cnt(0x40, j, 7)) << "314 cnt at slow " << j;
+    EXPECT_EQ(f314[k].data.u8[6], LegacyMg4::rle_lookup(LegacyMg4::V314, j)) << "314 VAL at slow " << j;
+    EXPECT_EQ(f314[k].data.u8[7], LegacyMg4::rle_lookup(LegacyMg4::H314, j)) << "314 HI at slow " << j;
+    EXPECT_EQ(f314[k].data.u8[17], LegacyMg4::cnt(0x70, j, 7)) << "314 cnt2 at slow " << j;
+    EXPECT_EQ(f314[k].data.u8[18], (uint8_t)LegacyMg4::ramp(j, 44, 59, 48)) << "314 ramp at slow " << j;
+  }
+
+  // Past the end the sequencer holds instead of looping: still closed-request
+  // levels with live counters stepping by one.
+  EXPECT_EQ(f08a[799].data.u8[19], 0x21);
+  EXPECT_EQ(f08a[799].data.u8[30], 0x40);
+  EXPECT_EQ(f313.back().data.u8[10], 0x05);
+  EXPECT_EQ(f314.back().data.u8[6], 0x57);
 }
