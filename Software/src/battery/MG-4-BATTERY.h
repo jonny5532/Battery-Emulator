@@ -91,27 +91,39 @@ class Mg4Battery : public UdsCanBattery {
   //   The whole snapping cycle should be quick, and the cells should relax back
   //   down to a sane voltage once it is over.
   // - Give up if we're over 3.75V/cell for more than 30 seconds.
-  // - Abort if we ever hit 3.79V/cell.
-  // - If the attempt is ended prematurely, don't try again till we've
-  //   discharged back down a lower voltage.
+  // - Abort if we ever hit 3.76V/cell. This sits just below the 3.765V
+  //   MAX_CELL_VOLTAGE_LFP_MV, where safety.cpp blocks charging and raises
+  //   EVENT_CELL_OVER_VOLTAGE, so a normal snap never raises that event.
+  // - Once the attempt has ended (for any reason), cap the working max cell
+  //   voltage at SNAP_ABSORB_MV so the pack runs normally below the knee, and
+  //   don't try again till we've discharged back down below SNAP_RESET_MV.
+  //   Report 100% SoC from SNAP_ABSORB_MV until the cells fall below
+  //   SNAP_HOLD_MV.
   static constexpr int32_t SNAP_ABSORB_MV = 3650;
-  static constexpr int32_t SNAP_ENVELOPE_MV = 3800;
   static constexpr int32_t SNAP_OVER_MV = 3750;
   static constexpr int32_t SNAP_OVER_S = 30;
-  static constexpr int32_t SNAP_ABORT_MV = 3790;
+  static constexpr int32_t SNAP_ABORT_MV = 3760;
   static constexpr int32_t SNAP_SKIP_MV = 3600;   // no-drift check threshold
   static constexpr int32_t SNAP_SKIP_SOC = 9800;  // skip snap if BMS SoC here
   static constexpr int32_t SNAP_RESET_MV = 3450;
-  static constexpr int32_t SNAP_MAX_DA = 50;  // 5A max during snap
-  static constexpr int32_t SNAP_MIN_DA = 30;  // 3A min during snap
+  static constexpr int32_t SNAP_HOLD_MV = 3600;  // forced 100% SoC held down to here
+  static constexpr int32_t SNAP_MAX_DA = 50;     // 5A max during snap
+  static constexpr int32_t SNAP_MIN_DA = 30;     // 3A min during snap
   static constexpr float SNAP_EMA_ALPHA = 1.0f / 30;
 
   bool snapEnded = false;
   int32_t snap_over_s = 0;
   float snap_ema_dA = 0.0f;
-  bool snapVoltageTripped = false;
+  // Latched once cell max reaches SNAP_ABSORB_MV during an armed snap, so the
+  // 5A clamp doesn't drop out (and back in) when the reduced current lets the
+  // cell voltage sag back under the threshold. Cleared at SNAP_RESET_MV.
+  bool snapAbsorbing = false;
+  // Forced 100% SoC once the snap has ended: set at SNAP_ABSORB_MV, released
+  // below SNAP_HOLD_MV.
+  bool snapHoldFull = false;
 
   void snap_tick();
+  void snap_tick_attempt(uint16_t cell_max_mV);
   bool snap_should_force_soc();
   int32_t snap_clamp_power_W();
 
@@ -120,21 +132,24 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t MAX_CELL_DEVIATION_NMC_MV = 150;
 
   static const uint16_t WORKING_MAX_MARGIN_MV = 10;
+  // LFP gets a wider margin so the event limit clears the snap abort
+  // threshold while the working max stays at 3750mV.
+  static const uint16_t WORKING_MAX_MARGIN_LFP_MV = 15;
   static const uint16_t WORKING_MIN_MARGIN_MV = 300;
 
-  static const uint16_t MAX_CELL_VOLTAGE_LFP_MV = 3750 + WORKING_MAX_MARGIN_MV;
+  static const uint16_t MAX_CELL_VOLTAGE_LFP_MV = 3750 + WORKING_MAX_MARGIN_LFP_MV;
   static const uint16_t MIN_CELL_VOLTAGE_LFP_MV = 2500;
   static const uint16_t MAX_CELL_VOLTAGE_NMC_MV = 4200 + WORKING_MAX_MARGIN_MV;
   static const uint16_t MIN_CELL_VOLTAGE_NMC_MV = 2700;
 
   int32_t working_cell_min_mV = 0;
-  int32_t working_cell_recharge_threshold_mV = 0;
   int32_t working_cell_max_mV = 0;
   // Latched flags for cell-voltage hysteresis (persist between update_values calls)
   bool voltageAtCellMax = false;
   bool voltageAtCellMin = false;
   int32_t cell_voltage_freshness = 0;
   int32_t soc_freshness = 0;
+  uint16_t bms_soc_centipercent = 0;  // last SoC reported in 0x15B
   int32_t temp_freshness = 0;
 
   int16_t module_temperatures_dC[12] = {0};
@@ -162,7 +177,6 @@ class Mg4Battery : public UdsCanBattery {
   };
 
   char ntsc_serial[29] = {0};  // eg: 0AFPEG10879103D7N3000095
-  bool coulombCounting = false;
   PackContactorFeedback pack_contactors;
   unsigned long contactorWaitStartMillis = 0;
 
@@ -187,17 +201,10 @@ class Mg4Battery : public UdsCanBattery {
   void reset_reclose_tracker();
   bool record_contactor_reclose(unsigned long now_ms);
 
-  uint32_t total_discharge_dC = 0;  // in deci-Coulombs
-  bool total_discharge_initialized = false;
-
   unsigned long lastTickMillis = 0;
 
   unsigned long previousMillis10 = 0;   // will store last time a 10ms CAN Message was send
   unsigned long previousMillis100 = 0;  // will store last time a 100ms CAN Message was send
-
-  uint32_t* nonvolatile_cookie = 0;
-  uint32_t* nonvolatile_total_discharge_dC = 0;
-  static const uint32_t NONVOLATILE_COOKIE_VALUE = 0x7734b1f5;
 
   static const uint16_t POLL_BATTERY_VOLTAGE = 0xB042;
   static const uint16_t POLL_BATTERY_CURRENT = 0xB043;
@@ -205,12 +212,24 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t POLL_MIN_CELL_TEMPERATURE = 0xB057;
   static const uint16_t POLL_MAX_CELL_TEMPERATURE = 0xB056;
   static const uint16_t POLL_BATTERY_SOH = 0xB061;
+  static const uint16_t POLL_ISOLATION_RESISTANCE = 0xB045;
   static const uint16_t POLL_ECU_HARDWARE_NUMBER = 0xF192;
   static const uint16_t POLL_ECU_SOFTWARE_NUMBER = 0xF194;
 
   // ECU identifier payloads (10 ASCII characters each)
   uint8_t pid_ecu_hw_number[10] = {0};
   uint8_t pid_ecu_sw_number[10] = {0};
+
+  // Pack-reported isolation resistance. The PID value is a 2-byte count scaled
+  // by 500 to get ohms. Keep a 1 Hz ring of recent raw counts so the info page
+  // can dump a plottable series without storing every PID response.
+  static constexpr uint32_t ISO_OHMS_PER_COUNT = 500;
+  static constexpr int ISO_HISTORY_SAMPLES = 120;  // 2 minutes at 1 Hz
+  uint16_t iso_raw = 0;
+  bool iso_received = false;
+  uint16_t iso_history[ISO_HISTORY_SAMPLES] = {0};
+  uint16_t iso_history_count = 0;
+  uint16_t iso_history_head = 0;  // next write position
 
   CAN_frame MG4_4F3_FD = {.FD = true,
                           .ext_ID = false,
