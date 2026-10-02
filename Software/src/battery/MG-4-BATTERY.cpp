@@ -1,5 +1,4 @@
 #include "MG-4-BATTERY.h"
-#include <soc/soc.h>
 #include <cmath>    //For unit test
 #include <cstdio>   //For sprintf
 #include <cstring>  //For unit test
@@ -39,23 +38,6 @@ static constexpr int32_t MAX_TEMP_DC = 500;
 static constexpr int32_t MIN_WATTS_PER_DC = 280;  // gradient is 14kW per 5dC
 // Taper down to 0W at max temp with a linear gradient (both charge and discharge)
 static constexpr int32_t MAX_WATTS_PER_DC = 140;  // gradient is 14kW per 10dC
-
-// 101 voltage values from 0% to 100%
-static const uint16_t nmc_voltages[] = {
-    2500, 3100, 3246, 3336, 3400, 3448, 3468, 3473, 3478, 3483, 3488, 3494, 3501, 3509, 3519, 3529, 3539,
-    3549, 3559, 3568, 3576, 3585, 3595, 3601, 3605, 3609, 3612, 3615, 3618, 3621, 3624, 3627, 3629, 3632,
-    3635, 3638, 3641, 3643, 3646, 3649, 3652, 3655, 3659, 3662, 3666, 3669, 3673, 3677, 3682, 3686, 3691,
-    3697, 3702, 3709, 3717, 3727, 3739, 3750, 3758, 3766, 3773, 3781, 3789, 3797, 3805, 3814, 3823, 3832,
-    3841, 3850, 3860, 3869, 3880, 3889, 3900, 3910, 3920, 3930, 3941, 3951, 3962, 3973, 3983, 3994, 4005,
-    4017, 4028, 4039, 4051, 4062, 4074, 4086, 4098, 4110, 4122, 4135, 4147, 4160, 4173, 4186, 4200};
-
-static const uint16_t lfp_voltages[] = {
-    2700, 2935, 3033, 3097, 3145, 3175, 3191, 3198, 3201, 3202, 3202, 3204, 3206, 3212, 3218, 3224, 3230,
-    3235, 3240, 3246, 3250, 3254, 3257, 3260, 3263, 3267, 3270, 3274, 3278, 3282, 3285, 3286, 3286, 3287,
-    3288, 3289, 3289, 3289, 3289, 3289, 3289, 3289, 3289, 3289, 3289, 3289, 3289, 3289, 3289, 3289, 3289,
-    3290, 3291, 3292, 3292, 3293, 3294, 3296, 3298, 3303, 3312, 3322, 3327, 3327, 3328, 3328, 3328, 3328,
-    3328, 3328, 3329, 3329, 3329, 3329, 3329, 3329, 3329, 3329, 3329, 3329, 3329, 3329, 3329, 3329, 3329,
-    3329, 3329, 3329, 3329, 3329, 3330, 3330, 3330, 3331, 3331, 3332, 3332, 3333, 3336, 3354, 3571};
 
 static uint8_t mg4_crc8(const uint8_t* d) {
   uint8_t crc = 0x00;
@@ -254,55 +236,6 @@ static int32_t battery_power_by_high_temp(int32_t temp_max_dC, int32_t max_temp_
   return (max_temp_dC - temp_max_dC) * watts_per_dC;
 }
 
-static uint16_t ocv_to_soc(uint16_t voltage_mV) {
-  const uint16_t* voltages;
-  if (datalayer.battery.info.chemistry == battery_chemistry_enum::LFP) {
-    voltages = lfp_voltages;
-  } else {
-    voltages = nmc_voltages;
-  }
-
-  if (voltage_mV < voltages[0]) {
-    return 0;
-  }
-  for (size_t i = 1; i < sizeof(nmc_voltages) / sizeof(nmc_voltages[0]); i++) {
-    if (voltage_mV < voltages[i]) {
-      // Linear interpolation between points
-      uint16_t soc_low = (i - 1) * 100;
-      uint16_t soc_high = i * 100;
-      uint16_t voltage_low = voltages[i - 1];
-      uint16_t voltage_high = voltages[i];
-      return soc_low + ((voltage_mV - voltage_low) * (soc_high - soc_low)) / (voltage_high - voltage_low);
-    }
-  }
-  return 10000;
-}
-
-static uint16_t soc_to_ocv(uint16_t soc_in_centipercent) {
-  const uint16_t* voltages;
-  if (datalayer.battery.info.chemistry == battery_chemistry_enum::LFP) {
-    voltages = lfp_voltages;
-  } else {
-    voltages = nmc_voltages;
-  }
-
-  if (soc_in_centipercent >= 10000) {
-    return voltages[100];
-  }
-
-  uint16_t index = soc_in_centipercent / 100;
-  uint16_t remainder = soc_in_centipercent % 100;
-
-  if (remainder == 0) {
-    return voltages[index];
-  }
-
-  // Linear interpolation between points
-  uint16_t voltage_low = voltages[index];
-  uint16_t voltage_high = voltages[index + 1];
-  return voltage_low + ((voltage_high - voltage_low) * remainder) / 100;
-}
-
 void Mg4Battery::snap_tick() {
   if (datalayer.battery.info.chemistry != battery_chemistry_enum::LFP) {
     return;
@@ -311,11 +244,22 @@ void Mg4Battery::snap_tick() {
     return;
   }
   uint16_t cell_max_mV = datalayer.battery.status.cell_max_voltage_mV;
+  snap_tick_attempt(cell_max_mV);
+  // Hold the forced 100% from SNAP_ABSORB_MV down to SNAP_HOLD_MV, so the
+  // reported SoC doesn't flip as the cells cycle around the post-snap taper.
+  if (!snapEnded || cell_max_mV < SNAP_HOLD_MV) {
+    snapHoldFull = false;
+  } else if (cell_max_mV >= SNAP_ABSORB_MV) {
+    snapHoldFull = true;
+  }
+}
+
+void Mg4Battery::snap_tick_attempt(uint16_t cell_max_mV) {
   if (cell_max_mV < SNAP_RESET_MV) {
     snapEnded = false;
     snap_over_s = 0;
     snap_ema_dA = 0.0f;
-    snapVoltageTripped = false;
+    snapAbsorbing = false;
     return;
   }
   if (snapEnded) {
@@ -329,6 +273,9 @@ void Mg4Battery::snap_tick() {
   if (cell_max_mV >= SNAP_SKIP_MV && datalayer.battery.status.real_soc >= SNAP_SKIP_SOC) {
     snapEnded = true;
     return;
+  }
+  if (cell_max_mV >= SNAP_ABSORB_MV) {
+    snapAbsorbing = true;
   }
   snap_over_s = (cell_max_mV >= SNAP_OVER_MV) ? snap_over_s + 1 : 0;
   // ~30s exponential moving average of charge current (+ = charging, clamp discharge to 0).
@@ -344,8 +291,7 @@ void Mg4Battery::snap_tick() {
 }
 
 bool Mg4Battery::snap_should_force_soc() {
-  return datalayer.battery.info.chemistry == battery_chemistry_enum::LFP && snapEnded && cell_voltage_freshness > 0 &&
-         datalayer.battery.status.cell_max_voltage_mV >= SNAP_ABSORB_MV;
+  return datalayer.battery.info.chemistry == battery_chemistry_enum::LFP && snapHoldFull && cell_voltage_freshness > 0;
 }
 
 int32_t Mg4Battery::snap_clamp_power_W() {
@@ -417,21 +363,22 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
   // Cellvoltage-based power derating. Taper linearly to zero over the last
   // CHARGE_TAPER_MV below working_cell_max_mV, then latch at zero (with
   // hysteresis) until the cell voltage recovers past the trip threshold.
-  // LFP snap special-case: while !snapEnded and in absorption, open a 3800mV
-  // envelope clamped to 5A instead of the normal taper. working_cell_max_mV
-  // itself is never touched.
+  // LFP snap special-cases:
+  // - While a snap is in (latched) absorption, the taper is replaced by a 5A
+  //   clamp. SNAP_ABORT_MV in snap_tick() and the safety.cpp cell overvoltage
+  //   limit bound the voltage instead.
+  // - Once the snap has ended (succeeded, skipped or given up), taper to
+  //   SNAP_ABSORB_MV instead, so the pack keeps working normally below the
+  //   knee until it re-arms at SNAP_RESET_MV.
   {
     // Freshness already gated above.
+    const bool lfp = datalayer.battery.info.chemistry == battery_chemistry_enum::LFP;
     int32_t cell_power_W;
-    if (datalayer.battery.info.chemistry == battery_chemistry_enum::LFP && !snapEnded &&
-        datalayer.battery.status.cell_max_voltage_mV >= (uint16_t)SNAP_ABSORB_MV) {
-      const int32_t env_W = battery_charge_power_by_cell_max(datalayer.battery.status.cell_max_voltage_mV,
-                                                             SNAP_ENVELOPE_MV, CHARGE_TAPER_MV, CHARGE_HYSTERESIS_MV,
-                                                             MAX_CHARGE_POWER_W, &snapVoltageTripped);
-      const int32_t clamp_W = snap_clamp_power_W();
-      cell_power_W = (env_W < clamp_W) ? env_W : clamp_W;
+    if (lfp && !snapEnded && snapAbsorbing) {
+      cell_power_W = snap_clamp_power_W();
     } else {
-      cell_power_W = battery_charge_power_by_cell_max(datalayer.battery.status.cell_max_voltage_mV, working_cell_max_mV,
+      const int32_t cell_max_limit_mV = (lfp && snapEnded) ? SNAP_ABSORB_MV : working_cell_max_mV;
+      cell_power_W = battery_charge_power_by_cell_max(datalayer.battery.status.cell_max_voltage_mV, cell_max_limit_mV,
                                                       CHARGE_TAPER_MV, CHARGE_HYSTERESIS_MV, MAX_CHARGE_POWER_W,
                                                       &voltageAtCellMax);
     }
@@ -460,11 +407,16 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
   }
 
   // SoC-based power derating: full power up to DERATE_CHARGE_ABOVE_SOC, then a
-  // linear taper down to CHARGE_TRICKLE_POWER_W at 100%.
-  const int32_t soc_power_W = battery_charge_power_by_soc(datalayer.battery.status.real_soc, MAX_CHARGE_POWER_W,
-                                                          CHARGE_TRICKLE_POWER_W, DERATE_CHARGE_ABOVE_SOC);
-  if (soc_power_W < max_charge_power_W) {
-    max_charge_power_W = soc_power_W;
+  // linear taper down to CHARGE_TRICKLE_POWER_W at 100%. NMC only: LFP SoC
+  // can't be judged from voltage below the knee, so a BMS reading high would
+  // throttle the pack to a trickle long before it is full. LFP charge is left
+  // to the cell voltage limits (and snap) above.
+  if (datalayer.battery.info.chemistry != battery_chemistry_enum::LFP) {
+    const int32_t soc_power_W = battery_charge_power_by_soc(datalayer.battery.status.real_soc, MAX_CHARGE_POWER_W,
+                                                            CHARGE_TRICKLE_POWER_W, DERATE_CHARGE_ABOVE_SOC);
+    if (soc_power_W < max_charge_power_W) {
+      max_charge_power_W = soc_power_W;
+    }
   }
 
   if (!batteryIdentified) {
@@ -514,112 +466,37 @@ void Mg4Battery::
 
   // Should be called every second
 
+  // Sample the latest isolation resistance once per second into the ring the
+  // info page dumps as a comma-separated series.
+  if (iso_received) {
+    iso_history[iso_history_head] = iso_raw;
+    iso_history_head = (iso_history_head + 1) % ISO_HISTORY_SAMPLES;
+    if (iso_history_count < ISO_HISTORY_SAMPLES) {
+      iso_history_count++;
+    }
+  }
+
   if (temp_freshness > 0) {
     temp_freshness--;
   }
 
-  if (coulombCounting) {
-    if (cell_voltage_freshness <= 0) {
-      // No valid cell voltage received yet, can't update
-      datalayer.battery.status.max_charge_power_W = 0;
-      datalayer.battery.status.max_discharge_power_W = 0;
-      return;
-    }
+  snap_tick();
+  if (soc_freshness > 0) {
+    update_soc(snap_should_force_soc() ? 10000 : bms_soc_centipercent);
+  }
+  if (cell_voltage_freshness > 0) {
+    cell_voltage_freshness--;
+  }
+  if (soc_freshness > 0) {
+    soc_freshness--;
+  }
 
-    uint32_t nominal_cell_voltage_mV = (datalayer.battery.info.chemistry == battery_chemistry_enum::LFP) ? 3300 : 3700;
-    uint32_t capacity_mAh =
-        ((datalayer.battery.info.total_capacity_Wh / datalayer.battery.info.number_of_cells) * 1000000) /
-        nominal_cell_voltage_mV;
-    uint32_t one_percent_dC = (capacity_mAh * (9 + 1)) / 25;  // 1.11% of capacity in deci-Coulombs
-
-    if (!total_discharge_initialized) {
-      if (nonvolatile_cookie != 0 && *nonvolatile_cookie == NONVOLATILE_COOKIE_VALUE) {
-        // Non-volatile memory contains a valid previous discharge value, use it
-        total_discharge_dC = *nonvolatile_total_discharge_dC;
-        logging.printf("[MG4] Restored total discharge from non-volatile memory: %lu dC\n", total_discharge_dC);
-      } else {
-        // No previous value, Initialize the total discharge counter based on the min cell voltage
-        uint16_t initial_soc_centipercent = ocv_to_soc(datalayer.battery.status.cell_min_voltage_mV);
-        logging.printf("[MG4] Initial soc: %d\n", initial_soc_centipercent);
-        logging.printf("[MG4] Capacity mAh: %lu\n", capacity_mAh);
-
-        total_discharge_dC = ((uint64_t)(10000 - initial_soc_centipercent) * capacity_mAh * 36) / 10000;
-      }
-      logging.printf("[MG4] Initial total discharge: %lu dC\n", total_discharge_dC);
-      total_discharge_initialized = true;
-    }
-
-    // 1. Do coulomb count
-    if (datalayer.battery.status.current_dA > (int32_t)total_discharge_dC) {
-      // We're charging, but discharge is nearly zero - cap at zero
-      total_discharge_dC = 0;
-    } else {
-      // Subtract the (charging) current from the discharge counter
-      total_discharge_dC -= datalayer.battery.status.current_dA;
-    }
-
-    // 2. State correction to handle drift
-    if (datalayer.battery.status.cell_max_voltage_mV >= (working_cell_max_mV - 10)) {
-      // We're full
-      total_discharge_dC = 0;
-    } else if (datalayer.battery.status.cell_max_voltage_mV < working_cell_recharge_threshold_mV &&
-               total_discharge_dC < one_percent_dC) {
-      // We've drifted - the voltage is low, but the counter is empty.
-      // Force charge to 99%-SoC-equivalent to keep the battery charging.
-      total_discharge_dC = one_percent_dC;
-    }
-
-    // 3. Save to NVRAM
-    if (nonvolatile_total_discharge_dC != 0) {
-      // Store the total discharged amount in non-volatile memory
-      (*nonvolatile_total_discharge_dC) = total_discharge_dC;
-      (*nonvolatile_cookie) = NONVOLATILE_COOKIE_VALUE;
-    }
-
-    // 4. Calculate SoC Centipercent
-    int32_t soc_centipercent = 10000;
-    if (capacity_mAh > 0) {
-      soc_centipercent = 10000 - ((((uint64_t)total_discharge_dC * 2500) / 9) / capacity_mAh);
-    }
-
-    // 5. Cap the SoC to 0-100%
-    if (soc_centipercent > 10000) {
-      soc_centipercent = 10000;
-    } else if (soc_centipercent < 0) {
-      soc_centipercent = 0;
-    }
-
-    // 6. Handle empty/near-empty case
-    if (datalayer.battery.status.cell_min_voltage_mV <= (working_cell_min_mV + 10)) {
-      // Battery is empty
-      soc_centipercent = 0;
-    } else if (soc_centipercent < 100 && datalayer.battery.status.cell_min_voltage_mV > working_cell_min_mV) {
-      // Count indicates empty but battery still has charge left, floor at 1%
-      soc_centipercent = 100;
-    }
-
-    update_soc(soc_centipercent);
-
-    if (cell_voltage_freshness > 0)
-      cell_voltage_freshness--;
+  if (soc_freshness <= 0) {
+    datalayer.battery.status.max_charge_power_W = 0;
+    datalayer.battery.status.max_discharge_power_W = 0;
+  } else {
     datalayer.battery.status.max_charge_power_W = calculate_max_charge_power_W();
     datalayer.battery.status.max_discharge_power_W = calculate_max_discharge_power_W();
-  } else {
-    snap_tick();
-    if (snap_should_force_soc()) {
-      update_soc(10000);
-    }
-    if (soc_freshness > 0) {
-      soc_freshness--;
-    }
-
-    if (soc_freshness <= 0) {
-      datalayer.battery.status.max_charge_power_W = 0;
-      datalayer.battery.status.max_discharge_power_W = 0;
-    } else {
-      datalayer.battery.status.max_charge_power_W = calculate_max_charge_power_W();
-      datalayer.battery.status.max_discharge_power_W = calculate_max_discharge_power_W();
-    }
   }
 }
 
@@ -685,8 +562,10 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
           if (idx + 3 < MAX_AMOUNT_CELLS) {
             // This seemingly arbitrary ordering is guessed based on the
             // min/max cell indices given in the 12C messages.
-            datalayer.battery.status.cell_voltages_mV[idx + 0] = c2;
-            datalayer.battery.status.cell_voltages_mV[idx + 1] = c3;
+            // The 51kWh LFP pack has the first two cells of each group of four
+            // swapped in the 0x510 rows (cells 81-104), so swap them back.
+            datalayer.battery.status.cell_voltages_mV[idx + 0] = (addr == 0x510) ? c3 : c2;
+            datalayer.battery.status.cell_voltages_mV[idx + 1] = (addr == 0x510) ? c2 : c3;
             datalayer.battery.status.cell_voltages_mV[idx + 2] = c1;
             datalayer.battery.status.cell_voltages_mV[idx + 3] = c0;
           }
@@ -740,13 +619,9 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
       //          bits: 4 42
 
       soc_times_ten = ((rx_frame.data.u8[7] << 6) | (rx_frame.data.u8[8] >> 2)) & 0x3FF;
-      if (!coulombCounting) {
-        update_soc(soc_times_ten * 10);
-        soc_freshness = 10;
-        if (snap_should_force_soc()) {
-          update_soc(10000);
-        }
-      }
+      bms_soc_centipercent = soc_times_ten * 10;
+      soc_freshness = 10;
+      update_soc(snap_should_force_soc() ? 10000 : bms_soc_centipercent);
 
       // Precharge/contactor state, confirmed against a real vehicle
       // capture: 3=idle, 11=precharge active, 7=closed/charging. Single
@@ -1181,6 +1056,11 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
     case POLL_BATTERY_SOH:
       datalayer.battery.status.soh_pptt = value;
       break;
+    case POLL_ISOLATION_RESISTANCE:
+      // 2-byte count, scaled by 500 to get ohms.
+      iso_raw = (uint16_t)value;
+      iso_received = true;
+      break;
     // case POLL_MIN_CELL_TEMPERATURE:
     //   datalayer.battery.status.temperature_min_dC = ((int32_t)value - 20000) / 50;
     //   temp_freshness = 10;
@@ -1234,7 +1114,8 @@ void Mg4Battery::identify_battery() {
       datalayer.battery.info.min_cell_voltage_mV = MIN_CELL_VOLTAGE_NMC_MV;
     }
 
-    working_cell_max_mV = datalayer.battery.info.max_cell_voltage_mV - WORKING_MAX_MARGIN_MV;
+    working_cell_max_mV = datalayer.battery.info.max_cell_voltage_mV -
+                          ((chem == LFP) ? WORKING_MAX_MARGIN_LFP_MV : WORKING_MAX_MARGIN_MV);
     working_cell_min_mV = datalayer.battery.info.min_cell_voltage_mV + WORKING_MIN_MARGIN_MV;
     datalayer.battery.info.max_cell_voltage_deviation_mV =
         (chem == LFP) ? MAX_CELL_DEVIATION_LFP_MV : MAX_CELL_DEVIATION_NMC_MV;
@@ -1267,7 +1148,7 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   setup_uds(0x7E5, 0);
   fd_uds_requests = true;
 
-  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH,
+  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_ISOLATION_RESISTANCE,
                                        // POLL_MIN_CELL_TEMPERATURE,
                                        // POLL_MAX_CELL_TEMPERATURE,
                                        POLL_ECU_HARDWARE_NUMBER, POLL_ECU_SOFTWARE_NUMBER};
@@ -1292,51 +1173,11 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   datalayer.battery.info.min_cell_voltage_mV = MIN_CELL_VOLTAGE_LFP_MV;
   working_cell_max_mV = datalayer.battery.info.max_cell_voltage_mV - WORKING_MAX_MARGIN_MV;
   working_cell_min_mV = datalayer.battery.info.min_cell_voltage_mV + WORKING_MIN_MARGIN_MV;
-  // working_cell_recharge_threshold_mV = working_cell_max_mV - 100;
-  // coulombCounting = user_selected_use_estimated_SOC;
-  // if (coulombCounting) {
-  //   static const uint32_t MINIMUM_WORKING_RANGE_MV = 200;
-  //   if (user_selected_max_cell_voltage_mV > (datalayer.battery.info.min_cell_voltage_mV + MINIMUM_WORKING_RANGE_MV) &&
-  //       user_selected_max_cell_voltage_mV <= datalayer.battery.info.max_cell_voltage_mV) {
-  //     working_cell_max_mV = user_selected_max_cell_voltage_mV;
-  //     // Calculate threshold as 1% lower SoC than max, using ocv_to_soc
-  //     working_cell_recharge_threshold_mV = soc_to_ocv(ocv_to_soc(working_cell_max_mV) - 100);
-  //   } else {
-  //     logging.printf("[MG4] Invalid user-selected max cell voltage, using default of %d mV\n", working_cell_max_mV);
-  //   }
-  //   if (user_selected_min_cell_voltage_mV >= datalayer.battery.info.min_cell_voltage_mV &&
-  //       user_selected_min_cell_voltage_mV <= (working_cell_max_mV - MINIMUM_WORKING_RANGE_MV)) {
-  //     working_cell_min_mV = user_selected_min_cell_voltage_mV;
-  //   } else {
-  //     logging.printf("[MG4] Invalid user-selected min cell voltage, using default of %d mV\n", working_cell_min_mV);
-  //   }
-  //   logging.printf("[MG4] Working cell voltage range: %d mV - %d mV, recharge threshold: %d mV\n", working_cell_min_mV,
-  //                  working_cell_max_mV, working_cell_recharge_threshold_mV);
-  // }
 
   datalayer.battery.info.max_design_voltage_dV =
       (datalayer.battery.info.number_of_cells * datalayer.battery.info.max_cell_voltage_mV) / 100;
   datalayer.battery.info.min_design_voltage_dV =
       (datalayer.battery.info.number_of_cells * datalayer.battery.info.min_cell_voltage_mV) / 100;
-
-  // Manually allocate addresses in the 512 bytes of ULP-reserved RTC slow
-  // memory for storing the total discharge counter and a cookie to verify its
-  // validity. This data survives OTA and software resets (but not hardware
-  // resets).
-
-  int nvram_base = (int)SOC_RTC_DATA_LOW + 400;
-  if (this == battery2) {
-    nvram_base += 16;
-  } else if (this == battery3) {
-    nvram_base += 32;
-  }
-
-  nonvolatile_cookie = (uint32_t*)(nvram_base);
-  nonvolatile_total_discharge_dC = (uint32_t*)(nvram_base + 4);
-  // logging.printf("Nonvolatile cookie value is %lu\n", *nonvolatile_cookie);
-  // // set to a random value
-  // *nonvolatile_cookie = esp_timer_get_time();
-  // logging.printf("Nonvolatile cookie set to %lu\n", *nonvolatile_cookie);
 }
 
 // Renders characters if printable, otherwise as [xx] hex.
@@ -1362,6 +1203,25 @@ String Mg4Battery::get_uds_info_html() {
   html += pack_contactors.state;
   html += ")<br>Snap attempt active: ";
   html += snapEnded ? "NO" : "YES";
+  html += "<br>Isolation resistance: ";
+  if (iso_received) {
+    html += String((uint32_t)iso_raw * ISO_OHMS_PER_COUNT);
+    html += " ohms";
+  } else {
+    html += "N/A";
+  }
+  if (iso_history_count > 0) {
+    // Oldest sample first, comma separated, so the series can be pasted into a
+    // spreadsheet and plotted.
+    html += "<br>Isolation history (ohms): ";
+    for (uint16_t i = 0; i < iso_history_count; i++) {
+      uint16_t idx = (iso_history_head + ISO_HISTORY_SAMPLES - iso_history_count + i) % ISO_HISTORY_SAMPLES;
+      if (i > 0) {
+        html += ",";
+      }
+      html += String((uint32_t)iso_history[idx] * ISO_OHMS_PER_COUNT);
+    }
+  }
   html += "<br>Pack serial: " + String(ntsc_serial);
   char buf[64];
   print_chars_or_hex(buf, pid_ecu_hw_number, sizeof(pid_ecu_hw_number));
