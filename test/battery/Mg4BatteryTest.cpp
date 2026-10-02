@@ -537,6 +537,30 @@ TEST_F(Mg4BatteryTest, StoresAndDisplaysEcuPartNumbers) {
   EXPECT_NE(html.find("ABCDEFGHIJ"), std::string::npos);
 }
 
+TEST_F(Mg4BatteryTest, StoresAndDisplaysIsolationResistance) {
+  // Before any 0xB045 response the page must say so rather than report 0 ohms.
+  std::string html_before = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html_before.find("Isolation resistance: N/A"), std::string::npos);
+
+  // Raw 2-byte value 1000 scaled by 500 => 500000 ohms.
+  const uint8_t data[2] = {0x03, 0xE8};
+  battery->handle_pid(0xB045, 1000, data, sizeof(data));
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Isolation resistance: 500000 ohms"), std::string::npos);
+}
+
+TEST_F(Mg4BatteryTest, IsolationResistanceHistoryCsv) {
+  // One sample per simulated second, raw counts 1000..1004 => 500000..502000 ohms.
+  for (int i = 0; i < 5; i++) {
+    const uint8_t data[2] = {(uint8_t)((1000 + i) >> 8), (uint8_t)((1000 + i) & 0xFF)};
+    battery->handle_pid(0xB045, 1000 + i, data, sizeof(data));
+    battery->update_values();
+  }
+  std::string html = battery->get_uds_info_html().c_str();
+  // Oldest first, comma separated, scaled to ohms.
+  EXPECT_NE(html.find("Isolation history (ohms): 500000,500500,501000,501500,502000"), std::string::npos);
+}
+
 TEST_F(Mg4BatteryTest, SnapClampOnlyInAbsorption) {
   identify_as_51kwh_lfp();
   // Below absorption: full power, the 5A clamp must not strangle a normal charge.
@@ -550,6 +574,73 @@ TEST_F(Mg4BatteryTest, SnapClampOnlyInAbsorption) {
   EXPECT_FALSE(battery->snapEnded);
   EXPECT_LE(datalayer.battery.status.max_charge_power_W, 2000u);
   EXPECT_GE(datalayer.battery.status.max_charge_power_W, 1500u);
+}
+
+TEST_F(Mg4BatteryTest, SnapClampLatchesWhenVoltageSags) {
+  identify_as_51kwh_lfp();
+  warmup_bulk();
+  tick_1s(3660, 3640, 100, 3800, 970);
+  ASSERT_FALSE(battery->snapEnded);
+  ASSERT_LE(datalayer.battery.status.max_charge_power_W, 2000u);
+  // Cutting to 5A lets the cell voltage sag back under SNAP_ABSORB_MV. The
+  // clamp must hold rather than reopening full power and chattering.
+  tick_1s(3630, 3610, 50, 3780, 970);
+  EXPECT_FALSE(battery->snapEnded);
+  EXPECT_LE(datalayer.battery.status.max_charge_power_W, 2000u);
+  // Leaving the knee entirely re-arms and releases the clamp.
+  tick_1s(3400, 3390, 0, 3500, 900);
+  EXPECT_FALSE(battery->snapEnded);
+  EXPECT_GT(datalayer.battery.status.max_charge_power_W, 5000u);
+}
+
+TEST_F(Mg4BatteryTest, StaleCellVoltagesReleaseSnapForce) {
+  identify_as_51kwh_lfp();
+  // Zero EMA history at boot: already-full pack ends the snap and forces 100%.
+  tick_1s(3700, 3650, 20, 3800, 970);
+  ASSERT_TRUE(battery->snapEnded);
+  ASSERT_EQ(datalayer.battery.status.real_soc, 10000);
+  // 0x15B keeps arriving but 0x12C stops: the frozen 3700mV reading must age
+  // out, so the forced 100% releases back to the BMS SoC and power fails closed.
+  for (int i = 0; i < 10; i++) {
+    send_15b_fd(7, 970);
+    battery->update_values();
+  }
+  send_15b_fd(7, 970);
+  EXPECT_EQ(datalayer.battery.status.real_soc, 9700);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 0u);
+}
+
+TEST_F(Mg4BatteryTest, SnapEndedTapersToAbsorbVoltage) {
+  identify_as_51kwh_lfp();
+  // Zero EMA history at boot: already-full pack ends the snap immediately.
+  tick_1s(3660, 3640, 20, 3800, 970);
+  ASSERT_TRUE(battery->snapEnded);
+  // At or above SNAP_ABSORB_MV the working max is tripped: no charge at all,
+  // rather than trickling on up to 3750mV.
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  // Falling back: released at the hysteresis point, then a linear taper over
+  // 3600-3650mV. The 100% SoC hold only affects reporting, not charge power.
+  tick_1s(3640, 3620, 0, 3780, 970);
+  EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 2800u);
+  tick_1s(3620, 3600, 0, 3760, 970);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 8400u);
+  EXPECT_TRUE(battery->snapEnded);
+}
+
+TEST_F(Mg4BatteryTest, LfpChargeIgnoresBmsSoc) {
+  identify_as_51kwh_lfp();
+  // BMS drifted high: reports 100% well below the knee. LFP charge must not
+  // be throttled to a trickle; the cell voltage limits decide when it's full.
+  tick_1s(3400, 3390, 100, 3540, 1000);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 14000u);
+}
+
+TEST_F(Mg4BatteryTest, NmcChargeStillDeratesBySoc) {
+  identify_as_64kwh_nmc();
+  tick_1s(4000, 3990, 100, 4100, 1000);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 100u);
 }
 
 TEST_F(Mg4BatteryTest, SnapEndsOnTaperCurrentAndForcesSoc) {
@@ -576,17 +667,17 @@ TEST_F(Mg4BatteryTest, SnapEndsOnSustainedOvervoltage) {
   warmup_bulk();
   // 5A held above 3750mV: current average stays high so only the 30s timer trips.
   for (int i = 0; i < 29; i++) {
-    tick_1s(3760, 3700, 50, 3850, 970);
+    tick_1s(3755, 3700, 50, 3850, 970);
   }
   EXPECT_FALSE(battery->snapEnded);
-  tick_1s(3760, 3700, 50, 3850, 970);
+  tick_1s(3755, 3700, 50, 3850, 970);
   EXPECT_TRUE(battery->snapEnded);
   EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
 }
 
-TEST_F(Mg4BatteryTest, SnapEndsInstantlyNearEnvelope) {
+TEST_F(Mg4BatteryTest, SnapEndsInstantlyAtAbort) {
   identify_as_51kwh_lfp();
-  tick_1s(3795, 3700, 50, 3900, 970);
+  tick_1s(3760, 3700, 50, 3900, 970);
   EXPECT_TRUE(battery->snapEnded);
   EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
 }
@@ -604,17 +695,30 @@ TEST_F(Mg4BatteryTest, SnapRearmsBelowReset) {
   EXPECT_EQ(datalayer.battery.status.real_soc, 5000);
 }
 
-TEST_F(Mg4BatteryTest, SnapForceReleasesBelowAbsorb) {
+TEST_F(Mg4BatteryTest, SnapForceHeldDownToHoldVoltage) {
   identify_as_51kwh_lfp();
   // Zero EMA history at boot: already-full pack ends the snap immediately.
   for (int i = 0; i < 3; i++) {
     tick_1s(3700, 3650, 20, 3800, 970);
   }
   ASSERT_TRUE(battery->snapEnded);
-  // Still latched (above reset) but below the force threshold: BMS wins.
+  ASSERT_EQ(datalayer.battery.status.real_soc, 10000);
+  // Below SNAP_ABSORB_MV but not below SNAP_HOLD_MV: still held at 100%,
+  // including for a fresh BMS report arriving between ticks.
+  tick_1s(3620, 3600, 0, 3720, 900);
+  EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
   tick_1s(3600, 3590, 0, 3700, 900);
+  EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
+  // Below SNAP_HOLD_MV: released, BMS wins (snap still ended until reset).
+  tick_1s(3599, 3590, 0, 3700, 900);
   EXPECT_TRUE(battery->snapEnded);
   EXPECT_EQ(datalayer.battery.status.real_soc, 9000);
+  // Rising back between the two thresholds doesn't re-force.
+  tick_1s(3620, 3600, 0, 3720, 900);
+  EXPECT_EQ(datalayer.battery.status.real_soc, 9000);
+  // Reaching SNAP_ABSORB_MV again does.
+  tick_1s(3650, 3630, 0, 3740, 900);
+  EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
 }
 
 TEST_F(Mg4BatteryTest, SnapIgnoredForNmc) {
@@ -638,9 +742,9 @@ TEST_F(Mg4BatteryTest, SnapLowTempOverrulesSnapClamp) {
   EXPECT_FALSE(battery->snapEnded);
   EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
   // Even once the 30s overvoltage timer ends the snap, cold must still win
-  // over both the snap envelope and the forced-100% trickle.
+  // over both the snap clamp and the post-snap taper.
   for (int i = 0; i < 30; i++) {
-    send_12c(3760, 3700, 50, 3850, -100);
+    send_12c(3755, 3700, 50, 3850, -100);
     send_15b_fd(7, 970);
     battery->update_values();
   }
