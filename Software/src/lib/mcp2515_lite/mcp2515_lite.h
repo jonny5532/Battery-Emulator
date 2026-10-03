@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "async_spi_bus.h"
+#include "mcp2515_lite_util.h"
 
 /* MCP2515_Lite: Minimal interrupt-driven MCP2515 driver.
 
@@ -15,6 +16,10 @@
 #define MCP2515_LITE_SPI_HZ 10000000
 // Always poll this often, in case an INT edge was missed
 #define MCP2515_LITE_POLL_TIMEOUT_MS 1000
+
+// Host-side ring buffer sizes in frames, must be a power of two.
+#define MCP2515_LITE_TX_BUF_FRAMES 32
+#define MCP2515_LITE_RX_BUF_FRAMES 32
 
 // This has the same layout as CAN_frame (with only 8 data bytes)
 typedef struct {
@@ -73,39 +78,10 @@ private:
     volatile bool _rx_overflow = false;
     volatile bool _errors = false;
 
-    // A ring buffer for storing frames (in the chip's format, so they can go
-    // straight to/from SPI). Single producer, single consumer.
-    struct FrameRing {
-        static constexpr uint32_t SIZE = 32;  // Frames (power of two)
-        uint8_t slots[SIZE][14];
-        volatile uint32_t head = 0, tail = 0;  // Free-running
-
-        // Get the next slot to write to, or nullptr if the ring is
-        // full. Call push() after filling it to enqueue.
-        uint8_t* writeSlot() { return head - tail < SIZE ? slots[head % SIZE] : nullptr; }
-        void push() { __atomic_store_n(&head, head + 1, __ATOMIC_RELEASE); }
-
-        // Get the next slot to write to, even if the ring is full (in which
-        // case it reuses the last slot). pushKeepingSpare() won't push the last
-        // slot so the frame effectively gets dropped. Used in the RX interrupt,
-        // which always needs a slot to write the incoming frame.
-        uint8_t* spareSlot() { return slots[head % SIZE]; }
-        bool pushKeepingSpare() {
-            if (head - tail >= SIZE - 1) {
-                return false;
-            }
-            push();
-            return true;
-        }
-
-        // Read the oldest frame in the ring, or nullptr if empty. Call pop()
-        // after processing it to release the slot.
-        uint8_t* readSlot() {
-            return __atomic_load_n(&head, __ATOMIC_ACQUIRE) != tail ? slots[tail % SIZE] : nullptr;
-        }
-        void pop() { __atomic_store_n(&tail, tail + 1, __ATOMIC_RELEASE); }
-    };
-    FrameRing _rx, _tx;
+    template <uint32_t Size>
+    using FrameRing = MCP2515_Lite_FrameRing<Size>;
+    FrameRing<MCP2515_LITE_RX_BUF_FRAMES> _rx;
+    FrameRing<MCP2515_LITE_TX_BUF_FRAMES> _tx;
     portMUX_TYPE _tx_lock = portMUX_INITIALIZER_UNLOCKED;
 
     // State used by step()
