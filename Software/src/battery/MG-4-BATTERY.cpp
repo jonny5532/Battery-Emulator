@@ -1,6 +1,7 @@
 #include "MG-4-BATTERY.h"
 #include <cmath>    //For unit test
 #include <cstdio>   //For sprintf
+#include <cstdlib>  //For realloc
 #include <cstring>  //For unit test
 
 //#include "esp_timer.h"
@@ -1078,7 +1079,58 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
       memcpy(pid_ecu_sw_number, data, length > sizeof(pid_ecu_sw_number) ? sizeof(pid_ecu_sw_number) : length);
       break;  // End of cycle
   }
+
+  if (pid == did_sweep_in_flight) {
+    // Answer to a background sweep request: record it and let the poll list
+    // continue.
+    record_did_sweep_result(pid, data, length);
+    did_sweep_in_flight = 0;
+    return 0;
+  }
+
+  if (did_sweep_active()) {
+    // Answer from the poll list: interleave the next sweep DID. Sweep DIDs
+    // that are rejected or time out aren't retried - the scan list just
+    // resumes, and the next poll answer hands out the following DID.
+    did_sweep_in_flight = (uint16_t)did_sweep_next++;
+    return did_sweep_in_flight;
+  }
+
   return 0;  // Continue normal PID cycling
+}
+
+Mg4Battery::~Mg4Battery() {
+  free(did_sweep_buf);
+}
+
+void Mg4Battery::record_did_sweep_result(uint16_t did, const uint8_t* data, uint16_t length) {
+  const uint16_t kept = length > DID_SWEEP_MAX_DATA_LEN ? DID_SWEEP_MAX_DATA_LEN : length;
+  const uint32_t needed = did_sweep_buf_len + DID_SWEEP_RECORD_HEADER_LEN + kept;
+  if (needed > DID_SWEEP_BUF_MAX) {
+    did_sweep_dropped++;
+    return;
+  }
+  if (needed > did_sweep_buf_capacity) {
+    uint32_t new_capacity = did_sweep_buf_capacity + DID_SWEEP_BUF_CHUNK;
+    if (new_capacity > DID_SWEEP_BUF_MAX) {
+      new_capacity = DID_SWEEP_BUF_MAX;
+    }
+    uint8_t* grown = (uint8_t*)realloc(did_sweep_buf, new_capacity);
+    if (grown == nullptr) {
+      did_sweep_dropped++;
+      return;
+    }
+    did_sweep_buf = grown;
+    did_sweep_buf_capacity = new_capacity;
+  }
+
+  uint8_t* rec = did_sweep_buf + did_sweep_buf_len;
+  rec[0] = did >> 8;
+  rec[1] = did & 0xFF;
+  rec[2] = length > 255 ? 255 : length;
+  memcpy(rec + DID_SWEEP_RECORD_HEADER_LEN, data, kept);
+  did_sweep_buf_len = needed;
+  did_sweep_answered++;
 }
 
 void Mg4Battery::identify_battery() {
@@ -1180,10 +1232,11 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
       (datalayer.battery.info.number_of_cells * datalayer.battery.info.min_cell_voltage_mV) / 100;
 }
 
-// Renders characters if printable, otherwise as [xx] hex.
-static void print_chars_or_hex(char* buf, const uint8_t* data, uint16_t length) {
+// Renders characters if printable, otherwise as [xx] hex. Truncates rather
+// than overflowing buf_size.
+static void print_chars_or_hex(char* buf, uint16_t buf_size, const uint8_t* data, uint16_t length) {
   int ptr = 0;
-  for (int i = 0; i < length && ptr < 62; i++) {
+  for (int i = 0; i < length && ptr < buf_size - 5; i++) {
     if (data[i] >= 32 && data[i] <= 126) {
       buf[ptr++] = (char)data[i];
     } else {
@@ -1195,8 +1248,14 @@ static void print_chars_or_hex(char* buf, const uint8_t* data, uint16_t length) 
 }
 
 String Mg4Battery::get_uds_info_html() {
+  // Reserve enough up front that the appends below never reallocate: ~1KB of
+  // fixed text and sweep header, up to 9 chars per isolation history sample
+  // (8-digit ohms + comma), and one page of the sweep listing.
+  String html;
+  html.reserve(1024 + iso_history_count * 9 + DID_SWEEP_PAGE_HTML_BUDGET);
+
   // Pack-reported precharge/contactor state (0x15B byte[21]&0xF)
-  String html = "<h3>Precharge/contactor state</h3>";
+  html += "<h3>Precharge/contactor state</h3>";
   html += "State: ";
   html += pack_contactors.label();
   html += " (";
@@ -1224,12 +1283,101 @@ String Mg4Battery::get_uds_info_html() {
   }
   html += "<br>Pack serial: " + String(ntsc_serial);
   char buf[64];
-  print_chars_or_hex(buf, pid_ecu_hw_number, sizeof(pid_ecu_hw_number));
+  print_chars_or_hex(buf, sizeof(buf), pid_ecu_hw_number, sizeof(pid_ecu_hw_number));
   html += "<br>ECU hardware: ";
   html += buf;
-  print_chars_or_hex(buf, pid_ecu_sw_number, sizeof(pid_ecu_sw_number));
+  print_chars_or_hex(buf, sizeof(buf), pid_ecu_sw_number, sizeof(pid_ecu_sw_number));
   html += "<br>ECU software: ";
   html += buf;
 
+  render_did_sweep_html(html);
+
   return html;
+}
+
+void Mg4Battery::render_did_sweep_html(String& html) {
+  char buf[DID_SWEEP_MAX_DATA_LEN * 4 + 8];
+
+  html += "<h3>UDS DID sweep</h3>";
+  if (did_sweep_active()) {
+    snprintf(buf, sizeof(buf), "In progress: %lu/%lu DIDs tried, next 0x%04lX",
+             (unsigned long)(did_sweep_next - DID_SWEEP_FIRST), (unsigned long)DID_SWEEP_TOTAL,
+             (unsigned long)did_sweep_next);
+  } else {
+    snprintf(buf, sizeof(buf), "Complete: %lu DIDs tried", (unsigned long)DID_SWEEP_TOTAL);
+  }
+  html += buf;
+  snprintf(buf, sizeof(buf), "<br>%u answered, %lu/%lu bytes stored", did_sweep_answered,
+           (unsigned long)did_sweep_buf_len, (unsigned long)DID_SWEEP_BUF_MAX);
+  html += buf;
+  if (did_sweep_dropped > 0) {
+    snprintf(buf, sizeof(buf), ", %u dropped (buffer full)", did_sweep_dropped);
+    html += buf;
+  }
+  html += "<br>";
+
+  if (did_sweep_buf_len == 0) {
+    return;
+  }
+
+  // The listing is split into pages of at most DID_SWEEP_PAGE_HTML_BUDGET
+  // rendered bytes, showing the next page on each reload so the page never
+  // has to hold the whole listing at once. Records are only ever appended, so
+  // earlier page boundaries stay put while the sweep runs.
+  uint16_t pages = 0;
+  uint32_t page_start = 0;
+  for (uint32_t pos = 0; pos < did_sweep_buf_len; pos = did_sweep_page_end(pos)) {
+    if (pages == did_sweep_page) {
+      page_start = pos;
+    }
+    pages++;
+  }
+  if (did_sweep_page >= pages) {
+    did_sweep_page = 0;
+    page_start = 0;
+  }
+  const uint32_t page_end = did_sweep_page_end(page_start);
+
+  if (pages > 1) {
+    snprintf(buf, sizeof(buf), "Page %u/%u (reload for the next page)<br>", did_sweep_page + 1, pages);
+    html += buf;
+  }
+
+  // Each answer is listed as "DID: data (length)", flowing into columns.
+  html += "<div style='columns: 3 320px; font-family: monospace;'>";
+  for (uint32_t pos = page_start; pos < page_end;) {
+    const uint8_t* rec = did_sweep_buf + pos;
+    const uint16_t did = (rec[0] << 8) | rec[1];
+    const uint8_t length = rec[2];
+    const uint16_t kept = length > DID_SWEEP_MAX_DATA_LEN ? DID_SWEEP_MAX_DATA_LEN : length;
+    snprintf(buf, sizeof(buf), "%04X: ", did);
+    html += buf;
+    print_chars_or_hex(buf, sizeof(buf), rec + DID_SWEEP_RECORD_HEADER_LEN, kept);
+    html += buf;
+    snprintf(buf, sizeof(buf), kept < length ? " (%u, truncated)<br>" : " (%u)<br>", length);
+    html += buf;
+    pos += DID_SWEEP_RECORD_HEADER_LEN + kept;
+  }
+  html += "</div>";
+
+  did_sweep_page = (did_sweep_page + 1) % pages;
+}
+
+uint32_t Mg4Battery::did_sweep_page_end(uint32_t start) const {
+  // Takes records from start while their worst-case rendered size (4 chars per
+  // data byte plus the "XXXX: " / " (nnn, truncated)<br>" decoration) fits the
+  // page budget, always taking at least one.
+  uint32_t pos = start;
+  uint32_t rendered = 0;
+  while (pos + DID_SWEEP_RECORD_HEADER_LEN <= did_sweep_buf_len) {
+    const uint8_t length = did_sweep_buf[pos + 2];
+    const uint16_t kept = length > DID_SWEEP_MAX_DATA_LEN ? DID_SWEEP_MAX_DATA_LEN : length;
+    const uint32_t cost = kept * 4 + DID_SWEEP_RECORD_HTML_OVERHEAD;
+    if (pos > start && rendered + cost > DID_SWEEP_PAGE_HTML_BUDGET) {
+      break;
+    }
+    rendered += cost;
+    pos += DID_SWEEP_RECORD_HEADER_LEN + kept;
+  }
+  return pos;
 }
