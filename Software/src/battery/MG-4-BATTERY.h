@@ -4,6 +4,7 @@
 
 class Mg4Battery : public UdsCanBattery {
  public:
+  ~Mg4Battery();
   virtual void setup(void);
   virtual void handle_incoming_can_frame(CAN_frame rx_frame);
   virtual uint16_t handle_pid(uint16_t pid, uint32_t value, const uint8_t* data, uint16_t length);
@@ -126,6 +127,49 @@ class Mg4Battery : public UdsCanBattery {
   void snap_tick_attempt(uint16_t cell_max_mV);
   bool snap_should_force_soc();
   int32_t snap_clamp_power_W();
+
+  // ---- Background DID sweep ----
+  // The DID map of this BMS is largely unknown, so handle_pid() interleaves
+  // one request for the next untried DID after every runtime poll list
+  // response, sweeping the entire DID range (0x0001-0xFFFF; 0x0000 can't be
+  // requested as a detour since handle_pid() uses 0 for "continue") once in
+  // the background. Every DID that answers with data is recorded and shown on
+  // the battery info page.
+  //
+  // Answers are packed back to back into a single byte buffer, one record per
+  // DID: [DID hi][DID lo][response length (saturated at 255)][data...], with
+  // at most DID_SWEEP_MAX_DATA_LEN data bytes kept. The buffer is allocated on
+  // the first answer and grown in DID_SWEEP_BUF_CHUNK steps up to
+  // DID_SWEEP_BUF_MAX; answers that don't fit are counted and dropped.
+  static constexpr uint32_t DID_SWEEP_FIRST = 0x0001;
+  static constexpr uint32_t DID_SWEEP_LAST = 0xFFFF;
+  static constexpr uint32_t DID_SWEEP_TOTAL = DID_SWEEP_LAST - DID_SWEEP_FIRST + 1;
+  static constexpr uint16_t DID_SWEEP_MAX_DATA_LEN = 64;
+  static constexpr uint16_t DID_SWEEP_RECORD_HEADER_LEN = 3;
+  static constexpr uint32_t DID_SWEEP_BUF_CHUNK = 1024;
+  static constexpr uint32_t DID_SWEEP_BUF_MAX = 8192;
+  // The info page shows one page of the listing per load, each at most this
+  // many bytes of HTML, assuming every record costs 4 chars per data byte plus
+  // DID_SWEEP_RECORD_HTML_OVERHEAD.
+  static constexpr uint32_t DID_SWEEP_PAGE_HTML_BUDGET = 4096;
+  static constexpr uint32_t DID_SWEEP_RECORD_HTML_OVERHEAD = 32;
+
+  uint8_t* did_sweep_buf = nullptr;
+  uint32_t did_sweep_buf_len = 0;       // bytes used
+  uint32_t did_sweep_buf_capacity = 0;  // bytes allocated
+  uint16_t did_sweep_answered = 0;      // records stored
+  uint16_t did_sweep_dropped = 0;       // answers that didn't fit
+  // Next DID to hand out (uint32_t so it can run past 0xFFFF to mark the end).
+  uint32_t did_sweep_next = DID_SWEEP_FIRST;
+  // The sweep DID currently requested, or 0 if none.
+  uint16_t did_sweep_in_flight = 0;
+  // Listing page shown on the next info page load.
+  uint16_t did_sweep_page = 0;
+
+  bool did_sweep_active() const { return did_sweep_next <= DID_SWEEP_LAST; }
+  void record_did_sweep_result(uint16_t did, const uint8_t* data, uint16_t length);
+  void render_did_sweep_html(String& html);
+  uint32_t did_sweep_page_end(uint32_t start) const;
 
  private:
   static const uint16_t MAX_CELL_DEVIATION_LFP_MV = 400;

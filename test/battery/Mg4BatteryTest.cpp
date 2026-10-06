@@ -14,6 +14,12 @@ class TestableMg4Battery : public Mg4Battery {
  public:
   using Mg4Battery::batteryIdentified;
   using Mg4Battery::contactorState;
+  using Mg4Battery::did_sweep_answered;
+  using Mg4Battery::did_sweep_buf_len;
+  using Mg4Battery::DID_SWEEP_BUF_MAX;
+  using Mg4Battery::did_sweep_dropped;
+  using Mg4Battery::did_sweep_next;
+  using Mg4Battery::DID_SWEEP_PAGE_HTML_BUDGET;
   using Mg4Battery::mg4_seq_start;
   using Mg4Battery::mg4_seq_tick;
   using Mg4Battery::reclose_blocked;
@@ -963,4 +969,116 @@ TEST_F(Mg4BatteryTest, ClosingWireSequenceMatchesLegacyReplay) {
   EXPECT_EQ(f08a[799].data.u8[30], 0x40);
   EXPECT_EQ(f313.back().data.u8[10], 0x05);
   EXPECT_EQ(f314.back().data.u8[6], 0x57);
+}
+
+// Every poll list answer is followed by one request for the next sweep DID,
+// starting at 0x0001; a sweep answer (or a rejected sweep DID, which never
+// reaches handle_pid) lets the poll list continue.
+TEST_F(Mg4BatteryTest, DidSweepInterleavesWithPollList) {
+  const uint8_t data[2] = {0x26, 0xAC};
+
+  EXPECT_EQ(battery->handle_pid(0xB061, 0x26AC, data, sizeof(data)), 0x0001u);
+  // The poll answer is still processed when a detour is returned.
+  EXPECT_EQ(datalayer.battery.status.soh_pptt, 0x26AC);
+  EXPECT_EQ(battery->handle_pid(0x0001, 0, data, sizeof(data)), 0x0000u);
+  EXPECT_EQ(battery->handle_pid(0xB045, 0, data, sizeof(data)), 0x0002u);
+  // 0x0002 rejected: no handle_pid call, the next poll answer moves on.
+  EXPECT_EQ(battery->handle_pid(0xF192, 0, data, sizeof(data)), 0x0003u);
+}
+
+// Sweep answers are packed and rendered; poll list answers aren't recorded.
+TEST_F(Mg4BatteryTest, DidSweepRecordsAndRendersAnswers) {
+  const uint8_t poll[2] = {0x26, 0xAC};
+  const uint8_t ascii[3] = {'A', 'B', 0x00};
+
+  battery->handle_pid(0xB061, 0, poll, sizeof(poll));  // -> 0x0001
+  battery->handle_pid(0x0001, 0, ascii, sizeof(ascii));
+  battery->handle_pid(0xB061, 0, poll, sizeof(poll));  // -> 0x0002, never answered
+
+  EXPECT_EQ(battery->did_sweep_answered, 1u);
+  EXPECT_EQ(battery->did_sweep_buf_len, 3u + sizeof(ascii));
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("In progress: 2/65535 DIDs tried, next 0x0003"), std::string::npos);
+  EXPECT_NE(html.find("0001: AB[00] (3)"), std::string::npos);
+  EXPECT_EQ(html.find("B061:"), std::string::npos);
+  // Everything fits on one page, so there's no page indicator.
+  EXPECT_EQ(html.find("Page "), std::string::npos);
+}
+
+// The sweep ends after 0xFFFF, never hands out 0x0000, and then stays out of
+// the way of the poll list.
+TEST_F(Mg4BatteryTest, DidSweepStopsAfterFullRange) {
+  const uint8_t data[1] = {0x00};
+  battery->did_sweep_next = 0xFFFE;
+
+  EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0xFFFEu);
+  EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0xFFFFu);
+  EXPECT_EQ(battery->handle_pid(0xFFFF, 0, data, sizeof(data)), 0x0000u);
+  for (int i = 0; i < 10; i++) {
+    EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0x0000u);
+  }
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Complete: 65535 DIDs tried"), std::string::npos);
+  EXPECT_NE(html.find("FFFF: [00] (1)"), std::string::npos);
+}
+
+// Long answers are truncated, and answers beyond the buffer cap are dropped
+// rather than overflowing it.
+TEST_F(Mg4BatteryTest, DidSweepTruncatesAndCapsStorage) {
+  uint8_t big[100];
+  memset(big, 'x', sizeof(big));
+  const uint8_t poll[1] = {0x00};
+
+  for (int i = 0; i < 200; i++) {
+    uint16_t did = battery->handle_pid(0xB061, 0, poll, sizeof(poll));
+    battery->handle_pid(did, 0, big, sizeof(big));
+  }
+
+  EXPECT_GT(battery->did_sweep_dropped, 0u);
+  EXPECT_LE(battery->did_sweep_buf_len, (uint32_t)battery->DID_SWEEP_BUF_MAX);
+  EXPECT_EQ(battery->did_sweep_answered + battery->did_sweep_dropped, 200u);
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("0001: " + std::string(64, 'x') + " (100, truncated)"), std::string::npos);
+  EXPECT_NE(html.find("dropped (buffer full)"), std::string::npos);
+  // Only one page of the listing is rendered per load.
+  EXPECT_LE(html.size(), 1024u + battery->DID_SWEEP_PAGE_HTML_BUDGET);
+}
+
+// The listing is shown one page per load, "Page n/N" cycling through every
+// record exactly once before wrapping, with each page within its budget - also
+// for many short, unprintable answers (the worst case for decoration).
+TEST_F(Mg4BatteryTest, DidSweepListingPagesAcrossReloads) {
+  const uint8_t poll[1] = {0x00};
+  const uint8_t tiny[1] = {0x01};
+
+  for (int i = 0; i < 3000; i++) {
+    uint16_t did = battery->handle_pid(0xB061, 0, poll, sizeof(poll));
+    battery->handle_pid(did, 0, i % 2 ? tiny : poll, i % 2 ? sizeof(tiny) : 0);
+  }
+  ASSERT_GT(battery->did_sweep_dropped, 0u);
+  const unsigned answered = battery->did_sweep_answered;
+
+  std::string first = battery->get_uds_info_html().c_str();
+  size_t at = first.find("Page 1/");
+  ASSERT_NE(at, std::string::npos);
+  const unsigned pages = std::stoul(first.substr(at + 7));
+  ASSERT_GT(pages, 1u);
+
+  unsigned records = 0;
+  std::string html = first;
+  for (unsigned page = 1; page <= pages; page++) {
+    if (page > 1) {
+      html = battery->get_uds_info_html().c_str();
+    }
+    EXPECT_NE(html.find("Page " + std::to_string(page) + "/" + std::to_string(pages)), std::string::npos);
+    EXPECT_LE(html.size(), 1024u + battery->DID_SWEEP_PAGE_HTML_BUDGET);
+    // Count records in the listing only (the header has ")<br>" too).
+    for (size_t pos = html.find("monospace;'>"); (pos = html.find(")<br>", pos)) != std::string::npos; pos++) {
+      records++;
+    }
+  }
+  EXPECT_EQ(records, answered);
+
+  // Wraps back to the first page.
+  EXPECT_EQ(std::string(battery->get_uds_info_html().c_str()), first);
 }
