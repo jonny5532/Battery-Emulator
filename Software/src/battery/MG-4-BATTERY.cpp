@@ -13,13 +13,13 @@
 #include "../devboard/utils/events.h"
 #include "../devboard/utils/logging.h"
 
-static const uint16_t MAX_CHARGE_POWER_W = 14000;
-static const uint16_t CHARGE_TRICKLE_POWER_W = 100;    // The cell voltage limits will override
-static const uint16_t DERATE_CHARGE_ABOVE_SOC = 9500;  // in 0.01% units
-
-static const uint16_t MAX_DISCHARGE_POWER_W = 14000;
-static const uint16_t DERATE_DISCHARGE_BELOW_SOC = 500;  // in 0.01% units
+// Hard caps, applied on top of the BMS's own limits from 0x17E.
+static const uint16_t MAX_CHARGE_POWER_W = 30000;
+static const uint16_t MAX_DISCHARGE_POWER_W = 30000;
 static const uint16_t DISCHARGE_MIN_SOC = 0;
+
+// The BMS limits already derate for SoC and temperature, so the layers below
+// are backstops that only bite at the extremes.
 
 // Cell-voltage-based power derating (copied from MG-GEN1-BATTERY)
 
@@ -29,16 +29,23 @@ static constexpr int32_t CHARGE_HYSTERESIS_MV = 10;
 static constexpr int32_t DISCHARGE_TAPER_MV = 50;
 static constexpr int32_t DISCHARGE_HYSTERESIS_MV = 25;
 
-// Temperature-based power derating (copied from MG-GEN1-BATTERY)
+// Temperature-based power derating
 
 // Temp thresholds for the two chemistries
 static constexpr int32_t MIN_TEMP_NMC_DC = -100;
 static constexpr int32_t MIN_TEMP_LFP_DC = 0;
 static constexpr int32_t MAX_TEMP_DC = 500;
-// Taper down to 0W at min temp with a linear gradient (affects charge only)
-static constexpr int32_t MIN_WATTS_PER_DC = 280;  // gradient is 14kW per 5dC
-// Taper down to 0W at max temp with a linear gradient (both charge and discharge)
-static constexpr int32_t MAX_WATTS_PER_DC = 140;  // gradient is 14kW per 10dC
+// Taper from the hard cap down to 0W over the last 5C before min temp (charge
+// only) and max temp (both charge and discharge).
+static constexpr int32_t TEMP_TAPER_DC = 50;
+static constexpr int32_t MIN_WATTS_PER_DC = MAX_CHARGE_POWER_W / TEMP_TAPER_DC;
+static constexpr int32_t MAX_CHG_WATTS_PER_DC = MAX_CHARGE_POWER_W / TEMP_TAPER_DC;
+static constexpr int32_t MAX_DIS_WATTS_PER_DC = MAX_DISCHARGE_POWER_W / TEMP_TAPER_DC;
+
+// 0x17E power limits: 11-bit fields in 0.5kW steps, 0x7FF while the BMS is
+// still starting up.
+static constexpr uint16_t BMS_LIMIT_INVALID = 0x7FF;
+static constexpr uint32_t BMS_LIMIT_W_PER_COUNT = 500;
 
 static uint8_t mg4_crc8(const uint8_t* d) {
   uint8_t crc = 0x00;
@@ -162,35 +169,6 @@ static int32_t battery_linear_taper(int32_t input, int32_t input_min, int32_t in
   }
 }
 
-/* SoC based charge derating: full max_charge_power up to derate_above_soc (in
-   0.01% units), then a linear taper down to trickle_charge_power at 100%. */
-static uint32_t battery_charge_power_by_soc(uint32_t soc, uint32_t max_charge_power, uint32_t trickle_charge_power,
-                                            uint16_t derate_above_soc) {
-  if (soc <= derate_above_soc) {
-    return max_charge_power;
-  } else if (soc >= 10000) {
-    return trickle_charge_power;
-  } else {
-    // Linear derate
-    return max_charge_power -
-           ((max_charge_power - trickle_charge_power) * (soc - derate_above_soc)) / (10000 - derate_above_soc);
-  }
-}
-
-/* SoC based discharge derating: full max_discharge_power down to
-   derate_below_soc (in 0.01% units), then a linear taper down to 0 at min_soc. */
-static uint32_t battery_discharge_power_by_soc(uint32_t soc, uint32_t max_discharge_power, uint16_t min_soc,
-                                               uint16_t derate_below_soc) {
-  if (soc >= derate_below_soc) {
-    return max_discharge_power;
-  } else if (soc <= min_soc) {
-    return 0;
-  } else {
-    // Linear derate
-    return max_discharge_power - ((max_discharge_power * (derate_below_soc - soc)) / (derate_below_soc - min_soc));
-  }
-}
-
 /* Cell voltage based charge derating with hysteresis. Tapers linearly to 0 as
    cell_max_mV rises from (working_max_mV - taper_mV) to working_max_mV. Once
    tripped at working_max_mV the limit stays 0 until cell_max_mV drops back to
@@ -259,6 +237,7 @@ void Mg4Battery::snap_tick_attempt(uint16_t cell_max_mV) {
   if (cell_max_mV < SNAP_RESET_MV) {
     snapEnded = false;
     snap_over_s = 0;
+    snap_absorb_s = 0;
     snap_ema_dA = 0.0f;
     snapAbsorbing = false;
     return;
@@ -270,6 +249,15 @@ void Mg4Battery::snap_tick_attempt(uint16_t cell_max_mV) {
     snapEnded = true;
     return;
   }
+  // Only snap within a safe temperature window, judged from absorption on so
+  // a pack that warms up during the charge still gets its attempt.
+  if (snapAbsorbing || cell_max_mV >= SNAP_ABSORB_MV) {
+    if (datalayer.battery.status.temperature_min_dC <= SNAP_MIN_TEMP_DC ||
+        datalayer.battery.status.temperature_max_dC >= SNAP_MAX_TEMP_DC) {
+      snapEnded = true;
+      return;
+    }
+  }
   // Skip snapping if SoC is already high enough - no drift worth correcting.
   if (cell_max_mV >= SNAP_SKIP_MV && datalayer.battery.status.real_soc >= SNAP_SKIP_SOC) {
     snapEnded = true;
@@ -278,7 +266,14 @@ void Mg4Battery::snap_tick_attempt(uint16_t cell_max_mV) {
   if (cell_max_mV >= SNAP_ABSORB_MV) {
     snapAbsorbing = true;
   }
-  snap_over_s = (cell_max_mV >= SNAP_OVER_MV) ? snap_over_s + 1 : 0;
+  if (snapAbsorbing) {
+    snap_absorb_s++;
+  }
+  // Latches on the first second over SNAP_OVER_MV, so a cell hovering around
+  // the threshold can't keep restarting the timer.
+  if (snap_over_s > 0 || cell_max_mV >= SNAP_OVER_MV) {
+    snap_over_s++;
+  }
   // ~30s exponential moving average of charge current (+ = charging, clamp discharge to 0).
   float chg_dA = (float)datalayer.battery.status.current_dA;
   if (chg_dA < 0.0f) {
@@ -286,7 +281,7 @@ void Mg4Battery::snap_tick_attempt(uint16_t cell_max_mV) {
   }
   snap_ema_dA += SNAP_EMA_ALPHA * (chg_dA - snap_ema_dA);
   bool current_done = (cell_max_mV >= SNAP_ABSORB_MV) && (snap_ema_dA < (float)SNAP_MIN_DA);
-  if (snap_over_s >= SNAP_OVER_S || current_done) {
+  if (snap_over_s >= SNAP_OVER_S || snap_absorb_s >= SNAP_ABSORB_MAX_S || current_done) {
     snapEnded = true;
   }
 }
@@ -305,14 +300,19 @@ int32_t Mg4Battery::snap_clamp_power_W() {
 }
 
 uint32_t Mg4Battery::calculate_max_discharge_power_W() {
-  // Fail-closed: no fresh cell voltages or temperatures means we cannot
-  // prove the pack is safe, so allow no power. This also covers the boot
-  // window before the first 0x12C/0x159 frame.
-  if (cell_voltage_freshness <= 0 || temp_freshness <= 0) {
+  // Fail-closed: no fresh cell voltages, temperatures or BMS limits means we
+  // cannot prove the pack is safe, so allow no power. This also covers the
+  // boot window before the first 0x12C/0x17E frames (and the BMS's own
+  // startup, while it reports its limits as invalid).
+  if (cell_voltage_freshness <= 0 || temp_freshness <= 0 || bms_limit_freshness <= 0) {
     return 0;
   }
 
+  // The BMS's own limit, capped at our hard max.
   int32_t max_discharge_power_W = MAX_DISCHARGE_POWER_W;
+  if ((int32_t)bms_max_discharge_W < max_discharge_power_W) {
+    max_discharge_power_W = bms_max_discharge_W;
+  }
 
   // Cellvoltage-based power derating. Taper linearly to zero over the last
   // DISCHARGE_TAPER_MV above working_cell_min_mV, then latch at zero (with
@@ -332,19 +332,13 @@ uint32_t Mg4Battery::calculate_max_discharge_power_W() {
   // value of 0 dC can no longer slip through as an at-limit reading.
   {
     const int32_t temp_high_power_W =
-        battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_WATTS_PER_DC);
+        battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_DIS_WATTS_PER_DC);
     if (temp_high_power_W < max_discharge_power_W) {
       max_discharge_power_W = temp_high_power_W;
     }
   }
 
-  // SoC-based power derating: full power down to DERATE_DISCHARGE_BELOW_SOC,
-  // then a linear taper to zero at DISCHARGE_MIN_SOC.
-  const int32_t soc_power_W = battery_discharge_power_by_soc(datalayer.battery.status.real_soc, MAX_DISCHARGE_POWER_W,
-                                                             DISCHARGE_MIN_SOC, DERATE_DISCHARGE_BELOW_SOC);
-  if (soc_power_W < max_discharge_power_W) {
-    max_discharge_power_W = soc_power_W;
-  }
+  // No SoC-based derating: the BMS limit already falls to zero at empty.
 
   if (!batteryIdentified) {
     max_discharge_power_W = 0;
@@ -355,27 +349,37 @@ uint32_t Mg4Battery::calculate_max_discharge_power_W() {
 
 uint32_t Mg4Battery::calculate_max_charge_power_W() {
   // Fail-closed: see calculate_max_discharge_power_W().
-  if (cell_voltage_freshness <= 0 || temp_freshness <= 0) {
+  if (cell_voltage_freshness <= 0 || temp_freshness <= 0 || bms_limit_freshness <= 0) {
     return 0;
   }
 
+  const bool lfp = datalayer.battery.info.chemistry == battery_chemistry_enum::LFP;
+  const bool snap_clamping = lfp && !snapEnded && snapAbsorbing;
+  const bool snap_overrides_bms = snap_clamping && datalayer.battery.status.cell_max_voltage_mV >= SNAP_BMS_OVERRIDE_MV;
+
+  // The BMS's own limit, capped at our hard max. Skipped while the snap clamp
+  // is active near the top: the BMS cuts charge to 0 at ~3.70V, short of
+  // SNAP_OVER_MV, and the snap's own end conditions bound how long the 5A
+  // override can run. A cut below SNAP_BMS_OVERRIDE_MV is always respected.
   int32_t max_charge_power_W = MAX_CHARGE_POWER_W;
+  if (!snap_overrides_bms && (int32_t)bms_max_charge_W < max_charge_power_W) {
+    max_charge_power_W = bms_max_charge_W;
+  }
 
   // Cellvoltage-based power derating. Taper linearly to zero over the last
   // CHARGE_TAPER_MV below working_cell_max_mV, then latch at zero (with
   // hysteresis) until the cell voltage recovers past the trip threshold.
   // LFP snap special-cases:
-  // - While a snap is in (latched) absorption, the taper is replaced by a 5A
-  //   clamp. SNAP_ABORT_MV in snap_tick() and the safety.cpp cell overvoltage
-  //   limit bound the voltage instead.
+  // - While a snap is in (latched) absorption, the taper (and, from
+  //   SNAP_BMS_OVERRIDE_MV, the BMS limit above) is replaced by a 5A clamp. SNAP_ABORT_MV in snap_tick() and the
+  //   safety.cpp cell overvoltage limit bound the voltage instead.
   // - Once the snap has ended (succeeded, skipped or given up), taper to
   //   SNAP_ABSORB_MV instead, so the pack keeps working normally below the
   //   knee until it re-arms at SNAP_RESET_MV.
   {
     // Freshness already gated above.
-    const bool lfp = datalayer.battery.info.chemistry == battery_chemistry_enum::LFP;
     int32_t cell_power_W;
-    if (lfp && !snapEnded && snapAbsorbing) {
+    if (snap_clamping) {
       cell_power_W = snap_clamp_power_W();
     } else {
       const int32_t cell_max_limit_mV = (lfp && snapEnded) ? SNAP_ABSORB_MV : working_cell_max_mV;
@@ -396,7 +400,7 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
     const int32_t MIN_TEMP_DC =
         datalayer.battery.info.chemistry == battery_chemistry_enum::LFP ? MIN_TEMP_LFP_DC : MIN_TEMP_NMC_DC;
     const int32_t temp_high_power_W =
-        battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_WATTS_PER_DC);
+        battery_power_by_high_temp(datalayer.battery.status.temperature_max_dC, MAX_TEMP_DC, MAX_CHG_WATTS_PER_DC);
     const int32_t temp_low_power_W =
         battery_power_by_low_temp(datalayer.battery.status.temperature_min_dC, MIN_TEMP_DC, MIN_WATTS_PER_DC);
     if (temp_high_power_W < max_charge_power_W) {
@@ -407,18 +411,7 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
     }
   }
 
-  // SoC-based power derating: full power up to DERATE_CHARGE_ABOVE_SOC, then a
-  // linear taper down to CHARGE_TRICKLE_POWER_W at 100%. NMC only: LFP SoC
-  // can't be judged from voltage below the knee, so a BMS reading high would
-  // throttle the pack to a trickle long before it is full. LFP charge is left
-  // to the cell voltage limits (and snap) above.
-  if (datalayer.battery.info.chemistry != battery_chemistry_enum::LFP) {
-    const int32_t soc_power_W = battery_charge_power_by_soc(datalayer.battery.status.real_soc, MAX_CHARGE_POWER_W,
-                                                            CHARGE_TRICKLE_POWER_W, DERATE_CHARGE_ABOVE_SOC);
-    if (soc_power_W < max_charge_power_W) {
-      max_charge_power_W = soc_power_W;
-    }
-  }
+  // No SoC-based derating: the BMS limit already tapers towards full.
 
   if (!batteryIdentified) {
     max_charge_power_W = 0;
@@ -480,6 +473,9 @@ void Mg4Battery::
   if (temp_freshness > 0) {
     temp_freshness--;
   }
+  if (bms_limit_freshness > 0) {
+    bms_limit_freshness--;
+  }
 
   snap_tick();
   if (soc_freshness > 0) {
@@ -492,7 +488,17 @@ void Mg4Battery::
     soc_freshness--;
   }
 
-  if (soc_freshness <= 0) {
+  const bool sleep_mode = is_sleeping() || contactorState == ContactorState::WAKING;
+  if (contactorState == ContactorState::SLEEPING) {
+    // The BMS is meant to be silent now, so stand in for it with the safety
+    // layer's liveness counter (as a long BMS reset does), rather than let
+    // EVENT_CAN_BATTERY_MISSING fault the system. Waking stops this, so a BMS
+    // that never comes back is still reported.
+    datalayer.battery.status.CAN_battery_still_alive = CAN_STILL_ALIVE;
+  }
+
+  if (soc_freshness <= 0 || sleep_mode) {
+    // No power while shutting down, asleep or waking up.
     datalayer.battery.status.max_charge_power_W = 0;
     datalayer.battery.status.max_discharge_power_W = 0;
   } else {
@@ -502,6 +508,16 @@ void Mg4Battery::
 }
 
 void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
+  if (contactorState == ContactorState::SLEEPING) {
+    // Anything heard while sleeping is noted by sleep_tick(), never answered.
+    if (sleep_rx_count == 0) {
+      sleep_first_rx_id = rx_frame.ID;
+    }
+    if (sleep_rx_count < 0xFFFF) {
+      sleep_rx_count++;
+    }
+  }
+
   if (handle_incoming_uds_can_frame(rx_frame)) {
     return;
   }
@@ -637,6 +653,37 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
       // Reflect the pack's own contactor state on the main BE page.
       datalayer.system.status.contactors_engaged = pack_contactors.contactsEngaged();
       break;
+    case 0x17E: {
+      // BMS power limits. Subframe 0x503 carries the discharge limit, 0x504
+      // the charge limit, each as two 11-bit copies in 0.5kW steps (always
+      // equal in logs; take the lower). The current limits alongside them
+      // (discharge A in 0x503, 1023 - charge A in 0x504) are power / pack
+      // voltage, so aren't needed here. Only accept a frame carrying both.
+      uint16_t dis = BMS_LIMIT_INVALID;
+      uint16_t chg = BMS_LIMIT_INVALID;
+      for (int i = 0; i + 12 <= rx_frame.DLC; i += 12) {
+        if (rx_frame.data.u8[i + 3] != 8) {
+          break;
+        }
+        uint32_t addr = (rx_frame.data.u8[i] << 16) | (rx_frame.data.u8[i + 1] << 8) | rx_frame.data.u8[i + 2];
+        const uint8_t* sub = &rx_frame.data.u8[i + 4];
+        if (addr == 0x503) {
+          uint16_t a = (sub[2] << 3) | (sub[3] >> 5);
+          uint16_t b = ((sub[3] & 0x1F) << 6) | (sub[4] >> 2);
+          dis = (a == BMS_LIMIT_INVALID || b == BMS_LIMIT_INVALID) ? BMS_LIMIT_INVALID : (a < b ? a : b);
+        } else if (addr == 0x504) {
+          uint16_t x = ((sub[4] & 0x3F) << 5) | (sub[5] >> 3);
+          uint16_t y = ((sub[5] & 0x07) << 8) | sub[6];
+          chg = (x == BMS_LIMIT_INVALID || y == BMS_LIMIT_INVALID) ? BMS_LIMIT_INVALID : (x < y ? x : y);
+        }
+      }
+      if (dis != BMS_LIMIT_INVALID && chg != BMS_LIMIT_INVALID) {
+        bms_max_discharge_W = dis * BMS_LIMIT_W_PER_COUNT;
+        bms_max_charge_W = chg * BMS_LIMIT_W_PER_COUNT;
+        bms_limit_freshness = 10;
+      }
+      break;
+    }
     case 0x308:
       // Pack serial (NTSC identifier): subfield 000554 has no CRC slot,
       // it carries 7 ASCII bytes + 1 index byte per frame over 4 frames.
@@ -653,6 +700,28 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
               ntsc_serial[sub[7] * 7 + j] = (c == 0xFF) ? 0 : (char)c;
             }
             ntsc_serial[28] = 0;
+          }
+        }
+      }
+      break;
+    case 0x689:
+      // BMS debug multiplex: only the per-cell balancing slot is decoded.
+      for (int i = 0; i + 12 <= rx_frame.DLC; i += 12) {
+        if (rx_frame.data.u8[i + 3] != 8) {
+          break;
+        }
+        const uint8_t* sub = &rx_frame.data.u8[i + 4];
+        if (sub[0] == 0x92 && sub[1] == BAL_SLOT) {
+          const uint8_t cell = sub[6];  // 1-based
+          if (cell >= 1 && cell <= BAL_MAX_CELLS) {
+            bal_demand[cell - 1] = (sub[2] << 8) | sub[3];
+            if (cell != bal_last_cell) {
+              // The walk wrapping back round ends a sweep.
+              if (cell < bal_last_cell) {
+                bal_sweep_complete();
+              }
+              bal_last_cell = cell;
+            }
           }
         }
       }
@@ -694,13 +763,33 @@ void Mg4Battery::update_047_08a() {
     request = 0x21;
     flag = 0x00;
     level = 0x40;
-  } else if (contactorState == ContactorState::OPENING) {
+  } else if (contactorState == ContactorState::OPENING ||
+             (contactorState == ContactorState::SHUTTING_DOWN && shutdown_phase == ShutdownPhase::OPEN_HOLD)) {
     val12 = 45;
     request = 0x00;
     flag = 0x00;
     level = 0x00;
+  } else if (contactorState == ContactorState::SHUTTING_DOWN) {
+    // The car's graceful open: request 0x01 with level 0x40 -> 0x20 after
+    // 0.2s, then request 0x00 with level still 0x20 until the pack opens.
+    val12 = (uint16_t)target;
+    flag = 0x00;
+    if (shutdown_phase == ShutdownPhase::HOLD) {
+      request = 0x01;
+      level = (tick - shutdown_phase_start < SHUTDOWN_LEVEL_T) ? 0x40 : 0x20;
+    } else {
+      request = 0x00;
+      level = 0x20;
+    }
+  } else if (contactorState == ContactorState::WAKING) {
+    // The car's power-up: request 0x03 (flag 0x04 on the first frame only)
+    // for ~2s, then 0x00, all at idle levels.
+    val12 = 45;
+    request = (elapsed < WAKE_REQ03_T) ? 0x03 : 0x00;
+    flag = (elapsed == 0) ? 0x04 : 0x00;
+    level = 0x00;
   } else {
-    // CLOSING (WAITING never reaches here): each signal follows its own
+    // CLOSING (WAITING/SLEEPING never reach here): each signal follows its own
     // schedule from sequence start, saturating at its final level.
     val12 = (elapsed < SEQ_VAL12_STEP) ? 45 : (uint16_t)target;
     request = seq_08a_request(elapsed);
@@ -747,14 +836,21 @@ void Mg4Battery::update_313_314() {
   uint8_t val314;
   uint8_t hi314;
   uint8_t ramp314;
-  if (contactorState == ContactorState::CLOSED) {
+  // The graceful shutdown holds the closed levels until the pack has opened,
+  // and waking runs at the open (idle) levels.
+  const bool shutting_down = contactorState == ContactorState::SHUTTING_DOWN;
+  const bool closed_levels =
+      contactorState == ContactorState::CLOSED || (shutting_down && shutdown_phase != ShutdownPhase::OPEN_HOLD);
+  const bool open_levels = contactorState == ContactorState::OPENING || contactorState == ContactorState::WAKING ||
+                           (shutting_down && shutdown_phase == ShutdownPhase::OPEN_HOLD);
+  if (closed_levels) {
     stat = 0x05;
     vala = SEQ_313_VALA_MAX;
     valc = SEQ_313_VALC_MAX;
     ramp314 = SEQ_314_RAMP_MAX;
     val314 = 0x57;
     hi314 = 0x08;
-  } else if (contactorState == ContactorState::OPENING) {
+  } else if (open_levels) {
     stat = 0x01;
     vala = 0;
     valc = 0;
@@ -789,9 +885,9 @@ void Mg4Battery::update_313_314() {
   } else if (target16 > 0xFFFF) {
     target16 = 0xFFFF;
   }
-  if (contactorState == ContactorState::CLOSED) {
+  if (closed_levels) {
     val16 = (uint16_t)target16;
-  } else if (contactorState == ContactorState::OPENING) {
+  } else if (open_levels) {
     val16 = 562;
   } else {
     uint32_t t16 = (slow_elapsed > 2) ? (slow_elapsed - 2u) * 10u : 0u;
@@ -837,9 +933,82 @@ bool Mg4Battery::record_contactor_reclose(unsigned long now_ms) {
   return (now_ms - reclose_times[reclose_pos]) <= RECLOSE_WINDOW_MS;
 }
 
+bool Mg4Battery::is_sleeping() {
+  return sleep_requested || contactorState == ContactorState::SHUTTING_DOWN ||
+         contactorState == ContactorState::SLEEPING;
+}
+
+// Has the pack current been below SHUTDOWN_IDLE_DA, measured recently? Stale
+// readings count as not idle, so the shutdown never requests open blind.
+bool Mg4Battery::shutdown_current_idle() const {
+  const int16_t current_dA = datalayer.battery.status.current_dA;
+  return cell_voltage_freshness > 0 && current_dA < SHUTDOWN_IDLE_DA && current_dA > -SHUTDOWN_IDLE_DA;
+}
+
+void Mg4Battery::begin_shutdown() {
+  // Step 0: no more power, effective immediately rather than at the next
+  // update_values(), which also keeps them at 0 from here on.
+  datalayer.battery.status.max_charge_power_W = 0;
+  datalayer.battery.status.max_discharge_power_W = 0;
+  sleep_abort_reason = nullptr;
+  wake_requested = false;
+  shutdown_phase_start = mg4_seq_tick;
+  // An open pack (or one we never talked to) skips straight to the final
+  // open hold; anything that may be closed goes through the full sequence.
+  const bool may_be_closed = contactorState == ContactorState::CLOSED || contactorState == ContactorState::CLOSING ||
+                             pack_contactors.isClosed() || pack_contactors.isPrecharging();
+  shutdown_phase = may_be_closed ? ShutdownPhase::HOLD : ShutdownPhase::OPEN_HOLD;
+  logging.printf("[MG4] Sleep requested, shutting down%s\n", may_be_closed ? "" : " (already open)");
+  contactorState = ContactorState::SHUTTING_DOWN;
+}
+
+void Mg4Battery::abort_shutdown(ContactorState next, const char* reason) {
+  logging.printf("[MG4] Sleep aborted: %s\n", reason);
+  sleep_abort_reason = reason;
+  wake_requested = false;
+  contactorWaitStartMillis = 0;
+  mg4_seq_start = mg4_seq_tick;
+  contactorState = next;
+}
+
+// Called every 10ms tick while SLEEPING: notes when the BMS goes quiet, and
+// any later traffic from it (a self-wake), without ever answering it.
+void Mg4Battery::sleep_tick(unsigned long currentMillis) {
+  if (sleep_rx_count > 0) {
+    if (sleep_bms_silent) {
+      sleep_self_wakes++;
+      logging.printf("[MG4] BMS woke while sleeping: first ID 0x%03lX, %lus into sleep\n",
+                     (unsigned long)sleep_first_rx_id, (currentMillis - sleep_start_ms) / 1000);
+      sleep_bms_silent = false;
+    }
+    sleep_last_rx_ms = currentMillis;
+    sleep_rx_count = 0;
+  } else if (!sleep_bms_silent && currentMillis - sleep_last_rx_ms >= SLEEP_SILENT_MS) {
+    sleep_bms_silent = true;
+    if (!sleep_ever_silent) {
+      sleep_ever_silent = true;
+      sleep_silent_after_ms = sleep_last_rx_ms - sleep_start_ms;
+      logging.printf("[MG4] BMS silent, last frame %lums into sleep\n", sleep_silent_after_ms);
+    } else {
+      logging.printf("[MG4] BMS silent again, %lus into sleep\n", (currentMillis - sleep_start_ms) / 1000);
+    }
+  }
+}
+
 // Tick function for the contactor state machine.
 void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
   const bool open_requested = (datalayer.system.status.system_status == FAULT);
+
+  if (sleep_requested) {
+    sleep_requested = false;
+    if (contactorState != ContactorState::SHUTTING_DOWN && contactorState != ContactorState::SLEEPING) {
+      begin_shutdown();
+    }
+  }
+  if (wake_requested && contactorState != ContactorState::SHUTTING_DOWN && contactorState != ContactorState::SLEEPING) {
+    // Nothing to wake. (While shutting down, it is handled below.)
+    wake_requested = false;
+  }
 
   // An explicit manual equipment stop resets the reclose tracker.
   const bool equipment_stop = datalayer.system.info.equipment_stop_active;
@@ -1001,6 +1170,86 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
         contactorState = ContactorState::WAITING_FOR_PACK;
       }
       break;
+
+    case ContactorState::SHUTTING_DOWN: {
+      // The car's graceful open (see update_047_08a), then SLEEPING.
+      const uint32_t t = mg4_seq_tick - shutdown_phase_start;
+      if (open_requested && shutdown_phase != ShutdownPhase::OPEN_HOLD) {
+        // A fault must open immediately, as it does from any other state.
+        reset_reclose_tracker();
+        abort_shutdown(ContactorState::OPENING, "fault, opened immediately");
+        break;
+      }
+      switch (shutdown_phase) {
+        case ShutdownPhase::HOLD:
+          if (wake_requested) {
+            // Not asked to open yet: just go back to normal operation.
+            abort_shutdown(ContactorState::WAITING_FOR_PACK, "cancelled by Wake");
+          } else if (t >= SHUTDOWN_HOLD_T && shutdown_current_idle()) {
+            logging.printf("[MG4] Shutdown: current idle, requesting open\n");
+            shutdown_phase = ShutdownPhase::REQUEST_OPEN;
+            shutdown_phase_start = mg4_seq_tick;
+          } else if (t >= SHUTDOWN_HOLD_MAX_T) {
+            // Never request open under load from here: back to normal
+            // operation rather than opening the contactors under current.
+            abort_shutdown(ContactorState::WAITING_FOR_PACK, "current did not fall below 1A");
+          }
+          break;
+        case ShutdownPhase::REQUEST_OPEN:
+          if (pack_contactors.received && pack_contactors.state == 3) {
+            logging.printf("[MG4] Shutdown: pack open after %lums\n", (unsigned long)t * 10);
+            shutdown_phase = ShutdownPhase::OPEN_HOLD;
+            shutdown_phase_start = mg4_seq_tick;
+          } else if (t >= SHUTDOWN_OPEN_TIMEOUT_T) {
+            // Current is already idle here, so the existing hard open is safe.
+            abort_shutdown(ContactorState::OPENING, "pack did not report open, hard open");
+          }
+          break;
+        case ShutdownPhase::OPEN_HOLD:
+          if (t >= SHUTDOWN_OPEN_HOLD_T) {
+            logging.printf("[MG4] Sleeping, all transmission stopped\n");
+            sleep_start_ms = currentMillis;
+            sleep_last_rx_ms = currentMillis;
+            sleep_silent_after_ms = 0;
+            sleep_ever_silent = false;
+            sleep_bms_silent = false;
+            sleep_self_wakes = 0;
+            sleep_rx_count = 0;
+            contactorState = ContactorState::SLEEPING;
+          }
+          break;
+      }
+      break;
+    }
+
+    case ContactorState::SLEEPING:
+      // Silent: transmit_can() sends nothing, and faults are ignored since the
+      // pack is already open. Only the user's wake ends this.
+      if (wake_requested) {
+        wake_requested = false;
+        logging.printf("[MG4] Wake requested after %lus asleep\n", (currentMillis - sleep_start_ms) / 1000);
+        if (bal_have_sum) {
+          logging.printf("[MG4] Balancing demand sum before sleep: %lu\n", (unsigned long)bal_last_sum);
+        }
+        bal_reset();
+        // Wait for a fresh pack state rather than trusting the pre-sleep one.
+        pack_contactors.received = false;
+        mg4_seq_start = mg4_seq_tick;
+        contactorState = ContactorState::WAKING;
+      }
+      break;
+
+    case ContactorState::WAKING:
+      // Car-style power-up pattern (see update_047_08a) until it has run its
+      // course and the BMS has reported its contactor state again. Then the
+      // normal identify/close logic takes over. If the BMS never answers we
+      // stay here, transmitting, and the usual missing-battery event fires.
+      if (mg4_seq_tick - mg4_seq_start >= WAKE_REQ03_T && pack_contactors.received) {
+        logging.printf("[MG4] BMS awake\n");
+        contactorWaitStartMillis = 0;
+        contactorState = ContactorState::WAITING_FOR_PACK;
+      }
+      break;
   }
 }
 
@@ -1014,11 +1263,17 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
   if (currentMillis - previousMillis10 >= INTERVAL_10_MS) {
     previousMillis10 = currentMillis;
 
+    last_tick_ms = currentMillis;
     contactor_state_tick(currentMillis);
+    const bool sleeping = contactorState == ContactorState::SLEEPING;
+    if (sleeping) {
+      sleep_tick(currentMillis);
+    }
 
     // We don't send any contactor messages until we've decided whether we're
-    // opening or closing (to allow a closed pack to stay closed during reboot).
-    if (contactorState != ContactorState::WAITING_FOR_PACK) {
+    // opening or closing (to allow a closed pack to stay closed during reboot),
+    // or at all while sleeping.
+    if (contactorState != ContactorState::WAITING_FOR_PACK && !sleeping) {
       update_047_08a();
       transmit_can_frame(&MG4_047_FD);
       transmit_can_frame(&MG4_08A_FD);
@@ -1033,10 +1288,12 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
     if (currentMillis - previousMillis100 >= INTERVAL_100_MS) {
       previousMillis100 = currentMillis;
 
-      // 0x4F3 (FD) wakeup/keep-alive (unsure if this is needed).
-      transmit_can_frame(&MG4_4F3_FD);
+      if (!sleeping) {
+        // 0x4F3 (FD) NM frame with the active wake-up bit set.
+        transmit_can_frame(&MG4_4F3_FD);
+      }
 
-      if (contactorState != ContactorState::WAITING_FOR_PACK) {
+      if (contactorState != ContactorState::WAITING_FOR_PACK && !sleeping) {
         // Called after the fast tick increment, so the slow derivation
         // (tick - start)/10 matches the legacy (index+1)/10 exactly.
         update_313_314();
@@ -1046,7 +1303,11 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
     }
   }
 
-  transmit_uds_can(currentMillis);
+  if (contactorState != ContactorState::SLEEPING) {
+    // UDS polling (and the DID sweep) pauses while sleeping; anything in
+    // flight just times out once it resumes.
+    transmit_uds_can(currentMillis);
+  }
 }
 
 uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* data, uint16_t length) {
@@ -1208,6 +1469,8 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   set_pid_scan_list(POLL_LIST, sizeof(POLL_LIST) / sizeof(POLL_LIST[0]));
   dtc = &datalayer.battery.dtc;
 
+  bal_reset();
+
   strncpy(datalayer.system.info.battery_protocol, Name, 63);
   datalayer.system.info.battery_protocol[63] = '\0';
   datalayer.system.status.battery_allows_contactor_closing = true;
@@ -1250,9 +1513,12 @@ static void print_chars_or_hex(char* buf, uint16_t buf_size, const uint8_t* data
 String Mg4Battery::get_uds_info_html() {
   // Reserve enough up front that the appends below never reallocate: ~1KB of
   // fixed text and sweep header, up to 9 chars per isolation history sample
-  // (8-digit ohms + comma), and one page of the sweep listing.
+  // (8-digit ohms + comma), the balancing listing, and one page of the sweep
+  // listing.
   String html;
-  html.reserve(1024 + iso_history_count * 9 + DID_SWEEP_PAGE_HTML_BUDGET);
+  html.reserve(1024 + SLEEP_HTML_BUDGET + iso_history_count * 9 + BAL_HTML_BUDGET + DID_SWEEP_PAGE_HTML_BUDGET);
+
+  render_sleep_html(html);
 
   // Pack-reported precharge/contactor state (0x15B byte[21]&0xF)
   html += "<h3>Precharge/contactor state</h3>";
@@ -1283,6 +1549,15 @@ String Mg4Battery::get_uds_info_html() {
   }
   html += "<br>Pack serial: " + String(ntsc_serial);
   char buf[64];
+  if (bms_limit_freshness > 0) {
+    // Limits are whole multiples of 0.5kW, so one decimal place is exact.
+    snprintf(buf, sizeof(buf), "<br>BMS limits: charge %lu.%lu kW, discharge %lu.%lu kW",
+             (unsigned long)(bms_max_charge_W / 1000), (unsigned long)(bms_max_charge_W % 1000 / 100),
+             (unsigned long)(bms_max_discharge_W / 1000), (unsigned long)(bms_max_discharge_W % 1000 / 100));
+    html += buf;
+  } else {
+    html += "<br>BMS limits: N/A";
+  }
   print_chars_or_hex(buf, sizeof(buf), pid_ecu_hw_number, sizeof(pid_ecu_hw_number));
   html += "<br>ECU hardware: ";
   html += buf;
@@ -1290,9 +1565,133 @@ String Mg4Battery::get_uds_info_html() {
   html += "<br>ECU software: ";
   html += buf;
 
+  render_balancing_html(html);
   render_did_sweep_html(html);
 
   return html;
+}
+
+// Mark every cell not-seen, so the next complete sweep is clearly fresh.
+void Mg4Battery::bal_reset() {
+  memset(bal_demand, 0xFF, sizeof(bal_demand));  // BAL_NOT_SEEN
+  bal_last_cell = 0;
+  bal_have_sum = false;
+}
+
+// Log one summary line per complete sweep (every cell seen since the last
+// reset). The sum is the single number to compare before and after a sleep.
+void Mg4Battery::bal_sweep_complete() {
+  uint8_t cells = datalayer.battery.info.number_of_cells;
+  if (cells == 0 || cells > BAL_MAX_CELLS) {
+    return;
+  }
+  uint16_t nonzero = 0;
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < cells; i++) {
+    if (bal_demand[i] == BAL_NOT_SEEN) {
+      return;
+    }
+    if (bal_demand[i] != 0) {
+      nonzero++;
+      sum += bal_demand[i];
+    }
+  }
+  bal_last_sum = sum;
+  bal_have_sum = true;
+  logging.printf("[MG4] Balancing sweep: %u/%u cells non-zero, sum %lu\n", (unsigned)nonzero, (unsigned)cells,
+                 (unsigned long)sum);
+}
+
+void Mg4Battery::render_sleep_html(String& html) {
+  char buf[96];
+  html += "<h3>Power state</h3>";
+  switch (contactorState) {
+    case ContactorState::SHUTTING_DOWN:
+      if (shutdown_phase == ShutdownPhase::HOLD) {
+        const int16_t dA = datalayer.battery.status.current_dA;
+        const unsigned abs_dA = (unsigned)(dA < 0 ? -dA : dA);
+        snprintf(buf, sizeof(buf), "Shutting down: waiting for zero current (%s%u.%u A)", dA < 0 ? "-" : "",
+                 abs_dA / 10, abs_dA % 10);
+        html += buf;
+      } else if (shutdown_phase == ShutdownPhase::REQUEST_OPEN) {
+        html += "Shutting down: waiting for the pack to open";
+      } else {
+        html += "Shutting down: pack open, going silent";
+      }
+      break;
+    case ContactorState::SLEEPING: {
+      const unsigned long s = (last_tick_ms - sleep_start_ms) / 1000;
+      snprintf(buf, sizeof(buf), "Sleeping for %lu:%02lu:%02lu, ", s / 3600, (s / 60) % 60, s % 60);
+      html += buf;
+      if (sleep_ever_silent) {
+        snprintf(buf, sizeof(buf), "BMS went silent %lu.%lus after sleep began, %u self-wakes%s",
+                 sleep_silent_after_ms / 1000, (sleep_silent_after_ms % 1000) / 100, (unsigned)sleep_self_wakes,
+                 sleep_bms_silent ? "" : " (transmitting now)");
+        html += buf;
+      } else {
+        html += "BMS still transmitting";
+      }
+      break;
+    }
+    case ContactorState::WAKING:
+      html += "Waking: waiting for the BMS";
+      break;
+    default:
+      html += "Awake";
+      break;
+  }
+  html += " (pack contactors: ";
+  html += pack_contactors.label();
+  html += ")";
+  if (sleep_abort_reason) {
+    html += "<br>Last sleep attempt aborted: ";
+    html += sleep_abort_reason;
+  }
+}
+
+void Mg4Battery::render_balancing_html(String& html) {
+  char buf[48];
+  uint16_t seen = 0;
+  uint16_t nonzero = 0;
+  uint16_t max_demand = 0;
+  for (uint8_t i = 0; i < BAL_MAX_CELLS; i++) {
+    if (bal_demand[i] == BAL_NOT_SEEN) {
+      continue;
+    }
+    seen++;
+    if (bal_demand[i] != 0) {
+      nonzero++;
+      if (bal_demand[i] > max_demand) {
+        max_demand = bal_demand[i];
+      }
+    }
+  }
+
+  html += "<h3>Cell balancing demand (0x689, raw)</h3>";
+  snprintf(buf, sizeof(buf), "%u/%u cells reported, %u non-zero", (unsigned)seen,
+           (unsigned)datalayer.battery.info.number_of_cells, (unsigned)nonzero);
+  html += buf;
+  if (nonzero == 0) {
+    html += "<br>";
+    return;
+  }
+  snprintf(buf, sizeof(buf), ", max %u", (unsigned)max_demand);
+  html += buf;
+  if (bal_have_sum) {
+    snprintf(buf, sizeof(buf), ", last full sweep sum %lu", (unsigned long)bal_last_sum);
+    html += buf;
+  }
+
+  // Only the non-zero cells are listed, as "cell: value", flowing into columns.
+  html += "<div style='columns: 4 120px; font-family: monospace;'>";
+  for (uint8_t i = 0; i < BAL_MAX_CELLS; i++) {
+    if (bal_demand[i] == BAL_NOT_SEEN || bal_demand[i] == 0) {
+      continue;
+    }
+    snprintf(buf, sizeof(buf), "%u: %u<br>", (unsigned)(i + 1), (unsigned)bal_demand[i]);
+    html += buf;
+  }
+  html += "</div>";
 }
 
 void Mg4Battery::render_did_sweep_html(String& html) {

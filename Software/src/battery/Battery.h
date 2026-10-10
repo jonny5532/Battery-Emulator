@@ -64,7 +64,7 @@ enum class BatteryType {
   GrowattLv = 57,
   StellantisProOne = 58,
   BYDBatteryBoxPremium = 59,
-  Mg4 = 96, // FIXME: order properly later
+  Mg4 = 96,  // FIXME: order properly later
   Highest
 };
 
@@ -127,6 +127,10 @@ class Battery {
   // visible (instead of a single toggle). Used by batteries where balancing is a latching request.
   virtual bool supports_balancing_request() { return false; }
   virtual bool supports_isolation_test() { return false; }
+  // Shut the pack down and stop all CAN traffic to it so the BMS can sleep, until woken again.
+  // is_sleeping() is true from the sleep request until woken, and picks which button is shown.
+  virtual bool supports_sleep() { return false; }
+  virtual bool is_sleeping() { return false; }
 
   virtual void request_isolation_test() {}
   virtual void clear_isolation() {}
@@ -152,6 +156,8 @@ class Battery {
   virtual void chademo_stop() {}
 #endif  // SMALL_FLASH_DEVICE
   virtual void initiate_balancing() {}
+  virtual void request_sleep() {}
+  virtual void request_wake() {}
   virtual void end_balancing() {}
   virtual void handle_precharge() {}
   virtual void action(uint32_t action_id, uint32_t value) {}

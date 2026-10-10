@@ -12,6 +12,9 @@ const std::vector<CAN_frame>& get_transmitted_frames();
 // Testable subclass exposing protected contactor/identification state.
 class TestableMg4Battery : public Mg4Battery {
  public:
+  using Mg4Battery::bal_demand;
+  using Mg4Battery::bal_have_sum;
+  using Mg4Battery::bal_last_sum;
   using Mg4Battery::batteryIdentified;
   using Mg4Battery::contactorState;
   using Mg4Battery::did_sweep_answered;
@@ -30,7 +33,19 @@ class TestableMg4Battery : public Mg4Battery {
   using Mg4Battery::seq_314_hi;
   using Mg4Battery::seq_314_val;
   using Mg4Battery::seq_cnt15;
+  using Mg4Battery::SHUTDOWN_HOLD_MAX_T;
+  using Mg4Battery::SHUTDOWN_HOLD_T;
+  using Mg4Battery::SHUTDOWN_LEVEL_T;
+  using Mg4Battery::SHUTDOWN_OPEN_HOLD_T;
+  using Mg4Battery::SHUTDOWN_OPEN_TIMEOUT_T;
+  using Mg4Battery::shutdown_phase;
+  using Mg4Battery::ShutdownPhase;
+  using Mg4Battery::sleep_abort_reason;
+  using Mg4Battery::sleep_self_wakes;
+  using Mg4Battery::SNAP_ABSORB_MAX_S;
+  using Mg4Battery::SNAP_OVER_S;
   using Mg4Battery::snapEnded;
+  using Mg4Battery::WAKE_REQ03_T;
 };
 
 class Mg4BatteryTest : public ::testing::Test {
@@ -162,11 +177,59 @@ class Mg4BatteryTest : public ::testing::Test {
     battery->handle_incoming_can_frame(frame);
   }
 
+  // Inject a captured CAN FD frame given as hex payload bytes.
+  void send_fd_hex(uint32_t id, const char* hex) {
+    CAN_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.ID = id;
+    frame.FD = true;
+    frame.DLC = (uint8_t)(strlen(hex) / 2);
+    for (int b = 0; b < frame.DLC; b++) {
+      unsigned v = 0;
+      sscanf(hex + 2 * b, "%2x", &v);
+      frame.data.u8[b] = (uint8_t)v;
+    }
+    battery->handle_incoming_can_frame(frame);
+  }
+
+  // Inject a 0x17E BMS power limit frame, limits in 0.5kW counts (0x7FF =
+  // invalid). Laid out like the captures: 0x503, 0x504 and 0x564 subframes.
+  void send_17e(uint16_t dis_counts, uint16_t chg_counts) {
+    CAN_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.ID = 0x17E;
+    frame.FD = true;
+    frame.DLC = 48;
+    const uint8_t addrs[3] = {0x03, 0x04, 0x64};
+    for (int k = 0; k < 3; k++) {
+      frame.data.u8[k * 12 + 1] = 0x05;
+      frame.data.u8[k * 12 + 2] = addrs[k];
+      frame.data.u8[k * 12 + 3] = 8;
+    }
+    // 0x503: two copies of the discharge limit, packed from sub[2] bit 7.
+    uint8_t* d = &frame.data.u8[4];
+    d[2] = (uint8_t)(dis_counts >> 3);
+    d[3] = (uint8_t)(((dis_counts & 0x07) << 5) | (dis_counts >> 6));
+    d[4] = (uint8_t)((dis_counts & 0x3F) << 2);
+    // 0x504: two copies of the charge limit, packed from sub[4] bit 5.
+    uint8_t* c = &frame.data.u8[16];
+    c[4] = (uint8_t)(chg_counts >> 5);
+    c[5] = (uint8_t)(((chg_counts & 0x1F) << 3) | (chg_counts >> 8));
+    c[6] = (uint8_t)(chg_counts & 0xFF);
+    battery->handle_incoming_can_frame(frame);
+  }
+
+  // BMS limits sent by tick_1s(), in 0.5kW counts. Defaults sit well above
+  // the hard caps (200kW / 60kW, as captured mid-SoC) so they don't bind.
+  uint16_t bms_dis_counts = 400;
+  uint16_t bms_chg_counts = 120;
+
   // One simulated second: fresh CAN data then the 1Hz update tick.
   void tick_1s(uint16_t cell_max_mV, uint16_t cell_min_mV, int16_t current_dA, uint16_t voltage_dV,
-               uint16_t soc_times_ten = 970) {
-    send_12c(cell_max_mV, cell_min_mV, current_dA, voltage_dV);
+               uint16_t soc_times_ten = 970, int16_t temp_dC = 250) {
+    send_12c(cell_max_mV, cell_min_mV, current_dA, voltage_dV, temp_dC);
     send_15b_fd(7, soc_times_ten);
+    send_17e(bms_dis_counts, bms_chg_counts);
     battery->update_values();
   }
 
@@ -609,6 +672,7 @@ TEST_F(Mg4BatteryTest, StaleCellVoltagesReleaseSnapForce) {
   // out, so the forced 100% releases back to the BMS SoC and power fails closed.
   for (int i = 0; i < 10; i++) {
     send_15b_fd(7, 970);
+    send_17e(bms_dis_counts, bms_chg_counts);
     battery->update_values();
   }
   send_15b_fd(7, 970);
@@ -625,28 +689,31 @@ TEST_F(Mg4BatteryTest, SnapEndedTapersToAbsorbVoltage) {
   // At or above SNAP_ABSORB_MV the working max is tripped: no charge at all,
   // rather than trickling on up to 3750mV.
   EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
-  // Falling back: released at the hysteresis point, then a linear taper over
-  // 3600-3650mV. The 100% SoC hold only affects reporting, not charge power.
+  // Falling back: released at the hysteresis point, then a linear taper from
+  // the 30kW hard cap over 3600-3650mV. The 100% SoC hold only affects
+  // reporting, not charge power.
   tick_1s(3640, 3620, 0, 3780, 970);
   EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
-  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 2800u);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 6000u);
   tick_1s(3620, 3600, 0, 3760, 970);
-  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 8400u);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 18000u);
   EXPECT_TRUE(battery->snapEnded);
 }
 
-TEST_F(Mg4BatteryTest, LfpChargeIgnoresBmsSoc) {
+TEST_F(Mg4BatteryTest, ChargeNotDeratedByReportedSoc) {
+  // No SoC-based derating of our own on either chemistry: a 100% SoC on
+  // 0x15B leaves the full hard cap, and only the 0x17E limit can cut it.
   identify_as_51kwh_lfp();
-  // BMS drifted high: reports 100% well below the knee. LFP charge must not
-  // be throttled to a trickle; the cell voltage limits decide when it's full.
   tick_1s(3400, 3390, 100, 3540, 1000);
-  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 14000u);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 30000u);
 }
 
-TEST_F(Mg4BatteryTest, NmcChargeStillDeratesBySoc) {
+TEST_F(Mg4BatteryTest, NmcChargeFollowsBmsLimitNearFull) {
+  // Captured NMC-style top of charge: the BMS tapers to 4.5kW at 100%.
   identify_as_64kwh_nmc();
+  bms_chg_counts = 9;
   tick_1s(4000, 3990, 100, 4100, 1000);
-  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 100u);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 4500u);
 }
 
 TEST_F(Mg4BatteryTest, SnapEndsOnTaperCurrentAndForcesSoc) {
@@ -737,25 +804,40 @@ TEST_F(Mg4BatteryTest, SnapIgnoredForNmc) {
   EXPECT_EQ(datalayer.battery.status.real_soc, 9000);
 }
 
-TEST_F(Mg4BatteryTest, SnapLowTempOverrulesSnapClamp) {
+TEST_F(Mg4BatteryTest, SnapGivesUpWhenCold) {
   identify_as_51kwh_lfp();
   warmup_bulk();
-  // Absorption conditions that would normally allow ~5A: at -10C the LFP
-  // low-temp derate must hold charge at 0 instead.
-  send_12c(3700, 3650, 50, 3800, -100);
-  send_15b_fd(7, 970);
-  battery->update_values();
-  EXPECT_FALSE(battery->snapEnded);
-  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
-  // Even once the 30s overvoltage timer ends the snap, cold must still win
-  // over both the snap clamp and the post-snap taper.
-  for (int i = 0; i < 30; i++) {
-    send_12c(3755, 3700, 50, 3850, -100);
-    send_15b_fd(7, 970);
-    battery->update_values();
-  }
+  // Reaching absorption at exactly 5C: outside the window, so give up rather
+  // than clamp, and the post-snap taper (tripped at 3700mV) allows nothing.
+  tick_1s(3700, 3650, 50, 3800, 970, 50);
   EXPECT_TRUE(battery->snapEnded);
-  EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+}
+
+TEST_F(Mg4BatteryTest, SnapColdBeforeAbsorptionStillAttempts) {
+  // Cold while still in bulk doesn't count against the attempt: the pack
+  // warms up during the charge and snaps once it reaches absorption.
+  identify_as_51kwh_lfp();
+  for (int i = 0; i < 60; i++) {
+    tick_1s(3500, 3490, 100, 3600, 500, 20);
+  }
+  EXPECT_FALSE(battery->snapEnded);
+  tick_1s(3700, 3650, 50, 3800, 970, 200);
+  EXPECT_FALSE(battery->snapEnded);
+  EXPECT_GE(datalayer.battery.status.max_charge_power_W, 1500u);
+  EXPECT_LE(datalayer.battery.status.max_charge_power_W, 2000u);
+}
+
+TEST_F(Mg4BatteryTest, SnapGivesUpWhenHotMidAbsorption) {
+  identify_as_51kwh_lfp();
+  warmup_bulk();
+  bms_chg_counts = 0;
+  tick_1s(3700, 3650, 50, 3800, 893, 440);
+  ASSERT_FALSE(battery->snapEnded);
+  ASSERT_GE(datalayer.battery.status.max_charge_power_W, 1500u);
+  // Reaching 45C ends the attempt, and with it the override of the BMS's 0.
+  tick_1s(3700, 3650, 50, 3800, 893, 450);
+  EXPECT_TRUE(battery->snapEnded);
   EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
 }
 
@@ -778,6 +860,542 @@ TEST_F(Mg4BatteryTest, SnapSkippedWhenSocAlreadyHigh) {
   tick_1s(3700, 3650, 100, 3800, 980);
   EXPECT_TRUE(battery->snapEnded);
   EXPECT_EQ(datalayer.battery.status.real_soc, 10000);
+}
+
+// ---- Sleep / wake ----
+
+using CS = Mg4Battery::ContactorState;
+
+// 0x08A request / flag / level as transmitted (full-frame bytes 19, 20, 30).
+struct Sig08a {
+  uint8_t request;
+  uint8_t flag;
+  uint8_t level;
+  bool operator==(const Sig08a& o) const { return request == o.request && flag == o.flag && level == o.level; }
+};
+
+static std::vector<Sig08a> sent_08a() {
+  std::vector<Sig08a> out;
+  for (const auto& f : get_transmitted_frames()) {
+    if (f.ID == 0x08A) {
+      out.push_back({f.data.u8[19], f.data.u8[20], f.data.u8[30]});
+    }
+  }
+  return out;
+}
+
+class Mg4SleepTest : public Mg4BatteryTest {
+ protected:
+  // Identified pack, closed, idle (0A), with fresh limits.
+  void close_pack(int16_t current_dA = 0) {
+    identify_as_64kwh_nmc();
+    send_12c(3800, 3790, current_dA, 3900);
+    send_15b_fd(7);
+    step_10ms(3);
+    ASSERT_EQ(battery->contactorState, CS::CLOSED);
+  }
+
+  // Run a full graceful shutdown from closed into SLEEPING.
+  void sleep_pack() {
+    close_pack();
+    battery->request_sleep();
+    step_10ms(TestableMg4Battery::SHUTDOWN_HOLD_T + 1);
+    ASSERT_EQ(battery->shutdown_phase, TestableMg4Battery::ShutdownPhase::REQUEST_OPEN);
+    send_15b_fd(3);
+    step_10ms(TestableMg4Battery::SHUTDOWN_OPEN_HOLD_T + 1);
+    ASSERT_EQ(battery->contactorState, CS::SLEEPING);
+  }
+
+  std::string info_html() { return battery->get_uds_info_html().c_str(); }
+
+  // One 0x689 slot 0x0D frame reporting `value` for 1-based `cell`.
+  void send_689_cell(uint8_t cell, uint16_t value) {
+    CAN_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.ID = 0x689;
+    frame.FD = true;
+    frame.DLC = 12;
+    frame.data.u8[1] = 0x06;
+    frame.data.u8[2] = 0x89;
+    frame.data.u8[3] = 8;
+    uint8_t* sub = &frame.data.u8[4];
+    sub[0] = 0x92;
+    sub[1] = 0x0D;
+    sub[2] = (uint8_t)(value >> 8);
+    sub[3] = (uint8_t)value;
+    sub[6] = cell;
+    battery->handle_incoming_can_frame(frame);
+  }
+};
+
+TEST_F(Mg4SleepTest, ShutdownFollowsCarSequence) {
+  close_pack();
+  datalayer.battery.status.max_charge_power_W = 5000;
+  datalayer.battery.status.max_discharge_power_W = 5000;
+  clear_transmitted_frames();
+  battery->request_sleep();
+  EXPECT_TRUE(battery->is_sleeping());
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::SHUTTING_DOWN);
+  // Step 0: limits forced to 0 straight away.
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 0u);
+
+  // Pack stays closed for a while after the open request.
+  step_10ms(TestableMg4Battery::SHUTDOWN_HOLD_T + 49);
+  send_15b_fd(3);
+  step_10ms(2);
+  EXPECT_EQ(battery->shutdown_phase, TestableMg4Battery::ShutdownPhase::OPEN_HOLD);
+
+  const auto sig = sent_08a();
+  const uint32_t hold = TestableMg4Battery::SHUTDOWN_HOLD_T;
+  const uint32_t lvl = TestableMg4Battery::SHUTDOWN_LEVEL_T;
+  ASSERT_GE(sig.size(), hold + 52);
+  // 0.2s of request 0x01 at level 0x40, then level 0x20 to the end of the 6.0s hold.
+  for (uint32_t i = 0; i < lvl; i++) {
+    EXPECT_EQ(sig[i], (Sig08a{0x01, 0x00, 0x40})) << i;
+  }
+  for (uint32_t i = lvl; i < hold; i++) {
+    EXPECT_EQ(sig[i], (Sig08a{0x01, 0x00, 0x20})) << i;
+  }
+  // Request open at level 0x20 until the pack reports open, then level 0x00.
+  for (uint32_t i = hold; i < hold + 50; i++) {
+    EXPECT_EQ(sig[i], (Sig08a{0x00, 0x00, 0x20})) << i;
+  }
+  EXPECT_EQ(sig[hold + 50], (Sig08a{0x00, 0x00, 0x00}));
+  EXPECT_EQ(sig.back(), (Sig08a{0x00, 0x00, 0x00}));
+
+  // ~2s of the open levels, then silence.
+  step_10ms(TestableMg4Battery::SHUTDOWN_OPEN_HOLD_T);
+  EXPECT_EQ(battery->contactorState, CS::SLEEPING);
+  EXPECT_EQ(battery->sleep_abort_reason, nullptr);
+}
+
+TEST_F(Mg4SleepTest, SleepingTransmitsNothing) {
+  sleep_pack();
+  clear_transmitted_frames();
+  // 100s, long enough for UDS polling, the DID sweep and 0x4F3 to have fired.
+  step_10ms(10000);
+  EXPECT_TRUE(get_transmitted_frames().empty());
+  EXPECT_EQ(battery->contactorState, CS::SLEEPING);
+  EXPECT_TRUE(battery->is_sleeping());
+}
+
+TEST_F(Mg4SleepTest, SleepStandsInForSilentBms) {
+  sleep_pack();
+  // The BMS goes quiet: no 0x12C refreshes the liveness counter, but the
+  // driver must hold it up so the safety layer doesn't fault the system.
+  for (int i = 0; i < 120; i++) {
+    datalayer.battery.status.CAN_battery_still_alive = 0;
+    battery->update_values();
+    EXPECT_EQ(datalayer.battery.status.CAN_battery_still_alive, CAN_STILL_ALIVE);
+  }
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 0u);
+}
+
+TEST_F(Mg4SleepTest, LimitsStayZeroThroughShutdownWithFreshData) {
+  close_pack();
+  battery->request_sleep();
+  step_10ms(1);
+  // Fresh, healthy BMS data must not bring power back mid-shutdown.
+  tick_1s(3800, 3790, 0, 3900, 500);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 0u);
+}
+
+TEST_F(Mg4SleepTest, ShutdownWaitsForZeroCurrent) {
+  close_pack(50);  // 5A still flowing
+  battery->request_sleep();
+  step_10ms(TestableMg4Battery::SHUTDOWN_HOLD_T + 100);
+  EXPECT_EQ(battery->shutdown_phase, TestableMg4Battery::ShutdownPhase::HOLD);
+  EXPECT_NE(info_html().find("Shutting down: waiting for zero current (5.0 A)"), std::string::npos);
+  // The load goes away: request open on the next tick.
+  send_12c(3800, 3790, 5, 3900);
+  step_10ms(1);
+  EXPECT_EQ(battery->shutdown_phase, TestableMg4Battery::ShutdownPhase::REQUEST_OPEN);
+}
+
+TEST_F(Mg4SleepTest, ShutdownCancelsRatherThanOpenUnderLoad) {
+  close_pack(-50);  // 5A discharge that never stops
+  clear_transmitted_frames();
+  battery->request_sleep();
+  step_10ms(TestableMg4Battery::SHUTDOWN_HOLD_MAX_T + 5);
+  // Back to normal operation, closed, without ever requesting open.
+  EXPECT_EQ(battery->contactorState, CS::CLOSED);
+  for (const auto& sig : sent_08a()) {
+    EXPECT_NE(sig.request, 0x00);
+  }
+  EXPECT_FALSE(battery->is_sleeping());
+  EXPECT_NE(info_html().find("Last sleep attempt aborted: current did not fall below 1A"), std::string::npos);
+}
+
+TEST_F(Mg4SleepTest, StaleCurrentNeverCountsAsIdle) {
+  close_pack();
+  battery->request_sleep();
+  step_10ms(1);
+  // 0x12C stops: its 0A reading ages out and can't be trusted to open on.
+  for (int i = 0; i < 10; i++) {
+    battery->update_values();
+  }
+  step_10ms(TestableMg4Battery::SHUTDOWN_HOLD_T);
+  EXPECT_EQ(battery->shutdown_phase, TestableMg4Battery::ShutdownPhase::HOLD);
+}
+
+TEST_F(Mg4SleepTest, FaultDuringShutdownOpensImmediately) {
+  close_pack();
+  battery->request_sleep();
+  step_10ms(100);
+  ASSERT_EQ(battery->shutdown_phase, TestableMg4Battery::ShutdownPhase::HOLD);
+  clear_transmitted_frames();
+  datalayer.system.status.system_status = FAULT;
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::OPENING);
+  ASSERT_FALSE(sent_08a().empty());
+  EXPECT_EQ(sent_08a().front(), (Sig08a{0x00, 0x00, 0x00}));
+  EXPECT_NE(info_html().find("Last sleep attempt aborted: fault"), std::string::npos);
+}
+
+TEST_F(Mg4SleepTest, PackNotOpeningFallsBackToHardOpen) {
+  close_pack();
+  battery->request_sleep();
+  step_10ms(TestableMg4Battery::SHUTDOWN_HOLD_T + 1);
+  ASSERT_EQ(battery->shutdown_phase, TestableMg4Battery::ShutdownPhase::REQUEST_OPEN);
+  EXPECT_NE(info_html().find("Shutting down: waiting for the pack to open"), std::string::npos);
+  step_10ms(TestableMg4Battery::SHUTDOWN_OPEN_TIMEOUT_T - 2);
+  EXPECT_EQ(battery->contactorState, CS::SHUTTING_DOWN);
+  step_10ms(2);
+  EXPECT_EQ(battery->contactorState, CS::OPENING);
+  EXPECT_NE(info_html().find("pack did not report open"), std::string::npos);
+}
+
+TEST_F(Mg4SleepTest, WakeDuringHoldCancelsShutdown) {
+  close_pack();
+  clear_transmitted_frames();
+  battery->request_sleep();
+  step_10ms(100);
+  battery->request_wake();
+  step_10ms(5);
+  EXPECT_EQ(battery->contactorState, CS::CLOSED);
+  for (const auto& sig : sent_08a()) {
+    EXPECT_NE(sig.request, 0x00);
+  }
+}
+
+TEST_F(Mg4SleepTest, SleepFromOpenPackSkipsToSilence) {
+  identify_as_64kwh_nmc();
+  send_15b_fd(3);
+  step_10ms(3);
+  ASSERT_EQ(battery->contactorState, CS::CLOSING);
+  send_15b_fd(3);
+  datalayer.system.status.system_status = FAULT;
+  step_10ms(1);
+  ASSERT_EQ(battery->contactorState, CS::OPENING);
+  // Already open (held open by a fault): straight to the open hold. The
+  // fault doesn't stop an already-open pack from going to sleep.
+  battery->request_sleep();
+  step_10ms(1);
+  EXPECT_EQ(battery->shutdown_phase, TestableMg4Battery::ShutdownPhase::OPEN_HOLD);
+  step_10ms(TestableMg4Battery::SHUTDOWN_OPEN_HOLD_T);
+  EXPECT_EQ(battery->contactorState, CS::SLEEPING);
+}
+
+TEST_F(Mg4SleepTest, WakeRunsPowerUpPatternThenCloses) {
+  sleep_pack();
+  clear_transmitted_frames();
+  battery->request_wake();
+  EXPECT_TRUE(battery->is_sleeping());
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::WAKING);
+  EXPECT_FALSE(battery->is_sleeping());
+  step_10ms(TestableMg4Battery::WAKE_REQ03_T + 50);
+  // No fresh 0x15B yet: keep waking (and transmitting).
+  EXPECT_EQ(battery->contactorState, CS::WAKING);
+  EXPECT_NE(info_html().find("Waking: waiting for the BMS"), std::string::npos);
+
+  const auto sig = sent_08a();
+  ASSERT_GE(sig.size(), (size_t)TestableMg4Battery::WAKE_REQ03_T + 1);
+  EXPECT_EQ(sig[0], (Sig08a{0x03, 0x04, 0x00}));
+  for (uint32_t i = 1; i < TestableMg4Battery::WAKE_REQ03_T; i++) {
+    EXPECT_EQ(sig[i], (Sig08a{0x03, 0x00, 0x00})) << i;
+  }
+  EXPECT_EQ(sig[TestableMg4Battery::WAKE_REQ03_T], (Sig08a{0x00, 0x00, 0x00}));
+  bool sent_4f3 = false;
+  for (const auto& f : get_transmitted_frames()) {
+    sent_4f3 |= f.ID == 0x4F3;
+  }
+  EXPECT_TRUE(sent_4f3);
+
+  // The BMS reports in: normal flow takes over and closes the pack.
+  send_15b_fd(3);
+  step_10ms(3);
+  EXPECT_EQ(battery->contactorState, CS::CLOSING);
+  send_15b_fd(7);
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::CLOSED);
+  tick_1s(3800, 3790, 0, 3900, 500);
+  EXPECT_GT(datalayer.battery.status.max_charge_power_W, 0u);
+}
+
+TEST_F(Mg4SleepTest, TracksBmsSilenceAndSelfWakes) {
+  sleep_pack();
+  EXPECT_NE(info_html().find("BMS still transmitting"), std::string::npos);
+  step_10ms(600);
+  std::string html = info_html();
+  EXPECT_NE(html.find("Sleeping for 0:00:06"), std::string::npos);
+  EXPECT_NE(html.find("BMS went silent"), std::string::npos);
+  EXPECT_NE(html.find("0 self-wakes"), std::string::npos);
+  // A frame out of the blue is a self-wake, and is never answered.
+  clear_transmitted_frames();
+  send_12c(3800, 3790, 0, 3900);
+  step_10ms(10);
+  EXPECT_EQ(battery->sleep_self_wakes, 1);
+  EXPECT_TRUE(get_transmitted_frames().empty());
+  EXPECT_NE(info_html().find("1 self-wakes (transmitting now)"), std::string::npos);
+}
+
+TEST_F(Mg4SleepTest, InfoPageShowsAwake) {
+  close_pack();
+  EXPECT_NE(info_html().find("<h3>Power state</h3>Awake (pack contactors: Closed)"), std::string::npos);
+  EXPECT_FALSE(battery->is_sleeping());
+}
+
+TEST_F(Mg4SleepTest, BalancingSweepSummedAndResetOnWake) {
+  identify_as_64kwh_nmc();
+  const uint8_t cells = datalayer.battery.info.number_of_cells;
+  ASSERT_GT(cells, 0);
+  // Join mid-sweep: the partial first sweep doesn't count.
+  for (uint8_t c = cells / 2; c <= cells; c++) {
+    send_689_cell(c, c == cells ? 7 : 0);
+  }
+  send_689_cell(1, 0);
+  EXPECT_FALSE(battery->bal_have_sum);
+  // A full sweep, repeating each cell as the BMS does, ending on the wrap.
+  for (uint8_t c = 1; c <= cells; c++) {
+    send_689_cell(c, c == 3 ? 100 : (c == 10 ? 23 : 0));
+    send_689_cell(c, c == 3 ? 100 : (c == 10 ? 23 : 0));
+  }
+  send_689_cell(1, 0);
+  EXPECT_TRUE(battery->bal_have_sum);
+  EXPECT_EQ(battery->bal_last_sum, 123u);
+  EXPECT_NE(info_html().find("last full sweep sum 123"), std::string::npos);
+
+  // Waking marks every cell not-seen again.
+  send_12c(3800, 3790, 0, 3900);
+  send_15b_fd(7);
+  step_10ms(3);
+  battery->request_sleep();
+  step_10ms(TestableMg4Battery::SHUTDOWN_HOLD_T + 1);
+  send_15b_fd(3);
+  step_10ms(TestableMg4Battery::SHUTDOWN_OPEN_HOLD_T + 1);
+  ASSERT_EQ(battery->contactorState, CS::SLEEPING);
+  battery->request_wake();
+  step_10ms(1);
+  EXPECT_FALSE(battery->bal_have_sum);
+  for (uint8_t i = 0; i < cells; i++) {
+    EXPECT_EQ(battery->bal_demand[i], 0xFFFF);  // BAL_NOT_SEEN
+  }
+}
+
+// ---- BMS power limits (0x17E) ----
+
+// Captured 0x17E payloads (CAN FD flags nibble stripped).
+// 97-100-with-balance.log, 97.8% SoC charging at ~9A: discharge 189.5kW, charge 7.5kW.
+static const char* CAP_17E_NEAR_FULL =
+    "0005030800002F65EE1CC80000050408000071FA80780F000005640800000000000000D4000000000000000000000000";
+// mg4-canlog-replay-contactors-closing.log, first frame after wake: both limits 0x7FF.
+static const char* CAP_17E_STARTUP =
+    "0005030800F0FFFFFFFFFF000005040800F0FFFFFFFFFF00000564080000000000000FFF000000000000000000000000";
+// 0-100.log at 0% SoC: discharge 0kW, charge 253kW.
+static const char* CAP_17E_EMPTY =
+    "00050308000000000000C700000504080000C8398FD1FA0000056408000000000000005C000000000000000000000000";
+
+TEST_F(Mg4BatteryTest, DecodesCapturedBmsLimits) {
+  identify_as_51kwh_lfp();
+  send_12c(3370, 3360, 90, 3500);
+  send_15b_fd(7, 978);
+  send_fd_hex(0x17E, CAP_17E_NEAR_FULL);
+  battery->update_values();
+  // Charge follows the BMS's 7.5kW; discharge is held to our 30kW hard cap.
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 7500u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 30000u);
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("BMS limits: charge 7.5 kW, discharge 189.5 kW"), std::string::npos);
+}
+
+TEST_F(Mg4BatteryTest, CapturedStartupLimitsFailClosed) {
+  identify_as_51kwh_lfp();
+  send_12c(3370, 3360, 0, 3500);
+  send_15b_fd(3, 500);
+  send_fd_hex(0x17E, CAP_17E_STARTUP);
+  battery->update_values();
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 0u);
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("BMS limits: N/A"), std::string::npos);
+}
+
+TEST_F(Mg4BatteryTest, CapturedEmptyPackBlocksDischarge) {
+  identify_as_51kwh_lfp();
+  send_12c(3110, 2960, 0, 3180);
+  send_15b_fd(7, 0);
+  send_fd_hex(0x17E, CAP_17E_EMPTY);
+  battery->update_values();
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 0u);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 30000u);
+}
+
+TEST_F(Mg4BatteryTest, BmsLimitsCapBothDirections) {
+  identify_as_64kwh_nmc();
+  bms_dis_counts = 20;  // 10kW
+  bms_chg_counts = 9;   // 4.5kW
+  tick_1s(3800, 3790, 0, 3900, 500);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 10000u);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 4500u);
+  // BMS stops charge entirely (seen at 100% in 95-100-with-trickle.log).
+  bms_chg_counts = 0;
+  tick_1s(3800, 3790, 0, 3900, 500);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 10000u);
+}
+
+TEST_F(Mg4BatteryTest, BmsLimitsAgeOut) {
+  identify_as_64kwh_nmc();
+  tick_1s(3800, 3790, 0, 3900, 500);
+  ASSERT_EQ(datalayer.battery.status.max_charge_power_W, 30000u);
+  // 0x12C/0x15B keep arriving but 0x17E stops: power holds for the 10s
+  // freshness window, then fails closed.
+  for (int i = 0; i < 8; i++) {
+    send_12c(3800, 3790, 0, 3900);
+    send_15b_fd(7, 500);
+    battery->update_values();
+  }
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 30000u);
+  send_12c(3800, 3790, 0, 3900);
+  send_15b_fd(7, 500);
+  battery->update_values();
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 0u);
+}
+
+TEST_F(Mg4BatteryTest, BmsFrameWithOneInvalidLimitIsIgnored) {
+  identify_as_64kwh_nmc();
+  bms_dis_counts = 20;
+  bms_chg_counts = 30;
+  tick_1s(3800, 3790, 0, 3900, 500);
+  ASSERT_EQ(datalayer.battery.status.max_charge_power_W, 15000u);
+  // Half-valid frame: neither limit is taken from it.
+  send_17e(0x7FF, 4);
+  battery->update_values();
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 15000u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 10000u);
+}
+
+TEST_F(Mg4BatteryTest, BmsFrameMissingChargeSubframeIsIgnored) {
+  identify_as_64kwh_nmc();
+  send_12c(3800, 3790, 0, 3900);
+  send_15b_fd(7, 500);
+  // Only the 0x503 (discharge) subframe of the near-full capture.
+  char hex[25] = {0};
+  memcpy(hex, CAP_17E_NEAR_FULL, 24);
+  send_fd_hex(0x17E, hex);
+  battery->update_values();
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 0u);
+}
+
+TEST_F(Mg4BatteryTest, SnapClampOverridesBmsChargeCut) {
+  // snap.log: the BMS drops its charge limit from ~58kW straight to 0 once
+  // the highest cell reaches 3700mV, short of SNAP_OVER_MV. The snap's 5A
+  // clamp must keep charging through that, then defer to the BMS once done.
+  identify_as_51kwh_lfp();
+  warmup_bulk();
+  bms_chg_counts = 0;
+  tick_1s(3700, 3650, 50, 3800, 893);
+  ASSERT_FALSE(battery->snapEnded);
+  EXPECT_LE(datalayer.battery.status.max_charge_power_W, 2000u);
+  EXPECT_GE(datalayer.battery.status.max_charge_power_W, 1500u);
+  // BMS recalibrates its SoC: the snap succeeds and its 0 limit applies again.
+  tick_1s(3750, 3650, 50, 3800, 1000);
+  EXPECT_TRUE(battery->snapEnded);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+}
+
+TEST_F(Mg4BatteryTest, SnapClampDoesNotOverrideBmsBeforeAbsorption) {
+  identify_as_51kwh_lfp();
+  warmup_bulk();
+  bms_chg_counts = 0;
+  tick_1s(3640, 3600, 50, 3780, 893);
+  EXPECT_FALSE(battery->snapEnded);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+}
+
+TEST_F(Mg4BatteryTest, SnapOverridesBmsOnlyNearTheCliff) {
+  // In latched absorption but below SNAP_BMS_OVERRIDE_MV, a BMS cut is for
+  // some other reason and must be respected; from there on the clamp wins.
+  identify_as_51kwh_lfp();
+  warmup_bulk();
+  tick_1s(3660, 3640, 50, 3790, 893);
+  ASSERT_FALSE(battery->snapEnded);
+  ASSERT_GE(datalayer.battery.status.max_charge_power_W, 1500u);
+  bms_chg_counts = 0;
+  tick_1s(3679, 3640, 50, 3790, 893);
+  EXPECT_FALSE(battery->snapEnded);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  tick_1s(3680, 3640, 50, 3790, 893);
+  EXPECT_FALSE(battery->snapEnded);
+  EXPECT_GE(datalayer.battery.status.max_charge_power_W, 1500u);
+  EXPECT_LE(datalayer.battery.status.max_charge_power_W, 2000u);
+}
+
+TEST_F(Mg4BatteryTest, SnapGivesUpAfterAbsorbTimeout) {
+  // Hovering just under SNAP_OVER_MV at 5A (as in snap.log, at 3748-3749mV):
+  // neither the over-voltage timer nor the min-current exit fires, so the
+  // absorption timeout must end the override.
+  identify_as_51kwh_lfp();
+  warmup_bulk();
+  bms_chg_counts = 0;
+  for (int i = 0; i < TestableMg4Battery::SNAP_ABSORB_MAX_S - 1; i++) {
+    tick_1s(3749, 3650, 50, 3800, 893);
+  }
+  EXPECT_FALSE(battery->snapEnded);
+  EXPECT_GE(datalayer.battery.status.max_charge_power_W, 1500u);
+  tick_1s(3749, 3650, 50, 3800, 893);
+  EXPECT_TRUE(battery->snapEnded);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+}
+
+TEST_F(Mg4BatteryTest, SnapOverTimerNotRestartedByDips) {
+  identify_as_51kwh_lfp();
+  warmup_bulk();
+  bms_chg_counts = 0;
+  // First reach SNAP_OVER_MV, then sag back under it: the timer keeps running.
+  tick_1s(3755, 3700, 50, 3850, 893);
+  for (int i = 0; i < TestableMg4Battery::SNAP_OVER_S - 2; i++) {
+    tick_1s(3745, 3700, 50, 3850, 893);
+  }
+  EXPECT_FALSE(battery->snapEnded);
+  tick_1s(3745, 3700, 50, 3850, 893);
+  EXPECT_TRUE(battery->snapEnded);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+}
+
+TEST_F(Mg4BatteryTest, TempTapersFromHardCap) {
+  // 600W/dC over the last 5C: 2C above the LFP charge floor and 2C below the
+  // 50C ceiling both leave 12kW.
+  identify_as_51kwh_lfp();
+  send_12c(3300, 3290, 0, 3450, 20);
+  send_15b_fd(7, 500);
+  send_17e(bms_dis_counts, bms_chg_counts);
+  battery->update_values();
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 12000u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 30000u);
+  send_12c(3300, 3290, 0, 3450, 480);
+  send_15b_fd(7, 500);
+  send_17e(bms_dis_counts, bms_chg_counts);
+  battery->update_values();
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 12000u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 12000u);
 }
 
 // Legacy 800/80-frame replay oracle: exact copy of the pre-refactor pattern
