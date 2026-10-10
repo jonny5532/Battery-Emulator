@@ -14,6 +14,13 @@ class Mg4Battery : public UdsCanBattery {
   static constexpr const char* Name = "MG4 battery";
 
   String get_uds_info_html() override;
+
+  // Sleep/wake (More battery info buttons): shut the pack down the way the car
+  // does, then stop all transmission so the BMS can go to sleep.
+  bool supports_sleep() override { return true; }
+  bool is_sleeping() override;
+  void request_sleep() override { sleep_requested = true; }
+  void request_wake() override { wake_requested = true; }
   const char* get_dtc_json_filename() override { return "mg_dtc.json"; }
 
   // Contactor management state machine
@@ -22,6 +29,16 @@ class Mg4Battery : public UdsCanBattery {
     CLOSING,           // Driving the close sequencer from its start (free-running, see below)
     CLOSED,            // Pack confirmed closed, holding the closed signal levels
     OPENING,           // Open requested, holding the open signal levels
+    SHUTTING_DOWN,     // Running the car's graceful open sequence before sleeping
+    SLEEPING,          // Transmitting nothing at all, so the BMS can sleep
+    WAKING,            // Car-style power-up pattern, waiting for the BMS to talk
+  };
+
+  // Steps of SHUTTING_DOWN, as captured from the car (see SHUTDOWN_HOLD_T).
+  enum class ShutdownPhase {
+    HOLD,          // request 0x01, level 0x20; waiting out the hold and for zero current
+    REQUEST_OPEN,  // request 0x00, level 0x20; waiting for the pack to report open
+    OPEN_HOLD,     // pack open, holding the open levels before going silent
   };
 
  protected:
@@ -70,6 +87,50 @@ class Mg4Battery : public UdsCanBattery {
   static constexpr int SEQ_314_RAMP_END = 59;
   static constexpr uint16_t SEQ_314_RAMP_MAX = 48;
 
+  // Graceful shutdown and wake timings, in 10ms ticks of the sequencer. The
+  // car holds request 0x01 for 6.0s (level 0x40 -> 0x20 after 0.2s) before
+  // requesting open, and the pack reports open 0.3-0.8s later.
+  static constexpr uint32_t SHUTDOWN_LEVEL_T = 20;
+  static constexpr uint32_t SHUTDOWN_HOLD_T = 600;
+  // Past the hold, wait up to here for the current to fall, else cancel.
+  static constexpr uint32_t SHUTDOWN_HOLD_MAX_T = 1000;
+  static constexpr uint32_t SHUTDOWN_OPEN_TIMEOUT_T = 300;
+  static constexpr uint32_t SHUTDOWN_OPEN_HOLD_T = 200;
+  static constexpr int16_t SHUTDOWN_IDLE_DA = 10;  // |current| below 1A counts as idle
+  // Car power-up: request 0x03 (flag 0x04 on the first frame) for ~2s, then 0x00.
+  static constexpr uint32_t WAKE_REQ03_T = 200;
+  // The BMS counts as silent once nothing has arrived for this long.
+  static constexpr unsigned long SLEEP_SILENT_MS = 5000;
+
+  ShutdownPhase shutdown_phase = ShutdownPhase::HOLD;
+  uint32_t shutdown_phase_start = 0;
+  // Set from the web task, consumed by contactor_state_tick().
+  bool sleep_requested = false;
+  bool wake_requested = false;
+  // Why the last sleep attempt didn't reach SLEEPING, or nullptr.
+  const char* sleep_abort_reason = nullptr;
+  // Sleep bookkeeping for the info page and log: when SLEEPING began, when
+  // the BMS was last heard (0 = not since sleep began), when it first went
+  // silent (0 = not yet) and how often it woke up again by itself.
+  unsigned long sleep_start_ms = 0;
+  unsigned long sleep_last_rx_ms = 0;
+  unsigned long sleep_silent_after_ms = 0;
+  bool sleep_ever_silent = false;
+  uint16_t sleep_self_wakes = 0;
+  bool sleep_bms_silent = false;
+  // Frames received since the last 10ms tick (set by the CAN receive path).
+  uint16_t sleep_rx_count = 0;
+  uint32_t sleep_first_rx_id = 0;
+  unsigned long last_tick_ms = 0;
+
+  void begin_shutdown();
+  void abort_shutdown(ContactorState next, const char* reason);
+  void sleep_tick(unsigned long currentMillis);
+  bool shutdown_current_idle() const;
+  void render_sleep_html(String& html);
+  // Worst-case rendered size of the power state section.
+  static constexpr uint32_t SLEEP_HTML_BUDGET = 320;
+
   static constexpr uint32_t SEQ_FAST_CNT_PHASE = 11;
   static constexpr uint32_t SEQ_SLOW_CNT_PHASE = 7;
 
@@ -91,7 +152,13 @@ class Mg4Battery : public UdsCanBattery {
   //   average current limit, so we don't trickle charge the cells up to 3.75V.
   //   The whole snapping cycle should be quick, and the cells should relax back
   //   down to a sane voltage once it is over.
-  // - Give up if we're over 3.75V/cell for more than 30 seconds.
+  // - From 3.68V/cell the 5A clamp overrides the BMS's own charge limit from
+  //   0x17E, which drops straight to 0 once a cell reaches ~3.70V, short of
+  //   the 3.75V the snap needs. Below 3.68V a BMS cut is for some other reason
+  //   and is respected. The limits below bound how long the override can last.
+  // - Give up on reaching absorption unless the pack is between 5C and 45C.
+  // - Give up 30 seconds after first reaching 3.75V/cell (dips back under
+  //   don't restart the timer), or 15 minutes after entering absorption.
   // - Abort if we ever hit 3.76V/cell. This sits just below the 3.765V
   //   MAX_CELL_VOLTAGE_LFP_MV, where safety.cpp blocks charging and raises
   //   EVENT_CELL_OVER_VOLTAGE, so a normal snap never raises that event.
@@ -103,6 +170,10 @@ class Mg4Battery : public UdsCanBattery {
   static constexpr int32_t SNAP_ABSORB_MV = 3650;
   static constexpr int32_t SNAP_OVER_MV = 3750;
   static constexpr int32_t SNAP_OVER_S = 30;
+  static constexpr int32_t SNAP_ABSORB_MAX_S = 900;      // give up this long after entering absorption
+  static constexpr int32_t SNAP_BMS_OVERRIDE_MV = 3680;  // clamp overrides the BMS limit from here
+  static constexpr int32_t SNAP_MIN_TEMP_DC = 50;        // give up unless cell temps are above this...
+  static constexpr int32_t SNAP_MAX_TEMP_DC = 450;       // ...and below this
   static constexpr int32_t SNAP_ABORT_MV = 3760;
   static constexpr int32_t SNAP_SKIP_MV = 3600;   // no-drift check threshold
   static constexpr int32_t SNAP_SKIP_SOC = 9800;  // skip snap if BMS SoC here
@@ -113,7 +184,10 @@ class Mg4Battery : public UdsCanBattery {
   static constexpr float SNAP_EMA_ALPHA = 1.0f / 30;
 
   bool snapEnded = false;
+  // Seconds since cell max first reached SNAP_OVER_MV in this attempt.
   int32_t snap_over_s = 0;
+  // Seconds since the attempt entered absorption.
+  int32_t snap_absorb_s = 0;
   float snap_ema_dA = 0.0f;
   // Latched once cell max reaches SNAP_ABSORB_MV during an armed snap, so the
   // 5A clamp doesn't drop out (and back in) when the reduced current lets the
@@ -171,6 +245,33 @@ class Mg4Battery : public UdsCanBattery {
   void render_did_sweep_html(String& html);
   uint32_t did_sweep_page_end(uint32_t start) const;
 
+  // ---- Per-cell balancing demand ----
+  // The BMS debug stream on 0x689 carries a 50-slot multiplex (payload byte 0
+  // = 0x92, byte 1 = slot). Slot 0x0D walks the cells one at a time (cell
+  // index 1-based in byte 6, a new cell every 2s, ~3.5 minutes per sweep) with
+  // a 16-bit per-cell value in bytes 2-3. Units are unknown; it is non-zero on
+  // the cells that run high at the top of charge and has been seen to count
+  // down between sessions, so it looks like the BMS's outstanding balancing
+  // demand. Only the raw value is kept: 2 bytes per cell, BAL_NOT_SEEN until
+  // that cell has been reported.
+  static constexpr uint8_t BAL_SLOT = 0x0D;
+  static constexpr uint8_t BAL_MAX_CELLS = 108;
+  static constexpr uint16_t BAL_NOT_SEEN = 0xFFFF;
+  // Worst-case rendered size: header text plus "108: 65535<br>" per cell.
+  static constexpr uint32_t BAL_HTML_BUDGET = 192 + BAL_MAX_CELLS * 14;
+
+  uint16_t bal_demand[BAL_MAX_CELLS];
+  // Last cell index reported on slot 0x0D (0 = none yet), to spot each sweep
+  // wrapping round, and the demand sum of the last complete sweep.
+  uint8_t bal_last_cell = 0;
+  uint32_t bal_last_sum = 0;
+  bool bal_have_sum = false;
+
+  void bal_sweep_complete();
+  void bal_reset();
+
+  void render_balancing_html(String& html);
+
  private:
   static const uint16_t MAX_CELL_DEVIATION_LFP_MV = 400;
   static const uint16_t MAX_CELL_DEVIATION_NMC_MV = 150;
@@ -195,6 +296,11 @@ class Mg4Battery : public UdsCanBattery {
   int32_t soc_freshness = 0;
   uint16_t bms_soc_centipercent = 0;  // last SoC reported in 0x15B
   int32_t temp_freshness = 0;
+
+  // The BMS's own power limits from 0x17E, before our hard caps.
+  uint32_t bms_max_charge_W = 0;
+  uint32_t bms_max_discharge_W = 0;
+  int32_t bms_limit_freshness = 0;
 
   int16_t module_temperatures_dC[12] = {0};
   int16_t module_temps_received = 0;
