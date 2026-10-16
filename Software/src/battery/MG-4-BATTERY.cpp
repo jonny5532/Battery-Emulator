@@ -1323,6 +1323,9 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
       iso_raw = (uint16_t)value;
       iso_received = true;
       break;
+    case POLL_BALANCING_STATUS:
+      record_bal_status(data, length);
+      break;
     // case POLL_MIN_CELL_TEMPERATURE:
     //   datalayer.battery.status.temperature_min_dC = ((int32_t)value - 20000) / 50;
     //   temp_freshness = 10;
@@ -1461,7 +1464,7 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   setup_uds(0x7E5, 0);
   fd_uds_requests = true;
 
-  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_ISOLATION_RESISTANCE,
+  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_ISOLATION_RESISTANCE, POLL_BALANCING_STATUS,
                                        // POLL_MIN_CELL_TEMPERATURE,
                                        // POLL_MAX_CELL_TEMPERATURE,
                                        POLL_ECU_HARDWARE_NUMBER, POLL_ECU_SOFTWARE_NUMBER};
@@ -1516,7 +1519,8 @@ String Mg4Battery::get_uds_info_html() {
   // (8-digit ohms + comma), the balancing listing, and one page of the sweep
   // listing.
   String html;
-  html.reserve(1024 + SLEEP_HTML_BUDGET + iso_history_count * 9 + BAL_HTML_BUDGET + DID_SWEEP_PAGE_HTML_BUDGET);
+  html.reserve(1024 + SLEEP_HTML_BUDGET + iso_history_count * 9 + BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET +
+               DID_SWEEP_PAGE_HTML_BUDGET);
 
   render_sleep_html(html);
 
@@ -1565,6 +1569,7 @@ String Mg4Battery::get_uds_info_html() {
   html += "<br>ECU software: ";
   html += buf;
 
+  render_bal_status_html(html);
   render_balancing_html(html);
   render_did_sweep_html(html);
 
@@ -1692,6 +1697,57 @@ void Mg4Battery::render_balancing_html(String& html) {
     html += buf;
   }
   html += "</div>";
+}
+
+constexpr uint8_t Mg4Battery::BAL_FIELD_BYTE[];
+
+static const char* const BAL_FIELD_NAME[] = {"master [6]", "module [5]", "cells half A [2]", "cells half B [3]"};
+
+bool Mg4Battery::bal_field_active(int field, uint8_t raw) {
+  switch (field) {
+    case BAL_FIELD_MASTER:
+      return raw == BAL_STATUS_MASTER_ON;
+    case BAL_FIELD_MODULE:
+      return raw == BAL_STATUS_MODULE_ON;
+    default:
+      return raw != 0;
+  }
+}
+
+void Mg4Battery::record_bal_status(const uint8_t* data, uint16_t length) {
+  if (length < BAL_STATUS_MIN_LEN) {
+    return;
+  }
+  bal_status_polls++;
+  for (int f = 0; f < BAL_FIELD_COUNT; f++) {
+    uint8_t raw = data[BAL_FIELD_BYTE[f]];
+    if (!bal_status_received) {
+      logging.printf("[MG4] Balancing status %s: 0x%02X\n", BAL_FIELD_NAME[f], raw);
+    } else if (raw != bal_status_raw[f]) {
+      logging.printf("[MG4] Balancing status %s: 0x%02X -> 0x%02X\n", BAL_FIELD_NAME[f], bal_status_raw[f], raw);
+    }
+    bal_status_raw[f] = raw;
+    if (bal_field_active(f, raw)) {
+      bal_status_active_count[f]++;
+    }
+  }
+  bal_status_received = true;
+}
+
+void Mg4Battery::render_bal_status_html(String& html) {
+  char buf[96];
+  html += "<h3>Balancing status (0xB11A)</h3>";
+  if (!bal_status_received) {
+    html += "N/A<br>";
+    return;
+  }
+  snprintf(buf, sizeof(buf), "Polls: %lu<br>", (unsigned long)bal_status_polls);
+  html += buf;
+  for (int f = 0; f < BAL_FIELD_COUNT; f++) {
+    snprintf(buf, sizeof(buf), "%s: 0x%02X %s, balancing in %lu polls<br>", BAL_FIELD_NAME[f], bal_status_raw[f],
+             bal_field_active(f, bal_status_raw[f]) ? "(ON)" : "(off)", (unsigned long)bal_status_active_count[f]);
+    html += buf;
+  }
 }
 
 void Mg4Battery::render_did_sweep_html(String& html) {

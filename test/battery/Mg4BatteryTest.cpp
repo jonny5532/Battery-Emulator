@@ -15,6 +15,8 @@ class TestableMg4Battery : public Mg4Battery {
   using Mg4Battery::bal_demand;
   using Mg4Battery::bal_have_sum;
   using Mg4Battery::bal_last_sum;
+  using Mg4Battery::bal_status_active_count;
+  using Mg4Battery::bal_status_polls;
   using Mg4Battery::batteryIdentified;
   using Mg4Battery::contactorState;
   using Mg4Battery::did_sweep_answered;
@@ -46,6 +48,10 @@ class TestableMg4Battery : public Mg4Battery {
   using Mg4Battery::SNAP_OVER_S;
   using Mg4Battery::snapEnded;
   using Mg4Battery::WAKE_REQ03_T;
+  using TestableMg4Battery::BAL_FIELD_HALF_A;
+  using TestableMg4Battery::BAL_FIELD_HALF_B;
+  using TestableMg4Battery::BAL_FIELD_MASTER;
+  using TestableMg4Battery::BAL_FIELD_MODULE;
 };
 
 class Mg4BatteryTest : public ::testing::Test {
@@ -1699,4 +1705,36 @@ TEST_F(Mg4BatteryTest, DidSweepListingPagesAcrossReloads) {
 
   // Wraps back to the first page.
   EXPECT_EQ(std::string(battery->get_uds_info_html().c_str()), first);
+}
+
+TEST_F(Mg4BatteryTest, BalancingStatusTalliesAndDisplays) {
+  std::string html_before = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html_before.find("Balancing status (0xB11A)</h3>N/A"), std::string::npos);
+
+  // Idle capture: [6]=00, [5]=2, [2]=[3]=00.
+  uint8_t idle[15] = {0};
+  idle[5] = 2;
+  battery->handle_pid(0xB11A, 0, idle, sizeof(idle));
+
+  // Balancing: master 0xAA, module 1, only half A has cells balancing.
+  uint8_t active[15] = {0};
+  active[2] = 0x04;
+  active[5] = 1;
+  active[6] = 0xAA;
+  battery->handle_pid(0xB11A, 0, active, sizeof(active));
+  battery->handle_pid(0xB11A, 0, active, sizeof(active));
+
+  // Short responses are ignored.
+  battery->handle_pid(0xB11A, 0, active, 6);
+
+  EXPECT_EQ(battery->bal_status_polls, 3u);
+  EXPECT_EQ(battery->bal_status_active_count[TestableMg4Battery::BAL_FIELD_MASTER], 2u);
+  EXPECT_EQ(battery->bal_status_active_count[TestableMg4Battery::BAL_FIELD_MODULE], 2u);
+  EXPECT_EQ(battery->bal_status_active_count[TestableMg4Battery::BAL_FIELD_HALF_A], 2u);
+  EXPECT_EQ(battery->bal_status_active_count[TestableMg4Battery::BAL_FIELD_HALF_B], 0u);
+
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Polls: 3<br>"), std::string::npos);
+  EXPECT_NE(html.find("master [6]: 0xAA (ON), balancing in 2 polls"), std::string::npos);
+  EXPECT_NE(html.find("cells half B [3]: 0x00 (off), balancing in 0 polls"), std::string::npos);
 }
