@@ -272,6 +272,29 @@ class Mg4Battery : public UdsCanBattery {
 
   void render_balancing_html(String& html);
 
+  // ---- Live balancing status (DID 0xB11A) ----
+  // Polled on the runtime poll list. Four bytes are understood well enough to
+  // use: [6] master flag (0xAA = balancing, 0x00 = not), [5] any module
+  // balancing (1 = yes, 2 = no), and [2]/[3] any cell balancing in each half
+  // of the pack (non-zero = yes). Each poll that a field reports balancing
+  // bumps its tally, and every change of a field's raw value is logged.
+  static constexpr uint16_t BAL_STATUS_MIN_LEN = 7;
+  static constexpr uint8_t BAL_STATUS_MASTER_ON = 0xAA;
+  static constexpr uint8_t BAL_STATUS_MODULE_ON = 1;
+  enum BalStatusField { BAL_FIELD_MASTER, BAL_FIELD_MODULE, BAL_FIELD_HALF_A, BAL_FIELD_HALF_B, BAL_FIELD_COUNT };
+  static constexpr uint8_t BAL_FIELD_BYTE[BAL_FIELD_COUNT] = {6, 5, 2, 3};
+
+  bool bal_status_received = false;
+  uint8_t bal_status_raw[BAL_FIELD_COUNT] = {0};
+  uint32_t bal_status_active_count[BAL_FIELD_COUNT] = {0};
+  uint32_t bal_status_polls = 0;
+
+  static bool bal_field_active(int field, uint8_t raw);
+  void record_bal_status(const uint8_t* data, uint16_t length);
+  void render_bal_status_html(String& html);
+  // Worst-case rendered size of the status section.
+  static constexpr uint32_t BAL_STATUS_HTML_BUDGET = 512;
+
  private:
   static const uint16_t MAX_CELL_DEVIATION_LFP_MV = 400;
   static const uint16_t MAX_CELL_DEVIATION_NMC_MV = 150;
@@ -363,6 +386,7 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t POLL_MAX_CELL_TEMPERATURE = 0xB056;
   static const uint16_t POLL_BATTERY_SOH = 0xB061;
   static const uint16_t POLL_ISOLATION_RESISTANCE = 0xB045;
+  static const uint16_t POLL_BALANCING_STATUS = 0xB11A;
   static const uint16_t POLL_ECU_HARDWARE_NUMBER = 0xF192;
   static const uint16_t POLL_ECU_SOFTWARE_NUMBER = 0xF194;
 
