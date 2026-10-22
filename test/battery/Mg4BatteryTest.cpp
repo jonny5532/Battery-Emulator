@@ -610,28 +610,72 @@ TEST_F(Mg4BatteryTest, StoresAndDisplaysEcuPartNumbers) {
   EXPECT_NE(html.find("ABCDEFGHIJ"), std::string::npos);
 }
 
-TEST_F(Mg4BatteryTest, StoresAndDisplaysIsolationResistance) {
-  // Before any 0xB045 response the page must say so rather than report 0 ohms.
+TEST_F(Mg4BatteryTest, ReportsIsolationResistanceThroughDatalayer) {
+  EXPECT_TRUE(battery->supports_insulation_resistance());
+  // Before any 0xB045 result the page must say so rather than report 0.
   std::string html_before = battery->get_uds_info_html().c_str();
   EXPECT_NE(html_before.find("Isolation resistance: N/A"), std::string::npos);
+  EXPECT_FALSE(datalayer.battery.status.insulation_resistance_available);
 
-  // Raw 2-byte value 1000 scaled by 500 => 500000 ohms.
+  // 0x3FFE/0x3FFF = no result yet: nothing is published.
+  const uint8_t none[2] = {0x3F, 0xFE};
+  battery->handle_pid(0xB045, 0x3FFE, none, sizeof(none));
+  EXPECT_FALSE(datalayer.battery.status.insulation_resistance_available);
+
+  // Raw count 1000 at 0.5 kOhm per count => 500 kOhm.
   const uint8_t data[2] = {0x03, 0xE8};
   battery->handle_pid(0xB045, 1000, data, sizeof(data));
+  EXPECT_TRUE(datalayer.battery.status.insulation_resistance_available);
+  EXPECT_EQ(datalayer.battery.status.insulation_resistance_kOhm, 500);
   std::string html = battery->get_uds_info_html().c_str();
-  EXPECT_NE(html.find("Isolation resistance: 500000 ohms"), std::string::npos);
+  EXPECT_NE(html.find("Isolation resistance: 500.0 k&Omega;"), std::string::npos);
+
+  // A later "no result" keeps the last real measurement.
+  battery->handle_pid(0xB045, 0x3FFF, none, sizeof(none));
+  EXPECT_EQ(datalayer.battery.status.insulation_resistance_kOhm, 500);
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("measuring"), std::string::npos);
+
+  // Graded by the BMS's levels: amber below 500, orange below 400, red at or
+  // below 270 kOhm (P1EB2); 500 kOhm and above is uncoloured.
+  EXPECT_EQ(html.find("<span style='color: "), std::string::npos);
+  battery->handle_pid(0xB045, 900, none, sizeof(none));  // 450 kOhm
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("color: #ffc107;'>450.0 k&Omega;"), std::string::npos);
+  battery->handle_pid(0xB045, 700, none, sizeof(none));  // 350 kOhm
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("color: #ff9800;'>350.0 k&Omega;"), std::string::npos);
+  EXPECT_EQ(html.find("P1EB2"), std::string::npos);
+  battery->handle_pid(0xB045, 540, none, sizeof(none));  // exactly 270 kOhm
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("color: #f44336;'>270.0 k&Omega;"), std::string::npos);
+  EXPECT_NE(html.find("P1EB2"), std::string::npos);
 }
 
-TEST_F(Mg4BatteryTest, IsolationResistanceHistoryCsv) {
-  // One sample per simulated second, raw counts 1000..1004 => 500000..502000 ohms.
-  for (int i = 0; i < 5; i++) {
-    const uint8_t data[2] = {(uint8_t)((1000 + i) >> 8), (uint8_t)((1000 + i) & 0xFF)};
-    battery->handle_pid(0xB045, 1000 + i, data, sizeof(data));
-    battery->update_values();
-  }
+TEST_F(Mg4BatteryTest, ContactorButtonsAtTopOfInfoPage) {
+  // Drawn by the driver, so the framework's own pair stays hidden.
+  EXPECT_FALSE(battery->supports_contactor_close());
   std::string html = battery->get_uds_info_html().c_str();
-  // Oldest first, comma separated, scaled to ohms.
-  EXPECT_NE(html.find("Isolation history (ohms): 500000,500500,501000,501500,502000"), std::string::npos);
+  const size_t open_at = html.find("Open Contactors</button>");
+  ASSERT_NE(open_at, std::string::npos);
+  EXPECT_NE(html.find("Close Contactors</button>"), std::string::npos);
+  EXPECT_LT(open_at, html.find("<h3>"));
+}
+
+TEST_F(Mg4BatteryTest, DisplaysLvSupplyVoltage) {
+  std::string html_before = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html_before.find("12 V supply at pack: N/A"), std::string::npos);
+
+  const uint8_t v[1] = {135};  // 13.5 V
+  battery->handle_pid(0x0112, 135, v, sizeof(v));
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("12 V supply at pack: 13.5 V"), std::string::npos);
+
+  // 0xFF = the BMS has no valid reading.
+  const uint8_t na[1] = {0xFF};
+  battery->handle_pid(0x0112, 0xFF, na, sizeof(na));
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("12 V supply at pack: N/A"), std::string::npos);
 }
 
 TEST_F(Mg4BatteryTest, SnapClampOnlyInAbsorption) {
@@ -1592,6 +1636,17 @@ TEST_F(Mg4BatteryTest, ClosingWireSequenceMatchesLegacyReplay) {
   EXPECT_EQ(f08a[799].data.u8[30], 0x40);
   EXPECT_EQ(f313.back().data.u8[10], 0x05);
   EXPECT_EQ(f314.back().data.u8[6], 0x57);
+}
+
+// Poll list answers never detour to another DID: the scan list just continues.
+TEST_F(Mg4BatteryTest, PollAnswersContinueScanList) {
+  const uint8_t data[2] = {0x26, 0xAC};
+
+  EXPECT_EQ(battery->handle_pid(0xB061, 0x26AC, data, sizeof(data)), 0x0000u);
+  EXPECT_EQ(datalayer.battery.status.soh_pptt, 0x26AC);
+  EXPECT_EQ(battery->handle_pid(0xB045, 0, data, sizeof(data)), 0x0000u);
+  EXPECT_EQ(battery->handle_pid(0xF192, 0, data, sizeof(data)), 0x0000u);
+  EXPECT_EQ(std::string(battery->get_uds_info_html().c_str()).find("DID sweep"), std::string::npos);
 }
 
 static void put_be32(uint8_t* p, uint32_t v) {
