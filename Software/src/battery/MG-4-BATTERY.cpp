@@ -817,6 +817,15 @@ void Mg4Battery::update_047_08a() {
   // Last subfield has no CRC
 }
 
+// 0x169 PDU 0x010002 (see DRIVE_MODE_FRAMES): static apart from its counter
+// and CRC, sent every 20ms alongside 0x047/0x08A.
+void Mg4Battery::update_169() {
+  uint8_t* f = MG4_169_FD.data.u8;
+  f[5] = cnt169;
+  f[4] = mg4_crc8(&f[5]);
+  cnt169 = (cnt169 + 1) % 15;
+}
+
 // Patch the 313 and 314 frames in place from the free-running sequencer.
 // Must be called after mg4_seq_tick was incremented for the paired fast
 // frame, so slow_abs/slow_elapsed derive from the post-increment tick exactly
@@ -867,7 +876,11 @@ void Mg4Battery::update_313_314() {
     hi314 = seq_314_hi(slow_elapsed);
   }
 
+  if (DRIVE_MODE_FRAMES) {
+    stat = 0x01;  // the driving car's value; 3/5 (and b5 = 0xF2) mean AC charge
+  }
   f13[5] = seq_cnt15(slow_abs, 0xF0, SEQ_SLOW_CNT_PHASE);
+  f13[9] = DRIVE_MODE_FRAMES ? 0xF0 : 0xF2;
   f13[10] = stat;
   f13[4] = mg4_crc8(&f13[5]);
 
@@ -1277,6 +1290,10 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
       update_047_08a();
       transmit_can_frame(&MG4_047_FD);
       transmit_can_frame(&MG4_08A_FD);
+      if (DRIVE_MODE_FRAMES && (mg4_seq_tick & 1) == 0) {
+        update_169();
+        transmit_can_frame(&MG4_169_FD);
+      }
 
       // Free-running: advance the shared 10ms tick. Counters derive from its
       // absolute value, sequence signals from (tick - mg4_seq_start). No
