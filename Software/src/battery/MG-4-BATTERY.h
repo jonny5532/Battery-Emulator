@@ -4,7 +4,6 @@
 
 class Mg4Battery : public UdsCanBattery {
  public:
-  ~Mg4Battery();
   virtual void setup(void);
   virtual void handle_incoming_can_frame(CAN_frame rx_frame);
   virtual uint16_t handle_pid(uint16_t pid, uint32_t value, const uint8_t* data, uint16_t length);
@@ -21,6 +20,12 @@ class Mg4Battery : public UdsCanBattery {
   bool is_sleeping() override;
   void request_sleep() override { sleep_requested = true; }
   void request_wake() override { wake_requested = true; }
+  // Balance cycle (More battery info buttons): sleep the pack for a fixed
+  // time, then wake it and hold it awake and open while the BMS balances.
+  bool supports_balance_cycle() override { return true; }
+  bool is_balance_cycle_active() override { return balance_cycle_requested || bal_cycle != BalCycle::OFF; }
+  void request_balance_cycle() override { balance_cycle_requested = true; }
+  void request_balance_stop() override { balance_stop_requested = true; }
   const char* get_dtc_json_filename() override { return "mg_dtc.json"; }
 
   // Contactor management state machine
@@ -32,7 +37,12 @@ class Mg4Battery : public UdsCanBattery {
     SHUTTING_DOWN,     // Running the car's graceful open sequence before sleeping
     SLEEPING,          // Transmitting nothing at all, so the BMS can sleep
     WAKING,            // Car-style power-up pattern, waiting for the BMS to talk
+    BAL_HOLD,          // Balance cycle: awake with the open levels, never closing
   };
+
+  // Balance cycle phase: OFF, or SLEEP (shutting down, asleep or waking) and
+  // HOLD (awake in BAL_HOLD while the BMS balances).
+  enum class BalCycle { OFF, SLEEP, HOLD };
 
   // Steps of SHUTTING_DOWN, as captured from the car (see SHUTDOWN_HOLD_T).
   enum class ShutdownPhase {
@@ -128,8 +138,74 @@ class Mg4Battery : public UdsCanBattery {
   void sleep_tick(unsigned long currentMillis);
   bool shutdown_current_idle() const;
   void render_sleep_html(String& html);
-  // Worst-case rendered size of the power state section.
-  static constexpr uint32_t SLEEP_HTML_BUDGET = 320;
+  // Worst-case rendered size of the power state section, with the balance
+  // cycle block.
+  static constexpr uint32_t SLEEP_HTML_BUDGET = 640;
+
+  // ---- Balance cycle ----
+  // The BMS only plans balancing in the first ~16s after a wake that follows
+  // a valid sleep measured by its RTC, and rest (sleep + time awake with the
+  // contactors open) counts towards its triggers: top of charge needs a cell
+  // >= 3.362V and 30 min rest; SoC >= 80% or <= 26% needs a spread threshold
+  // that falls from 3.0% at 1 min rest to 1.0% at 60 min. Mid-SoC packs never
+  // balance. So the cycle is: graceful shutdown, BAL_CYCLE_SLEEP_MS from the
+  // BMS going silent, wake, then BAL_HOLD (open levels, limits 0) while any
+  // cell has 0x689 minutes left. 0xB0E5 page 6 confirms the sleep counted.
+  // Not persisted: a reboot mid-cycle starts up into the normal logic.
+  static constexpr unsigned long BAL_CYCLE_SLEEP_MS = 35UL * 60 * 1000;
+  static constexpr unsigned long BAL_HOLD_MAX_MS = 13UL * 60 * 60 * 1000;  // 12h target cap plus margin
+  // Page 6 must report a valid sleep of at least this long.
+  static constexpr uint32_t BAL_SLEEP_ACCEPT_S = BAL_CYCLE_SLEEP_MS / 1000 * 9 / 10;
+  // End the cycle if the BMS keeps talking this long after shutdown (or a self-wake).
+  static constexpr unsigned long BAL_SILENCE_TIMEOUT_MS = 10UL * 60 * 1000;
+  // Full sweeps without the remaining total falling before reporting a pause.
+  static constexpr uint8_t BAL_PAUSE_SWEEPS = 2;
+  // SoC trigger windows, for explaining "no balancing planned".
+  static constexpr uint16_t BAL_HIGH_SOC_CP = 8000;
+  static constexpr uint16_t BAL_LOW_SOC_CP = 2600;
+  static constexpr uint16_t BAL_TOP_CELL_MV = 3362;
+  // Execution pauses at or below this SoC.
+  static constexpr uint16_t BAL_INHIBIT_SOC_CP = 1000;
+
+  BalCycle bal_cycle = BalCycle::OFF;
+  // Set from the web task, consumed by contactor_state_tick().
+  bool balance_cycle_requested = false;
+  bool balance_stop_requested = false;
+  bool bal_wake_armed = false;  // bal_wake_at_ms is set (the BMS is silent)
+  unsigned long bal_wake_at_ms = 0;
+  unsigned long bal_noisy_since_ms = 0;  // when the BMS last started talking while asleep
+  unsigned long bal_hold_start_ms = 0;
+  bool bal_sleep_checked = false;  // 0xB0E5 page 6 accepted
+  uint32_t bal_hold_sweeps = 0;    // bal_sweep_count when BAL_HOLD began / last handled
+  bool bal_hold_have_sum = false;  // a full sweep has been seen in this hold
+  uint32_t bal_hold_prev_sum = 0;
+  uint8_t bal_stall_sweeps = 0;
+  // Outcome of the last cycle ("" while none has finished).
+  char bal_cycle_result[96] = {0};
+
+  void start_bal_cycle();
+  void end_bal_cycle(const char* fmt, ...);
+  void enter_bal_hold(unsigned long now_ms);
+  void leave_bal_hold();
+  void bal_hold_tick(unsigned long now_ms);
+  const char* bal_no_plan_hint() const;
+  const char* bal_inhibit_hint() const;
+  void render_bal_cycle_html(String& html);
+
+  // ---- BMS mode (drive vs charge), display only ----
+  // 0x4E1 (BMS NM) b7 is the partial network: 0x01 default, 0x13 AC, 0x04 DC,
+  // 0x20 V2L. Driving = contactors closed (0x15B state 7) with PN 0x01;
+  // charging = any other PN.
+  static constexpr uint8_t NM_PN_DEFAULT = 0x01;
+  bool bms_pn_received = false;
+  uint8_t bms_pn = 0;  // 0x4E1 b7
+  bool bms_closed() const;
+  bool bms_driving() const;
+  bool bms_charging() const;
+  const char* bms_mode_label() const;
+  void render_mode_html(String& html);
+  // Worst-case rendered size of the BMS mode section.
+  static constexpr uint32_t MODE_HTML_BUDGET = 96;
 
   // Drive-mode car frames (found by emulating the pack firmware, matching the
   // driving car's FD bus). The original 0x313 template came from an AC-charge
@@ -213,98 +289,63 @@ class Mg4Battery : public UdsCanBattery {
   bool snap_should_force_soc();
   int32_t snap_clamp_power_W();
 
-  // ---- Background DID sweep ----
-  // The DID map of this BMS is largely unknown, so handle_pid() interleaves
-  // one request for the next untried DID after every runtime poll list
-  // response, sweeping the entire DID range (0x0001-0xFFFF; 0x0000 can't be
-  // requested as a detour since handle_pid() uses 0 for "continue") once in
-  // the background. Every DID that answers with data is recorded and shown on
-  // the battery info page.
-  //
-  // Answers are packed back to back into a single byte buffer, one record per
-  // DID: [DID hi][DID lo][response length (saturated at 255)][data...], with
-  // at most DID_SWEEP_MAX_DATA_LEN data bytes kept. The buffer is allocated on
-  // the first answer and grown in DID_SWEEP_BUF_CHUNK steps up to
-  // DID_SWEEP_BUF_MAX; answers that don't fit are counted and dropped.
-  static constexpr uint32_t DID_SWEEP_FIRST = 0x0001;
-  static constexpr uint32_t DID_SWEEP_LAST = 0xFFFF;
-  static constexpr uint32_t DID_SWEEP_TOTAL = DID_SWEEP_LAST - DID_SWEEP_FIRST + 1;
-  static constexpr uint16_t DID_SWEEP_MAX_DATA_LEN = 64;
-  static constexpr uint16_t DID_SWEEP_RECORD_HEADER_LEN = 3;
-  static constexpr uint32_t DID_SWEEP_BUF_CHUNK = 1024;
-  static constexpr uint32_t DID_SWEEP_BUF_MAX = 8192;
-  // The info page shows one page of the listing per load, each at most this
-  // many bytes of HTML, assuming every record costs 4 chars per data byte plus
-  // DID_SWEEP_RECORD_HTML_OVERHEAD.
-  static constexpr uint32_t DID_SWEEP_PAGE_HTML_BUDGET = 4096;
-  static constexpr uint32_t DID_SWEEP_RECORD_HTML_OVERHEAD = 32;
-
-  uint8_t* did_sweep_buf = nullptr;
-  uint32_t did_sweep_buf_len = 0;       // bytes used
-  uint32_t did_sweep_buf_capacity = 0;  // bytes allocated
-  uint16_t did_sweep_answered = 0;      // records stored
-  uint16_t did_sweep_dropped = 0;       // answers that didn't fit
-  // Next DID to hand out (uint32_t so it can run past 0xFFFF to mark the end).
-  uint32_t did_sweep_next = DID_SWEEP_FIRST;
-  // The sweep DID currently requested, or 0 if none.
-  uint16_t did_sweep_in_flight = 0;
-  // Listing page shown on the next info page load.
-  uint16_t did_sweep_page = 0;
-
-  bool did_sweep_active() const { return did_sweep_next <= DID_SWEEP_LAST; }
-  void record_did_sweep_result(uint16_t did, const uint8_t* data, uint16_t length);
-  void render_did_sweep_html(String& html);
-  uint32_t did_sweep_page_end(uint32_t start) const;
-
-  // ---- Per-cell balancing demand ----
+  // ---- Per-cell balancing remaining time ----
   // The BMS debug stream on 0x689 carries a 50-slot multiplex (payload byte 0
-  // = 0x92, byte 1 = slot). Slot 0x0D walks the cells one at a time (cell
-  // index 1-based in byte 6, a new cell every 2s, ~3.5 minutes per sweep) with
-  // a 16-bit per-cell value in bytes 2-3. Units are unknown; it is non-zero on
-  // the cells that run high at the top of charge and has been seen to count
-  // down between sessions, so it looks like the BMS's outstanding balancing
-  // demand. Only the raw value is kept: 2 bytes per cell, BAL_NOT_SEEN until
+  // = 0x92, byte 1 = slot). Slot 0x0D walks the pack cells one at a time
+  // (1-based pack cell number in byte 6, a new cell every 2s, ~3.5 minutes per
+  // sweep) with that cell's remaining balancing time in minutes in bytes 2-3
+  // (big-endian). The BMS sizes a target (up to 720 min) per cell after a rest,
+  // keeps it in NvM across sleeps and counts it down while the cell bleeds;
+  // 0 = nothing to balance. Confirmed by emulating the firmware: two cells
+  // balancing with 12 h targets reported 719 and 718 min. BAL_NOT_SEEN until
   // that cell has been reported.
   static constexpr uint8_t BAL_SLOT = 0x0D;
   static constexpr uint8_t BAL_MAX_CELLS = 108;
   static constexpr uint16_t BAL_NOT_SEEN = 0xFFFF;
-  // Worst-case rendered size: header text plus "108: 65535<br>" per cell.
-  static constexpr uint32_t BAL_HTML_BUDGET = 192 + BAL_MAX_CELLS * 14;
+  // Worst-case rendered size: header text plus "108: 1092h15m<br>" per cell.
+  static constexpr uint32_t BAL_HTML_BUDGET = 256 + BAL_MAX_CELLS * 18;
 
   uint16_t bal_demand[BAL_MAX_CELLS];
   // Last cell index reported on slot 0x0D (0 = none yet), to spot each sweep
-  // wrapping round, and the demand sum of the last complete sweep.
+  // wrapping round. The last complete sweep's total remaining minutes, cells
+  // with time left and longest time, and a count of complete sweeps.
   uint8_t bal_last_cell = 0;
   uint32_t bal_last_sum = 0;
+  uint16_t bal_last_nonzero = 0;
+  uint16_t bal_last_max = 0;
   bool bal_have_sum = false;
+  uint32_t bal_sweep_count = 0;
 
   void bal_sweep_complete();
   void bal_reset();
 
   void render_balancing_html(String& html);
 
-  // ---- Live balancing status (DID 0xB11A) ----
-  // Polled on the runtime poll list. Four bytes are understood well enough to
-  // use: [6] master flag (0xAA = balancing, 0x00 = not), [5] any module
-  // balancing (1 = yes, 2 = no), and [2]/[3] any cell balancing in each half
-  // of the pack (non-zero = yes). Each poll that a field reports balancing
-  // bumps its tally, and every change of a field's raw value is logged.
-  static constexpr uint16_t BAL_STATUS_MIN_LEN = 7;
-  static constexpr uint8_t BAL_STATUS_MASTER_ON = 0xAA;
-  static constexpr uint8_t BAL_STATUS_MODULE_ON = 1;
-  enum BalStatusField { BAL_FIELD_MASTER, BAL_FIELD_MODULE, BAL_FIELD_HALF_A, BAL_FIELD_HALF_B, BAL_FIELD_COUNT };
-  static constexpr uint8_t BAL_FIELD_BYTE[BAL_FIELD_COUNT] = {6, 5, 2, 3};
+  // ---- Balancing gate status (DID 0xB0E5) ----
+  // 24 bytes = six big-endian 32-bit words, multiplexed: every read returns the
+  // next of 6 pages (word 0 = page number 1..6), so one page arrives per poll.
+  // Page 6 carries the inputs that gate new balancing decisions: word 1 = how
+  // long the BMS slept before this wake (s, from its RTC; balancing needs a
+  // valid sleep of 2 s .. ~1 year), word 2 = 1 with a valid sleep (0 seen
+  // without one), word 5 = rest time (s) = sleep + time awake with the
+  // contactors open (top-of-charge balancing needs >= 30 min). The other pages
+  // are kept raw. (DID 0xB11A, polled before, is a 16-byte status from an
+  // unrelated table: it did not change while the emulated BMS balanced.)
+  static constexpr uint16_t BAL_STATUS_LEN = 24;
+  static constexpr uint8_t BAL_STATUS_PAGES = 6;
+  static constexpr uint8_t BAL_STATUS_WORDS = 5;  // after the page number
+  static constexpr uint8_t BAL_GATE_PAGE = 6;
+  static constexpr uint32_t BAL_MIN_SLEEP_S = 2;
+  static constexpr uint32_t BAL_TOP_REST_S = 30 * 60;
 
-  bool bal_status_received = false;
-  uint8_t bal_status_raw[BAL_FIELD_COUNT] = {0};
-  uint32_t bal_status_active_count[BAL_FIELD_COUNT] = {0};
+  bool bal_page_seen[BAL_STATUS_PAGES] = {false};
+  uint32_t bal_page[BAL_STATUS_PAGES][BAL_STATUS_WORDS] = {{0}};
   uint32_t bal_status_polls = 0;
 
-  static bool bal_field_active(int field, uint8_t raw);
   void record_bal_status(const uint8_t* data, uint16_t length);
   void render_bal_status_html(String& html);
   // Worst-case rendered size of the status section.
-  static constexpr uint32_t BAL_STATUS_HTML_BUDGET = 512;
+  static constexpr uint32_t BAL_STATUS_HTML_BUDGET = 768;
 
  private:
   static const uint16_t MAX_CELL_DEVIATION_LFP_MV = 400;
@@ -398,7 +439,7 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t POLL_MAX_CELL_TEMPERATURE = 0xB056;
   static const uint16_t POLL_BATTERY_SOH = 0xB061;
   static const uint16_t POLL_ISOLATION_RESISTANCE = 0xB045;
-  static const uint16_t POLL_BALANCING_STATUS = 0xB11A;
+  static const uint16_t POLL_BALANCING_STATUS = 0xB0E5;
   static const uint16_t POLL_ECU_HARDWARE_NUMBER = 0xF192;
   static const uint16_t POLL_ECU_SOFTWARE_NUMBER = 0xF194;
 

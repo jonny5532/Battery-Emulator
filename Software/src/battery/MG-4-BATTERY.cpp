@@ -1,7 +1,7 @@
 #include "MG-4-BATTERY.h"
 #include <cmath>    //For unit test
+#include <cstdarg>  //For va_list
 #include <cstdio>   //For sprintf
-#include <cstdlib>  //For realloc
 #include <cstring>  //For unit test
 
 //#include "esp_timer.h"
@@ -488,7 +488,8 @@ void Mg4Battery::
     soc_freshness--;
   }
 
-  const bool sleep_mode = is_sleeping() || contactorState == ContactorState::WAKING;
+  const bool sleep_mode =
+      is_sleeping() || contactorState == ContactorState::WAKING || contactorState == ContactorState::BAL_HOLD;
   if (contactorState == ContactorState::SLEEPING) {
     // The BMS is meant to be silent now, so stand in for it with the safety
     // layer's liveness counter (as a long BMS reset does), rather than let
@@ -498,7 +499,7 @@ void Mg4Battery::
   }
 
   if (soc_freshness <= 0 || sleep_mode) {
-    // No power while shutting down, asleep or waking up.
+    // No power while shutting down, asleep, waking up or holding for balancing.
     datalayer.battery.status.max_charge_power_W = 0;
     datalayer.battery.status.max_discharge_power_W = 0;
   } else {
@@ -726,9 +727,48 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
         }
       }
       break;
+    case 0x4E1:
+      // BMS NM frame, b7 = partial network: 0x01 default, else a charge session.
+      if (rx_frame.DLC >= 8 && (rx_frame.data.u8[7] != bms_pn || !bms_pn_received)) {
+        bms_pn = rx_frame.data.u8[7];
+        bms_pn_received = true;
+        logging.printf("[MG4] BMS PN %02X: %s\n", bms_pn, bms_mode_label());
+      }
+      break;
     default:
       break;
   }
+}
+
+bool Mg4Battery::bms_closed() const {
+  return pack_contactors.received && pack_contactors.state == 7;
+}
+
+bool Mg4Battery::bms_driving() const {
+  return bms_closed() && bms_pn_received && bms_pn == NM_PN_DEFAULT;
+}
+
+bool Mg4Battery::bms_charging() const {
+  return bms_pn_received && bms_pn != NM_PN_DEFAULT;
+}
+
+const char* Mg4Battery::bms_mode_label() const {
+  if (!bms_pn_received) {
+    return "unknown (no 0x4E1 yet)";
+  }
+  if (bms_charging()) {
+    switch (bms_pn) {
+      case 0x13:
+        return "AC charge";
+      case 0x04:
+        return "DC charge";
+      case 0x20:
+        return "V2L";
+      default:
+        return "charge (unrecognised PN)";
+    }
+  }
+  return bms_driving() ? "drive" : "idle";
 }
 
 // How long to wait for the contactor status on boot, before we start sending.
@@ -763,7 +803,7 @@ void Mg4Battery::update_047_08a() {
     request = 0x21;
     flag = 0x00;
     level = 0x40;
-  } else if (contactorState == ContactorState::OPENING ||
+  } else if (contactorState == ContactorState::OPENING || contactorState == ContactorState::BAL_HOLD ||
              (contactorState == ContactorState::SHUTTING_DOWN && shutdown_phase == ShutdownPhase::OPEN_HOLD)) {
     val12 = 45;
     request = 0x00;
@@ -846,11 +886,12 @@ void Mg4Battery::update_313_314() {
   uint8_t hi314;
   uint8_t ramp314;
   // The graceful shutdown holds the closed levels until the pack has opened,
-  // and waking runs at the open (idle) levels.
+  // and waking and the balance hold run at the open (idle) levels.
   const bool shutting_down = contactorState == ContactorState::SHUTTING_DOWN;
   const bool closed_levels =
       contactorState == ContactorState::CLOSED || (shutting_down && shutdown_phase != ShutdownPhase::OPEN_HOLD);
   const bool open_levels = contactorState == ContactorState::OPENING || contactorState == ContactorState::WAKING ||
+                           contactorState == ContactorState::BAL_HOLD ||
                            (shutting_down && shutdown_phase == ShutdownPhase::OPEN_HOLD);
   if (closed_levels) {
     stat = 0x05;
@@ -978,6 +1019,9 @@ void Mg4Battery::begin_shutdown() {
 void Mg4Battery::abort_shutdown(ContactorState next, const char* reason) {
   logging.printf("[MG4] Sleep aborted: %s\n", reason);
   sleep_abort_reason = reason;
+  if (bal_cycle != BalCycle::OFF) {
+    end_bal_cycle("sleep aborted: %s", reason);
+  }
   wake_requested = false;
   contactorWaitStartMillis = 0;
   mg4_seq_start = mg4_seq_tick;
@@ -993,6 +1037,10 @@ void Mg4Battery::sleep_tick(unsigned long currentMillis) {
       logging.printf("[MG4] BMS woke while sleeping: first ID 0x%03lX, %lus into sleep\n",
                      (unsigned long)sleep_first_rx_id, (currentMillis - sleep_start_ms) / 1000);
       sleep_bms_silent = false;
+      // It stores a new shutdown time when it sleeps again, so the balance
+      // cycle's delay restarts from the next silence.
+      bal_wake_armed = false;
+      bal_noisy_since_ms = currentMillis;
     }
     sleep_last_rx_ms = currentMillis;
     sleep_rx_count = 0;
@@ -1005,6 +1053,12 @@ void Mg4Battery::sleep_tick(unsigned long currentMillis) {
     } else {
       logging.printf("[MG4] BMS silent again, %lus into sleep\n", (currentMillis - sleep_start_ms) / 1000);
     }
+    if (bal_cycle == BalCycle::SLEEP) {
+      // Counted from the last frame heard, when the BMS shut down.
+      bal_wake_at_ms = sleep_last_rx_ms + BAL_CYCLE_SLEEP_MS;
+      bal_wake_armed = true;
+      logging.printf("[MG4] Balance cycle: waking in %lus\n", (bal_wake_at_ms - currentMillis) / 1000);
+    }
   }
 }
 
@@ -1012,11 +1066,36 @@ void Mg4Battery::sleep_tick(unsigned long currentMillis) {
 void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
   const bool open_requested = (datalayer.system.status.system_status == FAULT);
 
+  if (balance_cycle_requested) {
+    balance_cycle_requested = false;
+    if (bal_cycle == BalCycle::OFF) {
+      start_bal_cycle();
+    }
+  }
+  if (balance_stop_requested) {
+    balance_stop_requested = false;
+    if (bal_cycle != BalCycle::OFF) {
+      // Back to normal operation, as Wake would.
+      end_bal_cycle("stopped by user");
+      if (contactorState == ContactorState::BAL_HOLD) {
+        leave_bal_hold();
+      } else if (contactorState == ContactorState::SHUTTING_DOWN || contactorState == ContactorState::SLEEPING) {
+        wake_requested = true;
+      }
+    }
+  }
   if (sleep_requested) {
     sleep_requested = false;
+    if (bal_cycle != BalCycle::OFF) {
+      // Shut down and stay asleep.
+      end_bal_cycle("cancelled by Sleep");
+    }
     if (contactorState != ContactorState::SHUTTING_DOWN && contactorState != ContactorState::SLEEPING) {
       begin_shutdown();
     }
+  }
+  if (wake_requested && bal_cycle == BalCycle::SLEEP) {
+    end_bal_cycle("cancelled by Wake");
   }
   if (wake_requested && contactorState != ContactorState::SHUTTING_DOWN && contactorState != ContactorState::SLEEPING) {
     // Nothing to wake. (While shutting down, it is handled below.)
@@ -1228,6 +1307,8 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
             sleep_bms_silent = false;
             sleep_self_wakes = 0;
             sleep_rx_count = 0;
+            bal_wake_armed = false;
+            bal_noisy_since_ms = currentMillis;
             contactorState = ContactorState::SLEEPING;
           }
           break;
@@ -1237,12 +1318,23 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
 
     case ContactorState::SLEEPING:
       // Silent: transmit_can() sends nothing, and faults are ignored since the
-      // pack is already open. Only the user's wake ends this.
+      // pack is already open. The user's wake, or a balance cycle's timer, ends
+      // this.
+      if (bal_cycle == BalCycle::SLEEP) {
+        if (bal_wake_armed && (long)(currentMillis - bal_wake_at_ms) >= 0) {
+          logging.printf("[MG4] Balance cycle: sleep done, waking\n");
+          wake_requested = true;
+        } else if (!sleep_bms_silent && currentMillis - bal_noisy_since_ms >= BAL_SILENCE_TIMEOUT_MS) {
+          // Its RTC sleep would not be valid anyway: back to normal operation.
+          end_bal_cycle("BMS did not sleep (still talking after %lus)", BAL_SILENCE_TIMEOUT_MS / 1000);
+          wake_requested = true;
+        }
+      }
       if (wake_requested) {
         wake_requested = false;
         logging.printf("[MG4] Wake requested after %lus asleep\n", (currentMillis - sleep_start_ms) / 1000);
         if (bal_have_sum) {
-          logging.printf("[MG4] Balancing demand sum before sleep: %lu\n", (unsigned long)bal_last_sum);
+          logging.printf("[MG4] Balancing remaining before sleep: %lu min in total\n", (unsigned long)bal_last_sum);
         }
         bal_reset();
         // Wait for a fresh pack state rather than trusting the pre-sleep one.
@@ -1255,15 +1347,158 @@ void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
     case ContactorState::WAKING:
       // Car-style power-up pattern (see update_047_08a) until it has run its
       // course and the BMS has reported its contactor state again. Then the
-      // normal identify/close logic takes over. If the BMS never answers we
-      // stay here, transmitting, and the usual missing-battery event fires.
+      // normal identify/close logic takes over, or BAL_HOLD in a balance
+      // cycle. If the BMS never answers we stay here, transmitting, and the
+      // usual missing-battery event fires.
       if (mg4_seq_tick - mg4_seq_start >= WAKE_REQ03_T && pack_contactors.received) {
         logging.printf("[MG4] BMS awake\n");
-        contactorWaitStartMillis = 0;
-        contactorState = ContactorState::WAITING_FOR_PACK;
+        if (bal_cycle == BalCycle::SLEEP) {
+          enter_bal_hold(currentMillis);
+        } else {
+          contactorWaitStartMillis = 0;
+          contactorState = ContactorState::WAITING_FOR_PACK;
+        }
+      }
+      break;
+
+    case ContactorState::BAL_HOLD:
+      // Open levels, never closing, until the BMS has finished balancing.
+      if (open_requested) {
+        end_bal_cycle("cancelled by fault");
+        reset_reclose_tracker();
+        mg4_seq_start = mg4_seq_tick;
+        contactorState = ContactorState::OPENING;
+      } else {
+        bal_hold_tick(currentMillis);
       }
       break;
   }
+}
+
+void Mg4Battery::start_bal_cycle() {
+  logging.printf("[MG4] Balance cycle started\n");
+  bal_cycle = BalCycle::SLEEP;
+  bal_cycle_result[0] = '\0';
+  bal_wake_armed = false;
+  // A pack that is already asleep counts its delay from its last frame.
+  if (contactorState == ContactorState::SLEEPING) {
+    bal_noisy_since_ms = last_tick_ms;
+    if (sleep_bms_silent) {
+      bal_wake_at_ms = sleep_last_rx_ms + BAL_CYCLE_SLEEP_MS;
+      bal_wake_armed = true;
+    }
+  } else if (contactorState == ContactorState::BAL_HOLD) {
+    // Unreachable (a cycle is already running there), but never strand it.
+    leave_bal_hold();
+    begin_shutdown();
+  } else if (contactorState != ContactorState::SHUTTING_DOWN) {
+    begin_shutdown();
+  }
+}
+
+// Records the outcome and returns to OFF. The caller moves the state machine
+// on (BAL_HOLD has to be left with leave_bal_hold()).
+void Mg4Battery::end_bal_cycle(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(bal_cycle_result, sizeof(bal_cycle_result), fmt, args);
+  va_end(args);
+  logging.printf("[MG4] Balance cycle ended: %s\n", bal_cycle_result);
+  bal_cycle = BalCycle::OFF;
+  bal_wake_armed = false;
+}
+
+void Mg4Battery::enter_bal_hold(unsigned long now_ms) {
+  logging.printf("[MG4] Balance cycle: holding open for balancing\n");
+  bal_cycle = BalCycle::HOLD;
+  bal_hold_start_ms = now_ms;
+  bal_sleep_checked = false;
+  bal_hold_sweeps = bal_sweep_count;
+  bal_hold_have_sum = false;
+  bal_hold_prev_sum = 0;
+  bal_stall_sweeps = 0;
+  mg4_seq_start = mg4_seq_tick;
+  contactorState = ContactorState::BAL_HOLD;
+}
+
+void Mg4Battery::leave_bal_hold() {
+  // The normal identify/close logic takes over.
+  contactorWaitStartMillis = 0;
+  mg4_seq_start = mg4_seq_tick;
+  contactorState = ContactorState::WAITING_FOR_PACK;
+}
+
+void Mg4Battery::bal_hold_tick(unsigned long now_ms) {
+  if (now_ms - bal_hold_start_ms >= BAL_HOLD_MAX_MS) {
+    end_bal_cycle("time limit (%luh)", BAL_HOLD_MAX_MS / 3600000);
+    leave_bal_hold();
+    return;
+  }
+
+  const uint8_t g = BAL_GATE_PAGE - 1;
+  if (!bal_sleep_checked && bal_page_seen[g]) {
+    const uint32_t sleep_s = bal_page[g][0];
+    if (bal_page[g][1] == 0 || sleep_s < BAL_SLEEP_ACCEPT_S) {
+      end_bal_cycle("sleep not accepted (BMS slept %lus, valid flag %lu)", (unsigned long)sleep_s,
+                    (unsigned long)bal_page[g][1]);
+      leave_bal_hold();
+      return;
+    }
+    bal_sleep_checked = true;
+  }
+
+  if (bal_sweep_count == bal_hold_sweeps) {
+    return;  // No new full 0x689 sweep
+  }
+  bal_hold_sweeps = bal_sweep_count;
+  if (bal_last_nonzero == 0) {
+    if (bal_hold_have_sum) {
+      end_bal_cycle("done");
+    } else {
+      end_bal_cycle("no balancing planned (%s)", bal_no_plan_hint());
+    }
+    leave_bal_hold();
+    return;
+  }
+  if (bal_hold_have_sum && bal_last_sum >= bal_hold_prev_sum) {
+    if (bal_stall_sweeps < 0xFF) {
+      bal_stall_sweeps++;
+    }
+    if (bal_stall_sweeps == BAL_PAUSE_SWEEPS) {
+      logging.printf("[MG4] Balance cycle: balancing paused, likely %s\n", bal_inhibit_hint());
+    }
+  } else {
+    bal_stall_sweeps = 0;
+  }
+  bal_hold_prev_sum = bal_last_sum;
+  bal_hold_have_sum = true;
+}
+
+// Likely reason the BMS planned nothing after a valid sleep.
+const char* Mg4Battery::bal_no_plan_hint() const {
+  const uint8_t g = BAL_GATE_PAGE - 1;
+  const uint16_t soc = bms_soc_centipercent;
+  const bool top = datalayer.battery.status.cell_max_voltage_mV >= BAL_TOP_CELL_MV;
+  if (soc > BAL_LOW_SOC_CP && soc < BAL_HIGH_SOC_CP && !top) {
+    return "SoC in the flat mid range: charge above 80% first";
+  }
+  if (top && bal_page_seen[g] && bal_page[g][4] < BAL_TOP_REST_S) {
+    return "rest under 30 min";
+  }
+  return "cell spread below the BMS threshold";
+}
+
+// Likely reason the remaining minutes stopped falling. The BMS also pauses for
+// a 12V supply at or below 12.1V and a second (AFE?) temperature, which aren't
+// visible here.
+const char* Mg4Battery::bal_inhibit_hint() const {
+  if (bms_soc_centipercent <= BAL_INHIBIT_SOC_CP) {
+    return "SoC at or below 10%";
+  }
+  if (datalayer.battery.status.temperature_max_dC >= 900) {
+    return "cell temperature near 95C";
+  }
+  return "unknown (12V supply at or below 12.1V, or AFE temperature?)";
 }
 
 void Mg4Battery::transmit_can(unsigned long currentMillis) {
@@ -1321,7 +1556,7 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
   }
 
   if (contactorState != ContactorState::SLEEPING) {
-    // UDS polling (and the DID sweep) pauses while sleeping; anything in
+    // UDS polling pauses while sleeping; anything in
     // flight just times out once it resumes.
     transmit_uds_can(currentMillis);
   }
@@ -1361,57 +1596,7 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
       break;  // End of cycle
   }
 
-  if (pid == did_sweep_in_flight) {
-    // Answer to a background sweep request: record it and let the poll list
-    // continue.
-    record_did_sweep_result(pid, data, length);
-    did_sweep_in_flight = 0;
-    return 0;
-  }
-
-  if (did_sweep_active()) {
-    // Answer from the poll list: interleave the next sweep DID. Sweep DIDs
-    // that are rejected or time out aren't retried - the scan list just
-    // resumes, and the next poll answer hands out the following DID.
-    did_sweep_in_flight = (uint16_t)did_sweep_next++;
-    return did_sweep_in_flight;
-  }
-
   return 0;  // Continue normal PID cycling
-}
-
-Mg4Battery::~Mg4Battery() {
-  free(did_sweep_buf);
-}
-
-void Mg4Battery::record_did_sweep_result(uint16_t did, const uint8_t* data, uint16_t length) {
-  const uint16_t kept = length > DID_SWEEP_MAX_DATA_LEN ? DID_SWEEP_MAX_DATA_LEN : length;
-  const uint32_t needed = did_sweep_buf_len + DID_SWEEP_RECORD_HEADER_LEN + kept;
-  if (needed > DID_SWEEP_BUF_MAX) {
-    did_sweep_dropped++;
-    return;
-  }
-  if (needed > did_sweep_buf_capacity) {
-    uint32_t new_capacity = did_sweep_buf_capacity + DID_SWEEP_BUF_CHUNK;
-    if (new_capacity > DID_SWEEP_BUF_MAX) {
-      new_capacity = DID_SWEEP_BUF_MAX;
-    }
-    uint8_t* grown = (uint8_t*)realloc(did_sweep_buf, new_capacity);
-    if (grown == nullptr) {
-      did_sweep_dropped++;
-      return;
-    }
-    did_sweep_buf = grown;
-    did_sweep_buf_capacity = new_capacity;
-  }
-
-  uint8_t* rec = did_sweep_buf + did_sweep_buf_len;
-  rec[0] = did >> 8;
-  rec[1] = did & 0xFF;
-  rec[2] = length > 255 ? 255 : length;
-  memcpy(rec + DID_SWEEP_RECORD_HEADER_LEN, data, kept);
-  did_sweep_buf_len = needed;
-  did_sweep_answered++;
 }
 
 void Mg4Battery::identify_battery() {
@@ -1532,12 +1717,11 @@ static void print_chars_or_hex(char* buf, uint16_t buf_size, const uint8_t* data
 
 String Mg4Battery::get_uds_info_html() {
   // Reserve enough up front that the appends below never reallocate: ~1KB of
-  // fixed text and sweep header, up to 9 chars per isolation history sample
-  // (8-digit ohms + comma), the balancing listing, and one page of the sweep
-  // listing.
+  // fixed text, up to 9 chars per isolation history sample (8-digit ohms +
+  // comma) and the balancing listing.
   String html;
-  html.reserve(1024 + SLEEP_HTML_BUDGET + iso_history_count * 9 + BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET +
-               DID_SWEEP_PAGE_HTML_BUDGET);
+  html.reserve(1024 + SLEEP_HTML_BUDGET + MODE_HTML_BUDGET + iso_history_count * 9 + BAL_HTML_BUDGET +
+               BAL_STATUS_HTML_BUDGET);
 
   render_sleep_html(html);
 
@@ -1586,28 +1770,32 @@ String Mg4Battery::get_uds_info_html() {
   html += "<br>ECU software: ";
   html += buf;
 
+  render_mode_html(html);
   render_bal_status_html(html);
   render_balancing_html(html);
-  render_did_sweep_html(html);
 
   return html;
 }
 
-// Mark every cell not-seen, so the next complete sweep is clearly fresh.
+// Mark every cell not-seen, so the next complete sweep is clearly fresh, and
+// forget the 0xB0E5 pages (the sleep time belongs to the previous wake).
 void Mg4Battery::bal_reset() {
   memset(bal_demand, 0xFF, sizeof(bal_demand));  // BAL_NOT_SEEN
   bal_last_cell = 0;
   bal_have_sum = false;
+  memset(bal_page_seen, 0, sizeof(bal_page_seen));
 }
 
 // Log one summary line per complete sweep (every cell seen since the last
-// reset). The sum is the single number to compare before and after a sleep.
+// reset). The total remaining minutes is the single number to compare before
+// and after a sleep, and the balance cycle follows it.
 void Mg4Battery::bal_sweep_complete() {
   uint8_t cells = datalayer.battery.info.number_of_cells;
   if (cells == 0 || cells > BAL_MAX_CELLS) {
     return;
   }
   uint16_t nonzero = 0;
+  uint16_t max_min = 0;
   uint32_t sum = 0;
   for (uint8_t i = 0; i < cells; i++) {
     if (bal_demand[i] == BAL_NOT_SEEN) {
@@ -1616,12 +1804,18 @@ void Mg4Battery::bal_sweep_complete() {
     if (bal_demand[i] != 0) {
       nonzero++;
       sum += bal_demand[i];
+      if (bal_demand[i] > max_min) {
+        max_min = bal_demand[i];
+      }
     }
   }
   bal_last_sum = sum;
+  bal_last_nonzero = nonzero;
+  bal_last_max = max_min;
   bal_have_sum = true;
-  logging.printf("[MG4] Balancing sweep: %u/%u cells non-zero, sum %lu\n", (unsigned)nonzero, (unsigned)cells,
-                 (unsigned long)sum);
+  bal_sweep_count++;
+  logging.printf("[MG4] Balancing sweep: %u/%u cells balancing, %lu min remaining in total\n", (unsigned)nonzero,
+                 (unsigned)cells, (unsigned long)sum);
 }
 
 void Mg4Battery::render_sleep_html(String& html) {
@@ -1669,13 +1863,82 @@ void Mg4Battery::render_sleep_html(String& html) {
     html += "<br>Last sleep attempt aborted: ";
     html += sleep_abort_reason;
   }
+  render_bal_cycle_html(html);
+}
+
+static void append_hm(String& html, unsigned long minutes) {
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%luh%02lum", minutes / 60, minutes % 60);
+  html += buf;
+}
+
+void Mg4Battery::render_bal_cycle_html(String& html) {
+  char buf[48];
+  if (bal_cycle == BalCycle::OFF) {
+    if (bal_cycle_result[0]) {
+      html += "<br>Last balance cycle: ";
+      html += bal_cycle_result;
+    }
+    return;
+  }
+  html += "<br>Balance cycle: ";
+  switch (contactorState) {
+    case ContactorState::SHUTTING_DOWN:
+      html += "shutting down (pack opening)";
+      break;
+    case ContactorState::SLEEPING:
+      if (bal_wake_armed) {
+        const unsigned long left = (long)(bal_wake_at_ms - last_tick_ms) > 0 ? bal_wake_at_ms - last_tick_ms : 0;
+        snprintf(buf, sizeof(buf), "sleeping, waking in %lum%02lus", left / 60000, left / 1000 % 60);
+        html += buf;
+      } else {
+        html += "waiting for the BMS to go silent";
+      }
+      if (sleep_self_wakes > 0) {
+        snprintf(buf, sizeof(buf), " (%u self-wakes)", (unsigned)sleep_self_wakes);
+        html += buf;
+      }
+      break;
+    case ContactorState::WAKING:
+      html += "waking";
+      break;
+    case ContactorState::BAL_HOLD:
+      if (!bal_sleep_checked) {
+        html += "awake, waiting for 0xB0E5 page 6";
+      } else if (!bal_hold_have_sum) {
+        html += "sleep accepted, waiting for a full 0x689 sweep";
+      } else if (bal_stall_sweeps >= BAL_PAUSE_SWEEPS) {
+        html += "balancing paused: remaining time not falling. Likely: ";
+        html += bal_inhibit_hint();
+      } else {
+        snprintf(buf, sizeof(buf), "balancing: %u cells, longest ", (unsigned)bal_last_nonzero);
+        html += buf;
+        append_hm(html, bal_last_max);
+      }
+      html += ", ";
+      append_hm(html, (last_tick_ms - bal_hold_start_ms) / 60000);
+      html += " into hold";
+      break;
+    default:
+      break;
+  }
+}
+
+void Mg4Battery::render_mode_html(String& html) {
+  char buf[48];
+  html += "<h3>BMS mode</h3>Mode: ";
+  html += bms_mode_label();
+  if (bms_pn_received) {
+    snprintf(buf, sizeof(buf), " (PN %02X)", bms_pn);
+    html += buf;
+  }
 }
 
 void Mg4Battery::render_balancing_html(String& html) {
-  char buf[48];
+  char buf[64];
   uint16_t seen = 0;
   uint16_t nonzero = 0;
-  uint16_t max_demand = 0;
+  uint16_t max_min = 0;
   for (uint8_t i = 0; i < BAL_MAX_CELLS; i++) {
     if (bal_demand[i] == BAL_NOT_SEEN) {
       continue;
@@ -1683,173 +1946,109 @@ void Mg4Battery::render_balancing_html(String& html) {
     seen++;
     if (bal_demand[i] != 0) {
       nonzero++;
-      if (bal_demand[i] > max_demand) {
-        max_demand = bal_demand[i];
+      if (bal_demand[i] > max_min) {
+        max_min = bal_demand[i];
       }
     }
   }
 
-  html += "<h3>Cell balancing demand (0x689, raw)</h3>";
-  snprintf(buf, sizeof(buf), "%u/%u cells reported, %u non-zero", (unsigned)seen,
+  html += "<h3>Cell balancing remaining (0x689 slot 0x0D)</h3>";
+  snprintf(buf, sizeof(buf), "%u/%u cells reported, %u balancing", (unsigned)seen,
            (unsigned)datalayer.battery.info.number_of_cells, (unsigned)nonzero);
   html += buf;
   if (nonzero == 0) {
     html += "<br>";
     return;
   }
-  snprintf(buf, sizeof(buf), ", max %u", (unsigned)max_demand);
+  snprintf(buf, sizeof(buf), ", longest %uh%02um", (unsigned)(max_min / 60), (unsigned)(max_min % 60));
   html += buf;
   if (bal_have_sum) {
-    snprintf(buf, sizeof(buf), ", last full sweep sum %lu", (unsigned long)bal_last_sum);
+    snprintf(buf, sizeof(buf), ", last full sweep %lu min in total", (unsigned long)bal_last_sum);
     html += buf;
   }
 
-  // Only the non-zero cells are listed, as "cell: value", flowing into columns.
+  // Only the cells with time remaining are listed, as "cell: remaining",
+  // flowing into columns.
   html += "<div style='columns: 4 120px; font-family: monospace;'>";
   for (uint8_t i = 0; i < BAL_MAX_CELLS; i++) {
     if (bal_demand[i] == BAL_NOT_SEEN || bal_demand[i] == 0) {
       continue;
     }
-    snprintf(buf, sizeof(buf), "%u: %u<br>", (unsigned)(i + 1), (unsigned)bal_demand[i]);
+    snprintf(buf, sizeof(buf), "%u: %uh%02um<br>", (unsigned)(i + 1), (unsigned)(bal_demand[i] / 60),
+             (unsigned)(bal_demand[i] % 60));
     html += buf;
   }
   html += "</div>";
 }
 
-constexpr uint8_t Mg4Battery::BAL_FIELD_BYTE[];
-
-static const char* const BAL_FIELD_NAME[] = {"master [6]", "module [5]", "cells half A [2]", "cells half B [3]"};
-
-bool Mg4Battery::bal_field_active(int field, uint8_t raw) {
-  switch (field) {
-    case BAL_FIELD_MASTER:
-      return raw == BAL_STATUS_MASTER_ON;
-    case BAL_FIELD_MODULE:
-      return raw == BAL_STATUS_MODULE_ON;
-    default:
-      return raw != 0;
-  }
+static uint32_t be32(const uint8_t* p) {
+  return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
+// One page of DID 0xB0E5 (see BAL_STATUS_LEN). Page 6 changes are logged.
 void Mg4Battery::record_bal_status(const uint8_t* data, uint16_t length) {
-  if (length < BAL_STATUS_MIN_LEN) {
+  if (length < BAL_STATUS_LEN) {
     return;
   }
   bal_status_polls++;
-  for (int f = 0; f < BAL_FIELD_COUNT; f++) {
-    uint8_t raw = data[BAL_FIELD_BYTE[f]];
-    if (!bal_status_received) {
-      logging.printf("[MG4] Balancing status %s: 0x%02X\n", BAL_FIELD_NAME[f], raw);
-    } else if (raw != bal_status_raw[f]) {
-      logging.printf("[MG4] Balancing status %s: 0x%02X -> 0x%02X\n", BAL_FIELD_NAME[f], bal_status_raw[f], raw);
-    }
-    bal_status_raw[f] = raw;
-    if (bal_field_active(f, raw)) {
-      bal_status_active_count[f]++;
+  const uint32_t page = be32(data);
+  if (page < 1 || page > BAL_STATUS_PAGES) {
+    return;
+  }
+  uint32_t* w = bal_page[page - 1];
+  if (page == BAL_GATE_PAGE) {
+    const uint32_t sleep_s = be32(data + 4);
+    const uint32_t valid = be32(data + 8);
+    if (!bal_page_seen[page - 1] || sleep_s != w[0] || valid != w[1]) {
+      logging.printf("[MG4] BMS slept %lus before this wake (valid flag %lu), rest %lus\n", (unsigned long)sleep_s,
+                     (unsigned long)valid, (unsigned long)be32(data + 20));
     }
   }
-  bal_status_received = true;
+  for (uint8_t k = 0; k < BAL_STATUS_WORDS; k++) {
+    w[k] = be32(data + 4 + 4 * k);
+  }
+  bal_page_seen[page - 1] = true;
+}
+
+static void append_hms(String& html, uint32_t s) {
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%luh%02lum%02lus", (unsigned long)(s / 3600), (unsigned long)(s / 60 % 60),
+           (unsigned long)(s % 60));
+  html += buf;
 }
 
 void Mg4Battery::render_bal_status_html(String& html) {
   char buf[96];
-  html += "<h3>Balancing status (0xB11A)</h3>";
-  if (!bal_status_received) {
+  html += "<h3>Balancing gate (0xB0E5)</h3>";
+  if (bal_status_polls == 0) {
     html += "N/A<br>";
     return;
   }
-  snprintf(buf, sizeof(buf), "Polls: %lu<br>", (unsigned long)bal_status_polls);
-  html += buf;
-  for (int f = 0; f < BAL_FIELD_COUNT; f++) {
-    snprintf(buf, sizeof(buf), "%s: 0x%02X %s, balancing in %lu polls<br>", BAL_FIELD_NAME[f], bal_status_raw[f],
-             bal_field_active(f, bal_status_raw[f]) ? "(ON)" : "(off)", (unsigned long)bal_status_active_count[f]);
-    html += buf;
-  }
-}
-
-void Mg4Battery::render_did_sweep_html(String& html) {
-  char buf[DID_SWEEP_MAX_DATA_LEN * 4 + 8];
-
-  html += "<h3>UDS DID sweep</h3>";
-  if (did_sweep_active()) {
-    snprintf(buf, sizeof(buf), "In progress: %lu/%lu DIDs tried, next 0x%04lX",
-             (unsigned long)(did_sweep_next - DID_SWEEP_FIRST), (unsigned long)DID_SWEEP_TOTAL,
-             (unsigned long)did_sweep_next);
+  const uint8_t g = BAL_GATE_PAGE - 1;
+  if (bal_page_seen[g]) {
+    const uint32_t sleep_s = bal_page[g][0];
+    const uint32_t rest_s = bal_page[g][4];
+    const bool sleep_ok = bal_page[g][1] != 0 && sleep_s >= BAL_MIN_SLEEP_S;
+    html += "Sleep before this wake: ";
+    append_hms(html, sleep_s);
+    html += sleep_ok ? " (valid: balancing can be planned)" : " (not valid: no new balancing this wake)";
+    html += "<br>Rest time: ";
+    append_hms(html, rest_s);
+    html += rest_s >= BAL_TOP_REST_S ? " (>= 30 min)" : " (< 30 min: no top-of-charge balancing yet)";
+    html += "<br>";
   } else {
-    snprintf(buf, sizeof(buf), "Complete: %lu DIDs tried", (unsigned long)DID_SWEEP_TOTAL);
+    html += "Waiting for page 6<br>";
   }
-  html += buf;
-  snprintf(buf, sizeof(buf), "<br>%u answered, %lu/%lu bytes stored", did_sweep_answered,
-           (unsigned long)did_sweep_buf_len, (unsigned long)DID_SWEEP_BUF_MAX);
-  html += buf;
-  if (did_sweep_dropped > 0) {
-    snprintf(buf, sizeof(buf), ", %u dropped (buffer full)", did_sweep_dropped);
-    html += buf;
-  }
-  html += "<br>";
-
-  if (did_sweep_buf_len == 0) {
-    return;
-  }
-
-  // The listing is split into pages of at most DID_SWEEP_PAGE_HTML_BUDGET
-  // rendered bytes, showing the next page on each reload so the page never
-  // has to hold the whole listing at once. Records are only ever appended, so
-  // earlier page boundaries stay put while the sweep runs.
-  uint16_t pages = 0;
-  uint32_t page_start = 0;
-  for (uint32_t pos = 0; pos < did_sweep_buf_len; pos = did_sweep_page_end(pos)) {
-    if (pages == did_sweep_page) {
-      page_start = pos;
+  // All pages raw, for the fields not decoded yet.
+  html += "<div style='font-family: monospace;'>";
+  for (uint8_t p = 0; p < BAL_STATUS_PAGES; p++) {
+    if (!bal_page_seen[p]) {
+      continue;
     }
-    pages++;
-  }
-  if (did_sweep_page >= pages) {
-    did_sweep_page = 0;
-    page_start = 0;
-  }
-  const uint32_t page_end = did_sweep_page_end(page_start);
-
-  if (pages > 1) {
-    snprintf(buf, sizeof(buf), "Page %u/%u (reload for the next page)<br>", did_sweep_page + 1, pages);
+    snprintf(buf, sizeof(buf), "page %u: %lu %lu %lu %lu %lu<br>", (unsigned)(p + 1), (unsigned long)bal_page[p][0],
+             (unsigned long)bal_page[p][1], (unsigned long)bal_page[p][2], (unsigned long)bal_page[p][3],
+             (unsigned long)bal_page[p][4]);
     html += buf;
-  }
-
-  // Each answer is listed as "DID: data (length)", flowing into columns.
-  html += "<div style='columns: 3 320px; font-family: monospace;'>";
-  for (uint32_t pos = page_start; pos < page_end;) {
-    const uint8_t* rec = did_sweep_buf + pos;
-    const uint16_t did = (rec[0] << 8) | rec[1];
-    const uint8_t length = rec[2];
-    const uint16_t kept = length > DID_SWEEP_MAX_DATA_LEN ? DID_SWEEP_MAX_DATA_LEN : length;
-    snprintf(buf, sizeof(buf), "%04X: ", did);
-    html += buf;
-    print_chars_or_hex(buf, sizeof(buf), rec + DID_SWEEP_RECORD_HEADER_LEN, kept);
-    html += buf;
-    snprintf(buf, sizeof(buf), kept < length ? " (%u, truncated)<br>" : " (%u)<br>", length);
-    html += buf;
-    pos += DID_SWEEP_RECORD_HEADER_LEN + kept;
   }
   html += "</div>";
-
-  did_sweep_page = (did_sweep_page + 1) % pages;
-}
-
-uint32_t Mg4Battery::did_sweep_page_end(uint32_t start) const {
-  // Takes records from start while their worst-case rendered size (4 chars per
-  // data byte plus the "XXXX: " / " (nnn, truncated)<br>" decoration) fits the
-  // page budget, always taking at least one.
-  uint32_t pos = start;
-  uint32_t rendered = 0;
-  while (pos + DID_SWEEP_RECORD_HEADER_LEN <= did_sweep_buf_len) {
-    const uint8_t length = did_sweep_buf[pos + 2];
-    const uint16_t kept = length > DID_SWEEP_MAX_DATA_LEN ? DID_SWEEP_MAX_DATA_LEN : length;
-    const uint32_t cost = kept * 4 + DID_SWEEP_RECORD_HTML_OVERHEAD;
-    if (pos > start && rendered + cost > DID_SWEEP_PAGE_HTML_BUDGET) {
-      break;
-    }
-    rendered += cost;
-    pos += DID_SWEEP_RECORD_HEADER_LEN + kept;
-  }
-  return pos;
 }

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <vector>
 #include "../../Software/src/battery/BATTERIES.h"
 #include "../../Software/src/battery/MG-4-BATTERY.h"
@@ -12,19 +13,19 @@ const std::vector<CAN_frame>& get_transmitted_frames();
 // Testable subclass exposing protected contactor/identification state.
 class TestableMg4Battery : public Mg4Battery {
  public:
+  using Mg4Battery::bal_cycle;
+  using Mg4Battery::BAL_CYCLE_SLEEP_MS;
   using Mg4Battery::bal_demand;
   using Mg4Battery::bal_have_sum;
+  using Mg4Battery::BAL_HOLD_MAX_MS;
   using Mg4Battery::bal_last_sum;
-  using Mg4Battery::bal_status_active_count;
+  using Mg4Battery::bal_page;
+  using Mg4Battery::bal_page_seen;
+  using Mg4Battery::BAL_SILENCE_TIMEOUT_MS;
   using Mg4Battery::bal_status_polls;
+  using Mg4Battery::BalCycle;
   using Mg4Battery::batteryIdentified;
   using Mg4Battery::contactorState;
-  using Mg4Battery::did_sweep_answered;
-  using Mg4Battery::did_sweep_buf_len;
-  using Mg4Battery::DID_SWEEP_BUF_MAX;
-  using Mg4Battery::did_sweep_dropped;
-  using Mg4Battery::did_sweep_next;
-  using Mg4Battery::DID_SWEEP_PAGE_HTML_BUDGET;
   using Mg4Battery::mg4_seq_start;
   using Mg4Battery::mg4_seq_tick;
   using Mg4Battery::reclose_blocked;
@@ -44,14 +45,11 @@ class TestableMg4Battery : public Mg4Battery {
   using Mg4Battery::ShutdownPhase;
   using Mg4Battery::sleep_abort_reason;
   using Mg4Battery::sleep_self_wakes;
+  using Mg4Battery::SLEEP_SILENT_MS;
   using Mg4Battery::SNAP_ABSORB_MAX_S;
   using Mg4Battery::SNAP_OVER_S;
   using Mg4Battery::snapEnded;
   using Mg4Battery::WAKE_REQ03_T;
-  using TestableMg4Battery::BAL_FIELD_HALF_A;
-  using TestableMg4Battery::BAL_FIELD_HALF_B;
-  using TestableMg4Battery::BAL_FIELD_MASTER;
-  using TestableMg4Battery::BAL_FIELD_MODULE;
 };
 
 class Mg4BatteryTest : public ::testing::Test {
@@ -980,7 +978,7 @@ TEST_F(Mg4SleepTest, ShutdownFollowsCarSequence) {
 TEST_F(Mg4SleepTest, SleepingTransmitsNothing) {
   sleep_pack();
   clear_transmitted_frames();
-  // 100s, long enough for UDS polling, the DID sweep and 0x4F3 to have fired.
+  // 100s, long enough for UDS polling and 0x4F3 to have fired.
   step_10ms(10000);
   EXPECT_TRUE(get_transmitted_frames().empty());
   EXPECT_EQ(battery->contactorState, CS::SLEEPING);
@@ -1184,7 +1182,8 @@ TEST_F(Mg4SleepTest, BalancingSweepSummedAndResetOnWake) {
   send_689_cell(1, 0);
   EXPECT_TRUE(battery->bal_have_sum);
   EXPECT_EQ(battery->bal_last_sum, 123u);
-  EXPECT_NE(info_html().find("last full sweep sum 123"), std::string::npos);
+  EXPECT_NE(info_html().find("last full sweep 123 min in total"), std::string::npos);
+  EXPECT_NE(info_html().find("3: 1h40m<br>"), std::string::npos);
 
   // Waking marks every cell not-seen again.
   send_12c(3800, 3790, 0, 3900);
@@ -1595,146 +1594,287 @@ TEST_F(Mg4BatteryTest, ClosingWireSequenceMatchesLegacyReplay) {
   EXPECT_EQ(f314.back().data.u8[6], 0x57);
 }
 
-// Every poll list answer is followed by one request for the next sweep DID,
-// starting at 0x0001; a sweep answer (or a rejected sweep DID, which never
-// reaches handle_pid) lets the poll list continue.
-TEST_F(Mg4BatteryTest, DidSweepInterleavesWithPollList) {
-  const uint8_t data[2] = {0x26, 0xAC};
-
-  EXPECT_EQ(battery->handle_pid(0xB061, 0x26AC, data, sizeof(data)), 0x0001u);
-  // The poll answer is still processed when a detour is returned.
-  EXPECT_EQ(datalayer.battery.status.soh_pptt, 0x26AC);
-  EXPECT_EQ(battery->handle_pid(0x0001, 0, data, sizeof(data)), 0x0000u);
-  EXPECT_EQ(battery->handle_pid(0xB045, 0, data, sizeof(data)), 0x0002u);
-  // 0x0002 rejected: no handle_pid call, the next poll answer moves on.
-  EXPECT_EQ(battery->handle_pid(0xF192, 0, data, sizeof(data)), 0x0003u);
+static void put_be32(uint8_t* p, uint32_t v) {
+  p[0] = (uint8_t)(v >> 24);
+  p[1] = (uint8_t)(v >> 16);
+  p[2] = (uint8_t)(v >> 8);
+  p[3] = (uint8_t)v;
 }
 
-// Sweep answers are packed and rendered; poll list answers aren't recorded.
-TEST_F(Mg4BatteryTest, DidSweepRecordsAndRendersAnswers) {
-  const uint8_t poll[2] = {0x26, 0xAC};
-  const uint8_t ascii[3] = {'A', 'B', 0x00};
+// One 24-byte DID 0xB0E5 page: page number then five words.
+static void send_b0e5(TestableMg4Battery* battery, uint32_t page, uint32_t w1, uint32_t w2, uint32_t w5) {
+  uint8_t data[24] = {0};
+  put_be32(data, page);
+  put_be32(data + 4, w1);
+  put_be32(data + 8, w2);
+  put_be32(data + 20, w5);
+  battery->handle_pid(0xB0E5, 0, data, sizeof(data));
+}
 
-  battery->handle_pid(0xB061, 0, poll, sizeof(poll));  // -> 0x0001
-  battery->handle_pid(0x0001, 0, ascii, sizeof(ascii));
-  battery->handle_pid(0xB061, 0, poll, sizeof(poll));  // -> 0x0002, never answered
-
-  EXPECT_EQ(battery->did_sweep_answered, 1u);
-  EXPECT_EQ(battery->did_sweep_buf_len, 3u + sizeof(ascii));
+TEST_F(Mg4BatteryTest, BalancingGateDecodesPage6) {
   std::string html = battery->get_uds_info_html().c_str();
-  EXPECT_NE(html.find("In progress: 2/65535 DIDs tried, next 0x0003"), std::string::npos);
-  EXPECT_NE(html.find("0001: AB[00] (3)"), std::string::npos);
-  EXPECT_EQ(html.find("B061:"), std::string::npos);
-  // Everything fits on one page, so there's no page indicator.
-  EXPECT_EQ(html.find("Page "), std::string::npos);
-}
+  EXPECT_NE(html.find("Balancing gate (0xB0E5)</h3>N/A"), std::string::npos);
 
-// The sweep ends after 0xFFFF, never hands out 0x0000, and then stays out of
-// the way of the poll list.
-TEST_F(Mg4BatteryTest, DidSweepStopsAfterFullRange) {
-  const uint8_t data[1] = {0x00};
-  battery->did_sweep_next = 0xFFFE;
+  send_b0e5(battery, 2, 11, 22, 55);
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Waiting for page 6"), std::string::npos);
+  EXPECT_NE(html.find("page 2: 11 22 0 0 55"), std::string::npos);
 
-  EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0xFFFEu);
-  EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0xFFFFu);
-  EXPECT_EQ(battery->handle_pid(0xFFFF, 0, data, sizeof(data)), 0x0000u);
-  for (int i = 0; i < 10; i++) {
-    EXPECT_EQ(battery->handle_pid(0xB061, 0, data, sizeof(data)), 0x0000u);
-  }
-  std::string html = battery->get_uds_info_html().c_str();
-  EXPECT_NE(html.find("Complete: 65535 DIDs tried"), std::string::npos);
-  EXPECT_NE(html.find("FFFF: [00] (1)"), std::string::npos);
-}
+  send_b0e5(battery, 6, 7200, 1, 7300);
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Sleep before this wake: 2h00m00s (valid"), std::string::npos);
+  EXPECT_NE(html.find("Rest time: 2h01m40s (>= 30 min)"), std::string::npos);
 
-// Long answers are truncated, and answers beyond the buffer cap are dropped
-// rather than overflowing it.
-TEST_F(Mg4BatteryTest, DidSweepTruncatesAndCapsStorage) {
-  uint8_t big[100];
-  memset(big, 'x', sizeof(big));
-  const uint8_t poll[1] = {0x00};
-
-  for (int i = 0; i < 200; i++) {
-    uint16_t did = battery->handle_pid(0xB061, 0, poll, sizeof(poll));
-    battery->handle_pid(did, 0, big, sizeof(big));
-  }
-
-  EXPECT_GT(battery->did_sweep_dropped, 0u);
-  EXPECT_LE(battery->did_sweep_buf_len, (uint32_t)battery->DID_SWEEP_BUF_MAX);
-  EXPECT_EQ(battery->did_sweep_answered + battery->did_sweep_dropped, 200u);
-  std::string html = battery->get_uds_info_html().c_str();
-  EXPECT_NE(html.find("0001: " + std::string(64, 'x') + " (100, truncated)"), std::string::npos);
-  EXPECT_NE(html.find("dropped (buffer full)"), std::string::npos);
-  // Only one page of the listing is rendered per load.
-  EXPECT_LE(html.size(), 1024u + battery->DID_SWEEP_PAGE_HTML_BUDGET);
-}
-
-// The listing is shown one page per load, "Page n/N" cycling through every
-// record exactly once before wrapping, with each page within its budget - also
-// for many short, unprintable answers (the worst case for decoration).
-TEST_F(Mg4BatteryTest, DidSweepListingPagesAcrossReloads) {
-  const uint8_t poll[1] = {0x00};
-  const uint8_t tiny[1] = {0x01};
-
-  for (int i = 0; i < 3000; i++) {
-    uint16_t did = battery->handle_pid(0xB061, 0, poll, sizeof(poll));
-    battery->handle_pid(did, 0, i % 2 ? tiny : poll, i % 2 ? sizeof(tiny) : 0);
-  }
-  ASSERT_GT(battery->did_sweep_dropped, 0u);
-  const unsigned answered = battery->did_sweep_answered;
-
-  std::string first = battery->get_uds_info_html().c_str();
-  size_t at = first.find("Page 1/");
-  ASSERT_NE(at, std::string::npos);
-  const unsigned pages = std::stoul(first.substr(at + 7));
-  ASSERT_GT(pages, 1u);
-
-  unsigned records = 0;
-  std::string html = first;
-  for (unsigned page = 1; page <= pages; page++) {
-    if (page > 1) {
-      html = battery->get_uds_info_html().c_str();
-    }
-    EXPECT_NE(html.find("Page " + std::to_string(page) + "/" + std::to_string(pages)), std::string::npos);
-    EXPECT_LE(html.size(), 1024u + battery->DID_SWEEP_PAGE_HTML_BUDGET);
-    // Count records in the listing only (the header has ")<br>" too).
-    for (size_t pos = html.find("monospace;'>"); (pos = html.find(")<br>", pos)) != std::string::npos; pos++) {
-      records++;
-    }
-  }
-  EXPECT_EQ(records, answered);
-
-  // Wraps back to the first page.
-  EXPECT_EQ(std::string(battery->get_uds_info_html().c_str()), first);
-}
-
-TEST_F(Mg4BatteryTest, BalancingStatusTalliesAndDisplays) {
-  std::string html_before = battery->get_uds_info_html().c_str();
-  EXPECT_NE(html_before.find("Balancing status (0xB11A)</h3>N/A"), std::string::npos);
-
-  // Idle capture: [6]=00, [5]=2, [2]=[3]=00.
-  uint8_t idle[15] = {0};
-  idle[5] = 2;
-  battery->handle_pid(0xB11A, 0, idle, sizeof(idle));
-
-  // Balancing: master 0xAA, module 1, only half A has cells balancing.
-  uint8_t active[15] = {0};
-  active[2] = 0x04;
-  active[5] = 1;
-  active[6] = 0xAA;
-  battery->handle_pid(0xB11A, 0, active, sizeof(active));
-  battery->handle_pid(0xB11A, 0, active, sizeof(active));
-
-  // Short responses are ignored.
-  battery->handle_pid(0xB11A, 0, active, 6);
-
+  // Short answers and bad page numbers are ignored.
+  uint8_t short_data[8] = {0, 0, 0, 6};
+  battery->handle_pid(0xB0E5, 0, short_data, sizeof(short_data));
+  send_b0e5(battery, 9, 1, 1, 1);
   EXPECT_EQ(battery->bal_status_polls, 3u);
-  EXPECT_EQ(battery->bal_status_active_count[TestableMg4Battery::BAL_FIELD_MASTER], 2u);
-  EXPECT_EQ(battery->bal_status_active_count[TestableMg4Battery::BAL_FIELD_MODULE], 2u);
-  EXPECT_EQ(battery->bal_status_active_count[TestableMg4Battery::BAL_FIELD_HALF_A], 2u);
-  EXPECT_EQ(battery->bal_status_active_count[TestableMg4Battery::BAL_FIELD_HALF_B], 0u);
+  EXPECT_EQ(battery->bal_page[5][0], 7200u);
+}
 
-  std::string html = battery->get_uds_info_html().c_str();
-  EXPECT_NE(html.find("Polls: 3<br>"), std::string::npos);
-  EXPECT_NE(html.find("master [6]: 0xAA (ON), balancing in 2 polls"), std::string::npos);
-  EXPECT_NE(html.find("cells half B [3]: 0x00 (off), balancing in 0 polls"), std::string::npos);
+// ---- Balance cycle ----
+
+class Mg4BalCycleTest : public Mg4SleepTest {
+ protected:
+  // Every cell once, with `minutes(cell)` remaining, then the wrap to cell 1
+  // that completes the sweep.
+  template <typename F>
+  void sweep(F minutes) {
+    const uint8_t cells = datalayer.battery.info.number_of_cells;
+    for (uint8_t c = 1; c <= cells; c++) {
+      send_689_cell(c, minutes(c));
+    }
+    send_689_cell(1, minutes(1));
+  }
+
+  // 10ms steps in chunks, dropping the captured frames as it goes.
+  void run_ms(unsigned long ms) {
+    for (unsigned long done = 0; done < ms; done += 10000) {
+      step_10ms((int)std::min(1000UL, (ms - done) / 10));
+      clear_transmitted_frames();
+    }
+  }
+
+  // Closed pack -> button -> graceful shutdown -> SLEEPING.
+  void start_cycle() {
+    close_pack();
+    battery->request_balance_cycle();
+    EXPECT_TRUE(battery->is_balance_cycle_active());
+    step_10ms(1);
+    ASSERT_EQ(battery->contactorState, CS::SHUTTING_DOWN);
+    EXPECT_NE(info_html().find("Balance cycle: shutting down (pack opening)"), std::string::npos);
+    step_10ms(TestableMg4Battery::SHUTDOWN_HOLD_T);
+    send_15b_fd(3);
+    step_10ms(TestableMg4Battery::SHUTDOWN_OPEN_HOLD_T + 2);
+    ASSERT_EQ(battery->contactorState, CS::SLEEPING);
+  }
+
+  // The full sleep, the wake, and the BMS reporting in: BAL_HOLD.
+  void cycle_to_hold() {
+    start_cycle();
+    run_ms(TestableMg4Battery::BAL_CYCLE_SLEEP_MS);
+    ASSERT_EQ(battery->contactorState, CS::WAKING);
+    send_15b_fd(3);
+    step_10ms(TestableMg4Battery::WAKE_REQ03_T + 1);
+    ASSERT_EQ(battery->contactorState, CS::BAL_HOLD);
+    clear_transmitted_frames();
+  }
+
+  std::string result() { return info_html(); }
+};
+
+TEST_F(Mg4BalCycleTest, SleepsFixedDelayThenHoldsOpenUntilDone) {
+  start_cycle();
+  // Silent once nothing has been heard for 5s; the delay counts from the
+  // last frame, i.e. from the start of the sleep here.
+  EXPECT_NE(info_html().find("Balance cycle: waiting for the BMS to go silent"), std::string::npos);
+  step_10ms(TestableMg4Battery::SLEEP_SILENT_MS / 10 + 1);
+  EXPECT_NE(info_html().find("Balance cycle: sleeping, waking in 34m54s"), std::string::npos);
+  run_ms(TestableMg4Battery::BAL_CYCLE_SLEEP_MS - TestableMg4Battery::SLEEP_SILENT_MS - 1000);
+  EXPECT_EQ(battery->contactorState, CS::SLEEPING);
+  run_ms(1000);
+  EXPECT_EQ(battery->contactorState, CS::WAKING);
+
+  send_15b_fd(3);
+  step_10ms(TestableMg4Battery::WAKE_REQ03_T + 1);
+  ASSERT_EQ(battery->contactorState, CS::BAL_HOLD);
+  EXPECT_FALSE(battery->is_sleeping());
+  EXPECT_TRUE(battery->is_balance_cycle_active());
+
+  // Held at the open levels with no power, never closing, for a long time.
+  clear_transmitted_frames();
+  tick_1s(3800, 3790, 0, 3900, 900);
+  send_15b_fd(3);
+  step_10ms(6000);
+  EXPECT_EQ(battery->contactorState, CS::BAL_HOLD);
+  EXPECT_EQ(datalayer.battery.status.max_charge_power_W, 0u);
+  EXPECT_EQ(datalayer.battery.status.max_discharge_power_W, 0u);
+  for (const auto& sig : sent_08a()) {
+    ASSERT_EQ(sig, (Sig08a{0x00, 0x00, 0x00}));
+  }
+  EXPECT_NE(info_html().find("Balance cycle: awake, waiting for 0xB0E5 page 6"), std::string::npos);
+
+  send_b0e5(battery, 6, 2100, 1, 2160);
+  step_10ms(1);
+  EXPECT_NE(info_html().find("Balance cycle: sleep accepted, waiting for a full 0x689 sweep"), std::string::npos);
+
+  sweep([](uint8_t c) { return c == 5 ? 712 : (c == 9 ? 300 : 0); });
+  step_10ms(1);
+  EXPECT_NE(info_html().find("Balance cycle: balancing: 2 cells, longest 11h52m, 0h01m into hold"), std::string::npos);
+  sweep([](uint8_t c) { return c == 5 ? 708 : (c == 9 ? 296 : 0); });
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::BAL_HOLD);
+
+  // A sweep of zeros: done, back to the normal logic, which closes.
+  sweep([](uint8_t) { return 0; });
+  step_10ms(1);
+  EXPECT_EQ(battery->bal_cycle, TestableMg4Battery::BalCycle::OFF);
+  EXPECT_FALSE(battery->is_balance_cycle_active());
+  EXPECT_NE(info_html().find("Last balance cycle: done"), std::string::npos);
+  step_10ms(2);
+  EXPECT_EQ(battery->contactorState, CS::CLOSING);
+}
+
+TEST_F(Mg4BalCycleTest, RejectedSleepEndsCycle) {
+  cycle_to_hold();
+  send_b0e5(battery, 6, 100, 1, 160);
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::WAITING_FOR_PACK);
+  EXPECT_NE(result().find("Last balance cycle: sleep not accepted (BMS slept 100s, valid flag 1)"), std::string::npos);
+}
+
+TEST_F(Mg4BalCycleTest, InvalidSleepFlagEndsCycle) {
+  cycle_to_hold();
+  send_b0e5(battery, 6, 2100, 0, 2160);
+  step_10ms(1);
+  EXPECT_NE(result().find("sleep not accepted (BMS slept 2100s, valid flag 0)"), std::string::npos);
+}
+
+TEST_F(Mg4BalCycleTest, NothingPlannedAtMidSoc) {
+  identify_as_51kwh_lfp();
+  cycle_to_hold();
+  tick_1s(3300, 3290, 0, 3300, 500);
+  send_b0e5(battery, 6, 2100, 1, 2160);
+  sweep([](uint8_t) { return 0; });
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::WAITING_FOR_PACK);
+  EXPECT_NE(result().find("Last balance cycle: no balancing planned (SoC in the flat mid range"), std::string::npos);
+}
+
+TEST_F(Mg4BalCycleTest, ReportsPauseWhenRemainingStopsFalling) {
+  cycle_to_hold();
+  tick_1s(3800, 3790, 0, 3900, 50);  // 5% SoC
+  send_15b_fd(3, 50);
+  send_b0e5(battery, 6, 2100, 1, 2160);
+  for (int i = 0; i < 3; i++) {
+    sweep([](uint8_t c) { return c == 5 ? 400 : 0; });
+    step_10ms(1);
+  }
+  EXPECT_EQ(battery->contactorState, CS::BAL_HOLD);
+  EXPECT_NE(info_html().find("balancing paused: remaining time not falling. Likely: SoC at or below 10%"),
+            std::string::npos);
+  // Falling again clears it.
+  sweep([](uint8_t c) { return c == 5 ? 399 : 0; });
+  step_10ms(1);
+  EXPECT_NE(info_html().find("balancing: 1 cells, longest 6h39m"), std::string::npos);
+}
+
+TEST_F(Mg4BalCycleTest, SelfWakeRestartsDelayAtNextSilence) {
+  start_cycle();
+  run_ms(10 * 60 * 1000);
+  // The BMS talks for a moment 10 minutes in.
+  send_12c(3800, 3790, 0, 3900);
+  step_10ms(1);
+  run_ms(TestableMg4Battery::BAL_CYCLE_SLEEP_MS - 10 * 60 * 1000);
+  // The original deadline has passed, but the delay restarted.
+  EXPECT_EQ(battery->contactorState, CS::SLEEPING);
+  EXPECT_NE(info_html().find("(1 self-wakes)"), std::string::npos);
+  run_ms(10 * 60 * 1000);
+  EXPECT_EQ(battery->contactorState, CS::WAKING);
+}
+
+TEST_F(Mg4BalCycleTest, BmsThatNeverSleepsEndsCycle) {
+  start_cycle();
+  for (unsigned long t = 0; t < TestableMg4Battery::BAL_SILENCE_TIMEOUT_MS; t += 1000) {
+    send_12c(3800, 3790, 0, 3900);
+    step_10ms(100);
+    clear_transmitted_frames();
+  }
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::WAKING);
+  EXPECT_NE(info_html().find("Last balance cycle: BMS did not sleep"), std::string::npos);
+  send_15b_fd(3);
+  step_10ms(TestableMg4Battery::WAKE_REQ03_T + 1);
+  // Identified and open: the normal logic closes.
+  EXPECT_EQ(battery->contactorState, CS::CLOSING);
+}
+
+TEST_F(Mg4BalCycleTest, StopWhileAsleepWakesToNormal) {
+  start_cycle();
+  battery->request_balance_stop();
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::WAKING);
+  EXPECT_FALSE(battery->is_balance_cycle_active());
+  EXPECT_NE(info_html().find("Last balance cycle: stopped by user"), std::string::npos);
+  send_15b_fd(3);
+  step_10ms(TestableMg4Battery::WAKE_REQ03_T + 1);
+  // Identified and open: the normal logic closes.
+  EXPECT_EQ(battery->contactorState, CS::CLOSING);
+}
+
+TEST_F(Mg4BalCycleTest, StopDuringHoldReturnsToNormal) {
+  cycle_to_hold();
+  battery->request_balance_stop();
+  step_10ms(1);
+  // Identified and open: the normal logic closes.
+  EXPECT_EQ(battery->contactorState, CS::CLOSING);
+  EXPECT_NE(info_html().find("Last balance cycle: stopped by user"), std::string::npos);
+}
+
+TEST_F(Mg4BalCycleTest, WakeCancelsCycle) {
+  start_cycle();
+  battery->request_wake();
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::WAKING);
+  EXPECT_NE(info_html().find("Last balance cycle: cancelled by Wake"), std::string::npos);
+}
+
+TEST_F(Mg4BalCycleTest, SleepDuringHoldShutsDownAndStaysAsleep) {
+  cycle_to_hold();
+  battery->request_sleep();
+  step_10ms(TestableMg4Battery::SHUTDOWN_OPEN_HOLD_T + 2);
+  EXPECT_EQ(battery->contactorState, CS::SLEEPING);
+  EXPECT_NE(info_html().find("Last balance cycle: cancelled by Sleep"), std::string::npos);
+  run_ms(TestableMg4Battery::BAL_CYCLE_SLEEP_MS + 60000);
+  EXPECT_EQ(battery->contactorState, CS::SLEEPING);
+}
+
+TEST_F(Mg4BalCycleTest, FaultDuringHoldOpens) {
+  cycle_to_hold();
+  datalayer.system.status.system_status = FAULT;
+  step_10ms(1);
+  EXPECT_EQ(battery->contactorState, CS::OPENING);
+  EXPECT_NE(info_html().find("Last balance cycle: cancelled by fault"), std::string::npos);
+}
+
+TEST_F(Mg4BalCycleTest, ShutdownAbortEndsCycle) {
+  close_pack(50);  // 5A: never idle
+  battery->request_balance_cycle();
+  step_10ms(TestableMg4Battery::SHUTDOWN_HOLD_MAX_T + 2);
+  // Still closed: back to normal operation without ever opening.
+  EXPECT_EQ(battery->contactorState, CS::CLOSED);
+  EXPECT_FALSE(battery->is_balance_cycle_active());
+  EXPECT_NE(info_html().find("Last balance cycle: sleep aborted: current did not fall below 1A"), std::string::npos);
+}
+
+TEST_F(Mg4BalCycleTest, HoldEndsAtTimeLimit) {
+  cycle_to_hold();
+  send_b0e5(battery, 6, 2100, 1, 2160);
+  run_ms(TestableMg4Battery::BAL_HOLD_MAX_MS - 60000);
+  EXPECT_EQ(battery->contactorState, CS::BAL_HOLD);
+  run_ms(60000);
+  // Identified and open: the normal logic closes.
+  EXPECT_EQ(battery->contactorState, CS::CLOSING);
+  EXPECT_NE(info_html().find("Last balance cycle: time limit (13h)"), std::string::npos);
 }

@@ -131,6 +131,10 @@ class Battery {
   // is_sleeping() is true from the sleep request until woken, and picks which button is shown.
   virtual bool supports_sleep() { return false; }
   virtual bool is_sleeping() { return false; }
+  // Sleep the pack for a fixed time, then hold it awake and open while the BMS balances its cells.
+  // is_balance_cycle_active() is true from the request until the cycle ends, and picks the button.
+  virtual bool supports_balance_cycle() { return false; }
+  virtual bool is_balance_cycle_active() { return false; }
 
   virtual void request_isolation_test() {}
   virtual void clear_isolation() {}
@@ -158,6 +162,8 @@ class Battery {
   virtual void initiate_balancing() {}
   virtual void request_sleep() {}
   virtual void request_wake() {}
+  virtual void request_balance_cycle() {}
+  virtual void request_balance_stop() {}
   virtual void end_balancing() {}
   virtual void handle_precharge() {}
   virtual void action(uint32_t action_id, uint32_t value) {}

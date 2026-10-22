@@ -56,6 +56,15 @@ std::vector<BatteryCommand> battery_commands = {
     {"wakePack", "Wake", "wake the battery and close the contactors again?",
      [](Battery* b) { return b && b->supports_sleep() && b->is_sleeping(); }, [](Battery* b) { b->request_wake(); },
      true},
+    {"startBalanceCycle", "Start balance cycle (sleep 35 min)",
+     "start a balance cycle? The battery sleeps for 35 minutes, then stays awake with its contactors open and no "
+     "power available for up to 13 hours while the BMS balances. Only works after charging above 80% (or below 26%), "
+     "with a 12V supply of 12.5V or more.",
+     [](Battery* b) { return b && b->supports_balance_cycle() && !b->is_balance_cycle_active(); },
+     [](Battery* b) { b->request_balance_cycle(); }, true},
+    {"stopBalanceCycle", "Stop balance cycle", "stop the balance cycle and return to normal operation?",
+     [](Battery* b) { return b && b->supports_balance_cycle() && b->is_balance_cycle_active(); },
+     [](Battery* b) { b->request_balance_stop(); }, true},
     {"isolationTest", "Isolation Test", "start an isolation test?",
      [](Battery* b) { return b && b->supports_isolation_test(); }, [](Battery* b) { b->request_isolation_test(); }},
     {"readDTC", "Read DTC", nullptr, [](Battery* b) { return b && b->supports_read_DTC(); },
