@@ -131,6 +131,17 @@ class Mg4Battery : public UdsCanBattery {
   // Worst-case rendered size of the power state section.
   static constexpr uint32_t SLEEP_HTML_BUDGET = 320;
 
+  // Drive-mode car frames (found by emulating the pack firmware, matching the
+  // driving car's FD bus). The original 0x313 template came from an AC-charge
+  // log: its PDU 0x000402 b5 = 0xF2 and close status b6 = 1/3/5 make the BMS
+  // join the AC-charge network (0x4E1 PN 0x13) and close in charge mode. The
+  // driving car sends b5 = 0xF0, b6 = 0x01 throughout. With those alone the
+  // pack stays in drive mode but never closes: its drive close also needs
+  // 0x169 PDU 0x010002 b3 bits 7..6 non-zero (the car sends b3 = 0x88).
+  // Set false for the legacy frames (AC-charge 0x313, no 0x169).
+  static constexpr bool DRIVE_MODE_FRAMES = true;
+  uint8_t cnt169 = 0;  // 0x169 PDU 0x010002 counter, 0..14
+
   static constexpr uint32_t SEQ_FAST_CNT_PHASE = 11;
   static constexpr uint32_t SEQ_SLOW_CNT_PHASE = 7;
 
@@ -370,6 +381,7 @@ class Mg4Battery : public UdsCanBattery {
   void identify_battery();
   void update_047_08a();
   void update_313_314();
+  void update_169();
   void contactor_state_tick(unsigned long currentMillis);
   void reset_reclose_tracker();
   bool record_contactor_reclose(unsigned long now_ms);
@@ -435,6 +447,16 @@ class Mg4Battery : public UdsCanBattery {
       .data = {0x00, 0x04, 0x02, 0x08, 0x00, 0x00, 0x3D, 0x54, 0x55, 0xF2, 0x00, 0xE7, 0x00, 0x04, 0x00, 0x08,
                0x00, 0x01, 0x00, 0x78, 0x80, 0x08, 0x69, 0x00, 0x00, 0x04, 0x01, 0x08, 0x00, 0x00, 0xFF, 0x4C,
                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+  // 0x169 as the driving car sends it every 20ms, reduced to PDU 0x010002
+  // (the other three PDUs in the car's 48-byte frame make no difference):
+  // b0 CRC, b1 counter 0..14, b2 0x64 (13.0 V at 0.1 V + 3.0 V; the car
+  // sends 12.7-14.3 V), b3 0x88 (bits 7..6 = 2 is the drive-close enable),
+  // b4 0x20. update_169 patches the counter and CRC.
+  CAN_frame MG4_169_FD = {.FD = true,
+                          .ext_ID = false,
+                          .DLC = 12,
+                          .ID = 0x169,
+                          .data = {0x01, 0x00, 0x02, 0x08, 0x00, 0x00, 0x64, 0x88, 0x20, 0x00, 0x00, 0x00}};
   CAN_frame MG4_314_FD = {.FD = true,
                           .ext_ID = false,
                           .DLC = 24,
