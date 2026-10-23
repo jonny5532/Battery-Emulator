@@ -39,6 +39,10 @@ static constexpr int32_t MAX_TEMP_DC = 500;
 // only) and max temp (both charge and discharge).
 static constexpr int32_t TEMP_TAPER_DC = 50;
 static constexpr int32_t MIN_WATTS_PER_DC = MAX_CHARGE_POWER_W / TEMP_TAPER_DC;
+
+// 0x12C cell min/max outside this range is a placeholder or garbage, never a reading.
+static constexpr uint16_t CELL_PLAUSIBLE_MIN_MV = 1500;
+static constexpr uint16_t CELL_PLAUSIBLE_MAX_MV = 4500;
 static constexpr int32_t MAX_CHG_WATTS_PER_DC = MAX_CHARGE_POWER_W / TEMP_TAPER_DC;
 static constexpr int32_t MAX_DIS_WATTS_PER_DC = MAX_DISCHARGE_POWER_W / TEMP_TAPER_DC;
 
@@ -551,6 +555,9 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
 
   switch (rx_frame.ID) {
     case 0x12C:
+      if (rx_frame.DLC < 34) {
+        break;  // FD container only; a classic 8-byte 0x12C would be read out of bounds
+      }
       datalayer.battery.status.CAN_battery_still_alive = CAN_STILL_ALIVE;
 
       datalayer.battery.status.voltage_dV = (((rx_frame.data.u8[8] << 4) | (rx_frame.data.u8[9] >> 4)) * 5) / 2;
@@ -560,16 +567,33 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
         datalayer.battery.status.current_dA = -((current_raw - 20000) / 2);
       }
 
-      datalayer.battery.status.cell_min_voltage_mV = ((rx_frame.data.u8[30] << 8) | (rx_frame.data.u8[31])) / 8;
-      datalayer.battery.status.cell_max_voltage_mV = ((rx_frame.data.u8[32] << 8) | (rx_frame.data.u8[33])) / 8;
+      {
+        // For ~0.5 s after a BMS wake the pack sends placeholders: min/max
+        // cell 0xFFFC (= 8191 mV) and temps 0xFF (= 87.5 C). Passing those on
+        // trips BE's latching "cell critical overvoltage" and overheat errors,
+        // which hold the contactors open until cleared. Ignore them; the
+        // freshness counters still fail closed if real values stop coming.
+        const uint16_t min_raw = (rx_frame.data.u8[30] << 8) | rx_frame.data.u8[31];
+        const uint16_t max_raw = (rx_frame.data.u8[32] << 8) | rx_frame.data.u8[33];
+        const uint16_t min_mV = min_raw / 8;
+        const uint16_t max_mV = max_raw / 8;
+        if (min_raw < 0xFFF0 && max_raw < 0xFFF0 && min_mV >= CELL_PLAUSIBLE_MIN_MV &&
+            max_mV <= CELL_PLAUSIBLE_MAX_MV && min_mV <= max_mV) {
+          datalayer.battery.status.cell_min_voltage_mV = min_mV;
+          datalayer.battery.status.cell_max_voltage_mV = max_mV;
+          cell_voltage_freshness = 10;
+        }
 
-      // [20] contains the max temperature sensor ID
-      // [21] contains the min temperature sensor ID
-      datalayer.battery.status.temperature_max_dC = ((int)rx_frame.data.u8[22] * 5) - 400;
-      datalayer.battery.status.temperature_min_dC = ((int)rx_frame.data.u8[23] * 5) - 400;
-      temp_freshness = 10;
-
-      cell_voltage_freshness = 10;
+        // [20] contains the max temperature sensor ID
+        // [21] contains the min temperature sensor ID
+        const uint8_t tmax = rx_frame.data.u8[22];
+        const uint8_t tmin = rx_frame.data.u8[23];
+        if (tmax < 0xFE && tmin < 0xFE) {
+          datalayer.battery.status.temperature_max_dC = ((int)tmax * 5) - 400;
+          datalayer.battery.status.temperature_min_dC = ((int)tmin * 5) - 400;
+          temp_freshness = 10;
+        }
+      }
 
       break;
     case 0x159:
@@ -685,6 +709,34 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
 
       // Reflect the pack's own contactor state on the main BE page.
       datalayer.system.status.contactors_engaged = pack_contactors.contactsEngaged();
+
+      // BMS status PDU 0x000505 (second PDU), see pack_status_received.
+      if (rx_frame.DLC >= 24 && rx_frame.data.u8[12] == 0x00 && rx_frame.data.u8[13] == 0x05 &&
+          rx_frame.data.u8[14] == 0x05 && rx_frame.data.u8[15] == 0x08) {
+        const uint8_t bms_mode = rx_frame.data.u8[18] >> 3;
+        const uint8_t b6 = rx_frame.data.u8[22];
+        if (!pack_status_received || bms_mode != pack_bms_mode) {
+          logging.printf("[MG4] BMS mode %d\n", bms_mode);
+        }
+        if (pack_status_received && ((b6 ^ pack_status_b6) & 0x20)) {
+          logging.printf("[MG4] BMS close window %s\n", (b6 & 0x20) ? "open" : "closed");
+        }
+        pack_bms_mode = bms_mode;
+        pack_status_b5 = rx_frame.data.u8[21];
+        pack_status_b6 = b6;
+        pack_status_received = true;
+      }
+      break;
+    case 0x211:
+      // BMS charge current limit, PDU 0x000514 (third PDU, payload b4-5).
+      if (rx_frame.DLC >= 36 && rx_frame.data.u8[24] == 0x00 && rx_frame.data.u8[25] == 0x05 &&
+          rx_frame.data.u8[26] == 0x14) {
+        const uint16_t limit_raw = ((rx_frame.data.u8[32] << 8) | rx_frame.data.u8[33]) & 0x7FF;
+        if ((limit_raw == 0x7FF) != (pack_charge_limit_raw == 0x7FF)) {
+          logging.printf("[MG4] BMS charge current limit %s\n", limit_raw == 0x7FF ? "not provided" : "now provided");
+        }
+        pack_charge_limit_raw = limit_raw;
+      }
       break;
     case 0x17E: {
       // BMS power limits. Subframe 0x503 carries the discharge limit, 0x504
@@ -725,7 +777,13 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
           break;
         }
         uint32_t addr = (rx_frame.data.u8[i] << 16) | (rx_frame.data.u8[i + 1] << 8) | rx_frame.data.u8[i + 2];
-        if (addr == 0x554) {
+        if (addr == 0x515) {
+          const uint8_t minutes = rx_frame.data.u8[i + 4 + 4];
+          if ((minutes == 0xFF) != (minutes_to_full == 0xFF)) {
+            logging.printf("[MG4] Time to full %s\n", minutes == 0xFF ? "not available" : "now provided");
+          }
+          minutes_to_full = minutes;
+        } else if (addr == 0x554) {
           const uint8_t* sub = &rx_frame.data.u8[i + 4];
           if (sub[7] < 4) {
             for (int j = 0; j < 7; j++) {
@@ -1666,6 +1724,9 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
       break;
     case POLL_ECU_SOFTWARE_NUMBER:
       memcpy(pid_ecu_sw_number, data, length > sizeof(pid_ecu_sw_number) ? sizeof(pid_ecu_sw_number) : length);
+      break;
+    case POLL_VIN:
+      memcpy(pid_vin, data, length > sizeof(pid_vin) ? sizeof(pid_vin) : length);
       break;  // End of cycle
   }
 
@@ -1742,7 +1803,7 @@ void Mg4Battery::setup(void) {  // Performs one time setup at startup
   static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_ISOLATION_RESISTANCE, POLL_LV_SUPPLY, POLL_BALANCING_STATUS,
                                        // POLL_MIN_CELL_TEMPERATURE,
                                        // POLL_MAX_CELL_TEMPERATURE,
-                                       POLL_ECU_HARDWARE_NUMBER, POLL_ECU_SOFTWARE_NUMBER};
+                                       POLL_ECU_HARDWARE_NUMBER, POLL_ECU_SOFTWARE_NUMBER, POLL_VIN};
 
   set_pid_scan_list(POLL_LIST, sizeof(POLL_LIST) / sizeof(POLL_LIST[0]));
   dtc = &datalayer.battery.dtc;
@@ -1805,6 +1866,16 @@ static String mg4_format_duration(unsigned long ms) {
   return out;
 }
 
+// A "?" button that shows `text` on the line below (tap again to hide). Self-contained, so the
+// texts don't depend on the framework's help.json (which browsers fetch from upstream GitHub).
+static void mg4_help(String& html, const char* text) {
+  html += " <button type=button style='padding:0 6px;min-width:0' onclick='var n=this.nextElementSibling.nextElementSibling;"
+          "n.hidden=!n.hidden'>?</button><br><div hidden style='font-size:smaller;opacity:.85;max-width:40em;"
+          "margin:2px auto 6px'>";
+  html += text;
+  html += "</div>";
+}
+
 // B045 counts are 0.5 kOhm each. Coloured by the BMS's isolation levels:
 // red at or below 270 kOhm (P1EB2), orange below 400, amber below 500 (raw
 // counts 540 / 800 / 1000; see ISO_P1EB2_KOHM and ISO_LEVEL*_KOHM).
@@ -1828,7 +1899,7 @@ String Mg4Battery::get_uds_info_html() {
   // Reserve enough up front that the appends below never reallocate: ~1KB of
   // fixed text plus the power state, mode and balancing listings.
   String html;
-  html.reserve(1024 + SLEEP_HTML_BUDGET + MODE_HTML_BUDGET + BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET);
+  html.reserve(1024 + SLEEP_HTML_BUDGET + MODE_HTML_BUDGET + SESSION_HTML_BUDGET + BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET);
 
   render_sleep_html(html);
 
@@ -1838,9 +1909,16 @@ String Mg4Battery::get_uds_info_html() {
   html += "<h3>Contactors</h3>";
   html += "State: <b>";
   html += pack_contactors.label();
-  html += "</b> <small>(0x15B state ";
-  html += pack_contactors.state;
-  html += ")</small><br>Last closed: ";
+  html += "</b>";
+  {
+    char help[160];
+    snprintf(help, sizeof(help),
+             "The pack's own report of its contactors: 0x15B byte 21 low nibble = %u (3 open, 11 precharging, "
+             "7 closed, 15 fault).",
+             (unsigned)pack_contactors.state);
+    mg4_help(html, help);
+  }
+  html += "Last closed: ";
   if (pack_contactors.isClosed()) {
     html += "closed for ";
     html += mg4_format_duration(now - pack_contactors.closed_at_ms);
@@ -1883,7 +1961,41 @@ String Mg4Battery::get_uds_info_html() {
   if (iso_min_raw != 0xFFFF) {
     html += "<br>Lowest isolation since contactors closed: " + mg4_iso_kohm(iso_min_raw);
   }
-  html += "<br>12 V supply at pack: ";
+  html += "<br>Time to full: ";
+  if (minutes_to_full == 0xFF) {
+    html += "N/A";
+  } else if (minutes_to_full >= 0xFC) {
+    html += "estimating";
+  } else {
+    char ttf[24];
+    snprintf(ttf, sizeof(ttf), "%uh %02um", (unsigned)(minutes_to_full / 60), (unsigned)(minutes_to_full % 60));
+    html += ttf;
+  }
+  {
+    // Our own estimate, so there is a figure outside BMS charge sessions too: energy still to go
+    // over the present charge power. Optimistic near the top, where the charge tapers.
+    const int32_t charge_W =
+        current_dA_to_power_W(datalayer.battery.status.current_dA, datalayer.battery.status.voltage_dV);
+    const uint32_t total_Wh = datalayer.battery.info.total_capacity_Wh;
+    const uint32_t left_Wh = datalayer.battery.status.remaining_capacity_Wh;
+    if (charge_W > 100 && total_Wh > left_Wh) {
+      const uint32_t minutes = (total_Wh - left_Wh) * 60 / (uint32_t)charge_W;
+      char est[64];
+      if (minutes < 100 * 60) {
+        snprintf(est, sizeof(est), " &middot; estimate %luh %02lum at %ld.%ld kW", (unsigned long)(minutes / 60),
+                 (unsigned long)(minutes % 60), (long)(charge_W / 1000), (long)(charge_W % 1000 / 100));
+      } else {
+        snprintf(est, sizeof(est), " &middot; estimate over 99h at %ld W", (long)charge_W);
+      }
+      html += est;
+    }
+  }
+  mg4_help(html,
+           "The BMS's own countdown, which it only sends during one of its charge sessions (0x308 PDU 0x000515 "
+           "byte 4, minutes; 0xFF = none, 0xFC+ = estimating), so usually N/A in drive mode. The estimate is ours: "
+           "energy still to go (total minus remaining capacity) over the present charge power, shown while charging "
+           "above 100 W. It ignores the taper near full, so it reads short there.");
+  html += "12 V supply at pack: ";
   if (lv_supply_raw == 0xFFFF) {
     html += "N/A";
   } else {
@@ -1920,8 +2032,12 @@ String Mg4Battery::get_uds_info_html() {
   print_chars_or_hex(buf, sizeof(buf), pid_ecu_sw_number, sizeof(pid_ecu_sw_number));
   html += "<br>ECU software: ";
   html += buf;
+  print_chars_or_hex(buf, sizeof(buf), pid_vin, sizeof(pid_vin));
+  html += "<br>BMS VIN: ";
+  html += buf;
 
   render_mode_html(html);
+  render_session_html(html);
   render_bal_status_html(html);
   render_balancing_html(html);
 
@@ -2083,6 +2199,50 @@ void Mg4Battery::render_mode_html(String& html) {
     snprintf(buf, sizeof(buf), " (PN %02X)", bms_pn);
     html += buf;
   }
+}
+
+void Mg4Battery::render_session_html(String& html) {
+  char help[320];
+  html += "<h3>BMS session</h3>Charge session: ";
+  if (!pack_status_received) {
+    html += "N/A";
+  } else {
+    const bool ac = pack_status_b5 & 0x10, dc = pack_status_b5 & 0x20, v2l = pack_status_b5 & 0x40;
+    html += ac ? "<b>AC charge</b>" : dc ? "<b>DC</b>" : v2l ? "<b>V2L</b>" : "none";
+  }
+  snprintf(help, sizeof(help),
+           "The kind of session the BMS thinks it is in: none (drive/idle), AC charge, DC charge or V2L. With "
+           "the drive-mode frames it should stay none. Source: 0x15B PDU 0x000505 byte 5 (0x%02X), bits 0x10 AC, "
+           "0x20 DC, 0x40 V2L.",
+           pack_status_b5);
+  mg4_help(html, help);
+
+  html += "BMS mode: ";
+  html += pack_status_received ? String(pack_bms_mode) : String("N/A");
+  mg4_help(html,
+           "The BMS's internal state number (same as DID 0xB048). Seen so far: 0 power-on, 1 ready/idle, "
+           "4 waiting for a close, 6 AC charging, 8 key-off step, 9 DC complete, 10 AC complete. Source: 0x15B PDU "
+           "0x000505 byte 2 >> 3.");
+
+  html += "Close window: ";
+  html += !pack_status_received ? "N/A" : (pack_status_b6 & 0x20) ? "<b>open</b>" : "closed";
+  snprintf(help, sizeof(help),
+           "Whether the BMS would accept a contactor close request in a charge session right now. The drive-mode "
+           "close does not need it, so this is informational. Source: 0x15B PDU 0x000505 byte 6 (0x%02X) bit "
+           "0x20.",
+           pack_status_b6);
+  mg4_help(html, help);
+
+  html += "BMS charge current limit: ";
+  if (pack_charge_limit_raw == 0x7FF) {
+    html += "N/A";
+  } else {
+    html += String(pack_charge_limit_raw / 2) + ((pack_charge_limit_raw & 1) ? ".5" : ".0") + " A";
+  }
+  mg4_help(html,
+           "The charge current the BMS allows during one of its charge sessions; N/A (0x7FF) outside them, "
+           "e.g. in drive mode, where the 0x17E power limits apply instead. 0 A in a session means the BMS has "
+           "withdrawn charge permission. Source: 0x211 PDU 0x000514 bytes 4-5, 11 bits at 0.5 A.");
 }
 
 void Mg4Battery::render_balancing_html(String& html) {

@@ -652,6 +652,90 @@ TEST_F(Mg4BatteryTest, ReportsIsolationResistanceThroughDatalayer) {
   EXPECT_NE(html.find("P1EB2"), std::string::npos);
 }
 
+// After a BMS wake the pack sends placeholders (cells 0xFFFC, temps 0xFF) for ~0.5 s. They must
+// not reach the datalayer, where they decode as 8191 mV / 87.5 C and trip latching errors.
+TEST_F(Mg4BatteryTest, IgnoresWakePlaceholdersIn12C) {
+  send_12c(3300, 3290, 0, 3450);
+  CAN_frame f;
+  memset(&f, 0, sizeof(f));
+  f.ID = 0x12C;
+  f.DLC = 40;
+  f.data.u8[30] = 0xFF;
+  f.data.u8[31] = 0xFC;
+  f.data.u8[32] = 0xFF;
+  f.data.u8[33] = 0xFC;
+  f.data.u8[22] = 0xFF;
+  f.data.u8[23] = 0xFF;
+  battery->handle_incoming_can_frame(f);
+  EXPECT_EQ(datalayer.battery.status.cell_max_voltage_mV, 3300);
+  EXPECT_EQ(datalayer.battery.status.cell_min_voltage_mV, 3290);
+  EXPECT_EQ(datalayer.battery.status.temperature_max_dC, 250);
+
+  // A classic 8-byte 0x12C is ignored rather than read out of bounds.
+  f.DLC = 8;
+  battery->handle_incoming_can_frame(f);
+  EXPECT_EQ(datalayer.battery.status.cell_max_voltage_mV, 3300);
+}
+
+TEST_F(Mg4BatteryTest, DisplaysBmsSession) {
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Charge session: N/A"), std::string::npos);
+  EXPECT_NE(html.find("BMS charge current limit: N/A"), std::string::npos);
+
+  // 0x15B with PDU 0x000505 second: mode 6 (b2 = 6 << 3), AC session (b5 0x10), window open (b6 0x20).
+  CAN_frame s = {.FD = true, .ext_ID = false, .DLC = 24, .ID = 0x15B};
+  const uint8_t pdu[12] = {0x00, 0x05, 0x05, 0x08, 0, 0, 6 << 3, 0, 0, 0x17, 0x20, 0};
+  memcpy(&s.data.u8[12], pdu, sizeof(pdu));
+  battery->handle_incoming_can_frame(s);
+  // 0x211 with PDU 0x000514 third: 32.5 A (raw 65).
+  CAN_frame l = {.FD = true, .ext_ID = false, .DLC = 36, .ID = 0x211};
+  const uint8_t lim[12] = {0x00, 0x05, 0x14, 0x08, 0, 0, 0, 0, 0x00, 65, 0, 0};
+  memcpy(&l.data.u8[24], lim, sizeof(lim));
+  battery->handle_incoming_can_frame(l);
+
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Charge session: <b>AC charge</b>"), std::string::npos);
+  EXPECT_NE(html.find("BMS mode: 6"), std::string::npos);
+  EXPECT_NE(html.find("Close window: <b>open</b>"), std::string::npos);
+  EXPECT_NE(html.find("BMS charge current limit: 32.5 A"), std::string::npos);
+  // Raw sources live in the help texts, not on the line itself.
+  EXPECT_NE(html.find("byte 5 (0x17)"), std::string::npos);
+}
+
+TEST_F(Mg4BatteryTest, DisplaysBmsVin) {
+  const uint8_t vin[17] = {'L', 'S', 'J', 'W', 'H', '4', '0', '9', '5', 'R', 'N', '0', '7', '8', '3', '5', '9'};
+  battery->handle_pid(0xF190, 0, vin, sizeof(vin));
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("BMS VIN: LSJWH4095RN078359"), std::string::npos);
+}
+
+TEST_F(Mg4BatteryTest, DisplaysTimeToFull) {
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Time to full: N/A"), std::string::npos);
+
+  // 0x308 with sub-PDU 0x000515, minutes in payload b4.
+  CAN_frame f = {.FD = true, .ext_ID = false, .DLC = 12, .ID = 0x308, .data = {0x00, 0x05, 0x15, 0x08, 0, 0, 0, 0, 95}};
+  battery->handle_incoming_can_frame(f);
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Time to full: 1h 35m"), std::string::npos);
+
+  f.data.u8[8] = 0xFC;
+  battery->handle_incoming_can_frame(f);
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Time to full: estimating"), std::string::npos);
+
+  // Our own estimate while charging: 10 kWh to go at 347.0 V x 2.9 A = 1006 W -> 9h 56m.
+  datalayer.battery.info.total_capacity_Wh = 51000;
+  datalayer.battery.status.remaining_capacity_Wh = 41000;
+  datalayer.battery.status.voltage_dV = 3470;
+  datalayer.battery.status.current_dA = 29;
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("estimate 9h 56m at 1.0 kW"), std::string::npos);
+  datalayer.battery.status.current_dA = -29;  // discharging: no estimate
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_EQ(html.find("estimate "), std::string::npos);
+}
+
 TEST_F(Mg4BatteryTest, DisplaysLvSupplyVoltage) {
   std::string html_before = battery->get_uds_info_html().c_str();
   EXPECT_NE(html_before.find("12 V supply at pack: N/A"), std::string::npos);

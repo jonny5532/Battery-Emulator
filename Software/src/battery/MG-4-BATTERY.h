@@ -208,6 +208,19 @@ class Mg4Battery : public UdsCanBattery {
   // Worst-case rendered size of the BMS mode section.
   static constexpr uint32_t MODE_HTML_BUDGET = 96;
 
+  // ---- BMS session, display only ----
+  // 0x15B PDU 0x000505: b2 >> 3 = BMS mode (= DID B048), b5 bits 0x10/0x20/0x40
+  // = AC / DC / V2L session, b6 bit 0x20 = close window. 0x211 PDU 0x000514:
+  // charge current limit, 11 bits at 0.5 A, 0x7FF = none (charge sessions only).
+  bool pack_status_received = false;
+  uint8_t pack_bms_mode = 0xFF;
+  uint8_t pack_status_b5 = 0;
+  uint8_t pack_status_b6 = 0;
+  uint16_t pack_charge_limit_raw = 0x7FF;
+  void render_session_html(String& html);
+  // Rendered size of the BMS session section, help texts included.
+  static constexpr uint32_t SESSION_HTML_BUDGET = 2048;
+
   // Drive-mode car frames (found by emulating the pack firmware, matching the
   // driving car's FD bus). The original 0x313 template came from an AC-charge
   // log: its PDU 0x000402 b5 = 0xF2 and close status b6 = 1/3/5 make the BMS
@@ -410,6 +423,9 @@ class Mg4Battery : public UdsCanBattery {
   };
 
   char ntsc_serial[29] = {0};  // eg: 0AFPEG10879103D7N3000095
+  // Time to full from 0x308 sub-PDU 0x515 b4: minutes, counting down 1/min while
+  // charging in a BMS charge session. 0xFF = not available, 0xFC+ while estimating.
+  uint8_t minutes_to_full = 0xFF;
   PackContactorFeedback pack_contactors;
   unsigned long contactorWaitStartMillis = 0;
 
@@ -458,10 +474,12 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t POLL_BALANCING_STATUS = 0xB0E5;
   static const uint16_t POLL_ECU_HARDWARE_NUMBER = 0xF192;
   static const uint16_t POLL_ECU_SOFTWARE_NUMBER = 0xF194;
+  static const uint16_t POLL_VIN = 0xF190;  // VIN stored in the BMS (17 ASCII characters)
 
   // ECU identifier payloads (10 ASCII characters each)
   uint8_t pid_ecu_hw_number[10] = {0};
   uint8_t pid_ecu_sw_number[10] = {0};
+  uint8_t pid_vin[17] = {0};
 
   // Pack-reported isolation resistance (UDS B045), 0.5 kOhm (500 ohm) per
   // count, published as datalayer insulation_resistance_kOhm. Between
