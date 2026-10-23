@@ -9,7 +9,6 @@
 #include "../communication/can/comm_can.h"
 #include "../communication/contactorcontrol/comm_contactorcontrol.h"
 #include "../datalayer/datalayer.h"
-#include "../devboard/safety/safety.h"  //For equipment stop
 #include "../devboard/utils/common_functions.h"
 #include "../devboard/utils/events.h"
 #include "../devboard/utils/logging.h"
@@ -1121,14 +1120,6 @@ void Mg4Battery::sleep_tick(unsigned long currentMillis) {
   }
 }
 
-void Mg4Battery::request_open_contactors() {
-  setBatteryPause(true, false, EquipmentStop::STOP);
-}
-
-void Mg4Battery::request_close_contactors() {
-  setBatteryPause(false, false, EquipmentStop::RESUME);
-}
-
 // Tick function for the contactor state machine.
 void Mg4Battery::contactor_state_tick(unsigned long currentMillis) {
   const bool open_requested = (datalayer.system.status.system_status == FAULT);
@@ -1837,18 +1828,7 @@ String Mg4Battery::get_uds_info_html() {
   // Reserve enough up front that the appends below never reallocate: ~1KB of
   // fixed text plus the power state, mode and balancing listings.
   String html;
-  html.reserve(1536 + SLEEP_HTML_BUDGET + MODE_HTML_BUDGET + BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET);
-
-  // Open/Close first, away from the bottom of the page. They PUT to the
-  // framework's /contactorOpen and /contactorClose routes with the 0-based
-  // battery index its own buttons send (the page's ?battery= is 1-based).
-  html += "<button style='background:red;color:white;' onclick=\"mg4Contactors('Open','open')\">"
-          "Open Contactors</button> "
-          "<button style='background:green;color:white;' onclick=\"mg4Contactors('Close','close')\">"
-          "Close Contactors</button>"
-          "<script>function mg4Contactors(c,v){if(!window.confirm('Are you sure you want to '+v+' the contactors?'))"
-          "return;var m=/[?&]battery=([1-3])/.exec(location.search);var x=new XMLHttpRequest();"
-          "x.open('PUT','/contactor'+c,true);x.send(m?String(m[1]-1):'0');}</script>";
+  html.reserve(1024 + SLEEP_HTML_BUDGET + MODE_HTML_BUDGET + BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET);
 
   render_sleep_html(html);
 

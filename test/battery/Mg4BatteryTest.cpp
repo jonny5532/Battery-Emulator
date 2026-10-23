@@ -652,16 +652,6 @@ TEST_F(Mg4BatteryTest, ReportsIsolationResistanceThroughDatalayer) {
   EXPECT_NE(html.find("P1EB2"), std::string::npos);
 }
 
-TEST_F(Mg4BatteryTest, ContactorButtonsAtTopOfInfoPage) {
-  // Drawn by the driver, so the framework's own pair stays hidden.
-  EXPECT_FALSE(battery->supports_contactor_close());
-  std::string html = battery->get_uds_info_html().c_str();
-  const size_t open_at = html.find("Open Contactors</button>");
-  ASSERT_NE(open_at, std::string::npos);
-  EXPECT_NE(html.find("Close Contactors</button>"), std::string::npos);
-  EXPECT_LT(open_at, html.find("<h3>"));
-}
-
 TEST_F(Mg4BatteryTest, DisplaysLvSupplyVoltage) {
   std::string html_before = battery->get_uds_info_html().c_str();
   EXPECT_NE(html_before.find("12 V supply at pack: N/A"), std::string::npos);

@@ -18,15 +18,6 @@ class Mg4Battery : public UdsCanBattery {
   // does, then stop all transmission so the BMS can go to sleep.
   bool supports_sleep() override { return true; }
   bool supports_insulation_resistance() override { return true; }
-
-  // Open/Close Contactors on the battery info page: the same equipment stop as
-  // the main page buttons, which contactor_state_tick() already acts on (open
-  // via FAULT, reclose once it is cleared). get_uds_info_html() draws the
-  // buttons at the top of the MG4 block, so supports_contactor_close() stays
-  // false to keep the framework from adding a second pair at the bottom; its
-  // /contactorOpen and /contactorClose routes still call these.
-  void request_open_contactors() override;
-  void request_close_contactors() override;
   bool is_sleeping() override;
   void request_sleep() override { sleep_requested = true; }
   void request_wake() override { wake_requested = true; }
