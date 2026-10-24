@@ -14,8 +14,8 @@
 //       requests)
 //     - uds_response_address (the CAN ID that UDS responses must come from, or
 //       0 to auto-detect)
-//     - config (optional): FD requests and PID scan wire format. Defaults
-//       leave the existing behaviour unchanged.
+//     - config (optional): FD requests, PID scan wire format and BMS reset
+//       settings. Defaults leave the existing behaviour unchanged.
 //
 // 2. Call `set_pid_scan_list(const uint16_t* pids, uint16_t length)` to set the
 //    list of PIDs to query, in scan order (e.g. {0xF18A, 0xF120, ...}). The
@@ -97,6 +97,9 @@ enum class UdsPidScanMode : uint8_t {
 struct UdsConfig {
   bool fd = false;                                            // Send UDS requests as CAN-FD frames
   UdsPidScanMode pid_scan_mode = UdsPidScanMode::TwoByteDID;  // UDS vs KWP2000
+  uint8_t reset_type = 0;        // ECUReset (0x11) type for reset_BMS(): 0x01 hard, 0x03 soft, 0 = unsupported
+  uint8_t reset_session = 0;     // Session entered before the reset, 0 = stay in the current session
+  uint8_t reset_holdoff_s = 10;  // Minimum time between resets, so the BMS can come back first
 };
 
 class UdsCanBattery : public CanBattery, public IsoTp {
@@ -118,8 +121,9 @@ class UdsCanBattery : public CanBattery, public IsoTp {
     UDS_STATE_CLEAR_DTC_DIAG,  // 0x10 0x03
     UDS_STATE_CLEAR_DTC,       // 0x14 FF FF FF
 
-    UDS_STATE_SOFT_RESET_START,
-    UDS_STATE_SOFT_RESET,  // 0x11 0x03
+    UDS_STATE_RESET_START,
+    UDS_STATE_RESET_SESSION,  // 0x10 <reset_session>
+    UDS_STATE_RESET,          // 0x11 <reset_type>
   };
 
   // Priority levels for UDS traffic, used by pause_uds() and
@@ -140,6 +144,9 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   virtual bool supports_reset_DTC();
   virtual void read_DTC();
   virtual void reset_DTC();
+  // BMS reset via ECUReset, enabled by UdsConfig::reset_type.
+  bool supports_reset_BMS() override { return reset_type != 0; }
+  void reset_BMS() override;
 
   // Advanced battery page (see UdsBatteryHtmlRenderer). The built-in renderer
   // shows the DTC section; override these hooks to customize it without
@@ -174,8 +181,11 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   // repeatedly - the scan restarts from the beginning of the new list.
   void set_pid_scan_list(const uint16_t* pid_list, uint16_t length);
 
-  // Queue a one-shot UDS soft reset (0x11 0x03). The request is not retried.
-  bool request_uds_soft_reset();
+  // Queues a BMS reset (ECUReset of the configured type, after entering the
+  // configured session). Returns false if resets aren't enabled, the last one
+  // was less than UdsConfig::reset_holdoff_s ago, or another sequence is
+  // already queued. Safe to call from any task.
+  bool request_uds_reset();
 
   // Must be called by subclasses inside their `transmit_can` method.
   void transmit_uds_can(unsigned long currentMillis);
@@ -226,6 +236,12 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   uint32_t uds_current_response_address = 0;
   // Whether UDS requests are sent as FD frames
   bool fd_uds_requests = false;
+  // BMS reset settings, from UdsConfig.
+  uint8_t reset_type = 0;  // 0 = disabled
+  uint8_t reset_session = 0;
+  uint8_t reset_holdoff_s = 10;
+  // 100ms ticks left before another reset may be requested.
+  std::atomic<uint32_t> reset_holdoff_ticks{0};  // 32 bit is fast on ESP32
 
  private:
   // True if the current pause blocks new sends of the given priority.

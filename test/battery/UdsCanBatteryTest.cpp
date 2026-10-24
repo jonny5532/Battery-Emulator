@@ -26,7 +26,7 @@ class TestUdsBattery : public UdsCanBattery {
  public:
   using UdsCanBattery::handle_incoming_uds_can_frame;
   using UdsCanBattery::pause_uds;
-  using UdsCanBattery::request_uds_soft_reset;
+  using UdsCanBattery::request_uds_reset;
   using UdsCanBattery::send_sequence_message;
   using UdsCanBattery::set_pid_scan_list;
   using UdsCanBattery::setup_uds;
@@ -1149,8 +1149,17 @@ TEST_F(UdsCanBatteryTest, ClearDtcSequenceCompletesOnAcknowledgment) {
   EXPECT_FALSE(battery->uds_is_busy());  // Sequence ended.
 }
 
-TEST_F(UdsCanBatteryTest, SoftResetSendsOneRequestAndAcceptsAcknowledgment) {
-  ASSERT_TRUE(battery->request_uds_soft_reset());
+TEST_F(UdsCanBatteryTest, ResetIsUnsupportedWithoutAResetType) {
+  EXPECT_FALSE(battery->supports_reset_BMS());
+  EXPECT_FALSE(battery->request_uds_reset());
+  tick(1000);
+  EXPECT_TRUE(get_transmitted_frames().empty());
+}
+
+TEST_F(UdsCanBatteryTest, ResetSendsOneRequestAndAcceptsAcknowledgment) {
+  battery->setup_uds(0x79B, 0x7BB, {.reset_type = 0x03});
+  EXPECT_TRUE(battery->supports_reset_BMS());
+  battery->reset_BMS();
   tick(1000);
 
   ASSERT_EQ(get_transmitted_frames().size(), 1u);
@@ -1159,14 +1168,15 @@ TEST_F(UdsCanBatteryTest, SoftResetSendsOneRequestAndAcceptsAcknowledgment) {
   EXPECT_EQ(request.data.u8[0], 0x02);
   EXPECT_EQ(request.data.u8[1], 0x11);
   EXPECT_EQ(request.data.u8[2], 0x03);
-  EXPECT_FALSE(battery->request_uds_soft_reset());
+  EXPECT_FALSE(battery->request_uds_reset());
 
   feed_response({0x51, 0x03});
   EXPECT_FALSE(battery->uds_is_busy());
 }
 
-TEST_F(UdsCanBatteryTest, SoftResetDoesNotRetryAfterTimeout) {
-  ASSERT_TRUE(battery->request_uds_soft_reset());
+TEST_F(UdsCanBatteryTest, ResetDoesNotRetryAfterTimeout) {
+  battery->setup_uds(0x79B, 0x7BB, {.reset_type = 0x03});
+  ASSERT_TRUE(battery->request_uds_reset());
   tick(1000);
   ASSERT_EQ(get_transmitted_frames().size(), 1u);
 
@@ -1177,13 +1187,92 @@ TEST_F(UdsCanBatteryTest, SoftResetDoesNotRetryAfterTimeout) {
   EXPECT_FALSE(battery->uds_is_busy());
 }
 
-TEST_F(UdsCanBatteryTest, SoftResetNegativeResponseEndsSequence) {
-  ASSERT_TRUE(battery->request_uds_soft_reset());
+TEST_F(UdsCanBatteryTest, ResetNegativeResponseEndsSequence) {
+  battery->setup_uds(0x79B, 0x7BB, {.reset_type = 0x03});
+  ASSERT_TRUE(battery->request_uds_reset());
   tick(1000);
 
   feed_response({0x7F, 0x11, 0x12});
   EXPECT_FALSE(battery->uds_is_busy());
   EXPECT_EQ(get_transmitted_frames().size(), 1u);
+}
+
+TEST_F(UdsCanBatteryTest, ResetEntersTheConfiguredSessionFirst) {
+  // MG Gen1 style: extended session, then a hard reset.
+  battery->setup_uds(0x79B, 0x7BB, {.reset_type = 0x01, .reset_session = 0x03});
+  ASSERT_TRUE(battery->request_uds_reset());
+  tick(1000);
+  EXPECT_EQ(last_frame(get_transmitted_frames()).data.u8[1], 0x10);
+  EXPECT_EQ(last_frame(get_transmitted_frames()).data.u8[2], 0x03);
+
+  feed_response({0x50, 0x03});
+  EXPECT_EQ(last_frame(get_transmitted_frames()).data.u8[1], 0x11);
+  EXPECT_EQ(last_frame(get_transmitted_frames()).data.u8[2], 0x01);
+
+  feed_response({0x51, 0x01});
+  EXPECT_FALSE(battery->uds_is_busy());
+}
+
+TEST_F(UdsCanBatteryTest, RefusedResetSessionSkipsTheReset) {
+  battery->setup_uds(0x79B, 0x7BB, {.reset_type = 0x01, .reset_session = 0x03});
+  ASSERT_TRUE(battery->request_uds_reset());
+  tick(1000);
+  feed_response({0x7F, 0x10, 0x22});
+
+  for (const auto& f : get_transmitted_frames()) {
+    EXPECT_NE(f.data.u8[1], 0x11);
+  }
+  EXPECT_FALSE(battery->uds_is_busy());
+}
+
+// While the condition that triggered a reset persists, callers keep asking for
+// another one. They must be held off until the BMS has had time to come back,
+// whether or not the reset was acknowledged.
+TEST_F(UdsCanBatteryTest, ResetsAreHeldOffWhileTheBmsComesBack) {
+  battery->setup_uds(0x79B, 0x7BB, {.reset_type = 0x03, .reset_holdoff_s = 5});
+  ASSERT_TRUE(battery->request_uds_reset());
+
+  // No reply at all: the reset may still have happened.
+  unsigned long t = 1000;
+  for (int k = 0; k < 49; k++, t += 100) {
+    tick(t);
+    EXPECT_FALSE(battery->request_uds_reset()) << "tick " << k;
+  }
+  tick(t);  // 50 ticks = 5 s
+  EXPECT_TRUE(battery->request_uds_reset());
+
+  size_t resets = 0;
+  for (int k = 0; k < 5; k++, t += 100) {
+    tick(t);
+  }
+  for (const auto& f : get_transmitted_frames()) {
+    resets += f.data.u8[1] == 0x11;
+  }
+  EXPECT_EQ(resets, 2u);
+}
+
+TEST_F(UdsCanBatteryTest, ResetHoldoffDefaultsToTenSeconds) {
+  battery->setup_uds(0x79B, 0x7BB, {.reset_type = 0x03});
+  ASSERT_TRUE(battery->request_uds_reset());
+  unsigned long t = 1000;
+  for (int k = 0; k < 99; k++, t += 100) {
+    tick(t);
+  }
+  EXPECT_FALSE(battery->request_uds_reset());
+  tick(t);
+  EXPECT_TRUE(battery->request_uds_reset());
+}
+
+// A reset refused because another sequence is queued didn't happen, so it
+// mustn't start the holdoff.
+TEST_F(UdsCanBatteryTest, ResetRefusedForAQueuedSequenceLeavesNoHoldoff) {
+  battery->setup_uds(0x79B, 0x7BB, {.reset_type = 0x03});
+  ASSERT_TRUE(battery->start_sequence(0x1001));
+  EXPECT_FALSE(battery->request_uds_reset());
+
+  tick(1000);  // the queued sequence starts, freeing the slot
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+  EXPECT_TRUE(battery->request_uds_reset());
 }
 
 // ---------------------------------------------------------------------------
