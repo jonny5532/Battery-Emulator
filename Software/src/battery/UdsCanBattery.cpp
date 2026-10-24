@@ -9,6 +9,10 @@ constexpr uint16_t UDS_TIMEOUT_SESSION_CONTROL = 10;
 constexpr uint16_t UDS_TIMEOUT_CLEAR_DTC = 25;
 constexpr uint16_t UDS_TIMEOUT_READ_DTC = 20;
 constexpr uint16_t UDS_TIMEOUT_READ_DID = 2;
+// The ECU answers an ECUReset before it resets, so a short wait is enough.
+constexpr uint16_t UDS_TIMEOUT_RESET = 10;
+// How long to ignore CAN errors after a reset, while the BMS restarts.
+constexpr uint32_t UDS_RESET_IGNORE_CAN_ERRORS_MS = 10000;
 // How many times to retry a particular PID read before giving up.
 constexpr uint16_t UDS_PID_MAX_RETRIES = 10;
 // Traffic on 0x7DF (or on uds_address) that isn't ours implies an external
@@ -36,6 +40,10 @@ void UdsCanBattery::transmit_uds_can(unsigned long currentMillis) {
     return;
   }
   previousUdsMillis100 = currentMillis;
+
+  if (reset_holdoff_ticks > 0) {
+    reset_holdoff_ticks--;
+  }
 
   if (seq_pause_ticks > 0) {
     // We're in a pause period (eg. after a BMS reset, or while an external
@@ -458,13 +466,27 @@ inline bool UdsCanBattery::handle_dtc_step(uint16_t state, uint8_t sid, const ui
 
 inline bool UdsCanBattery::handle_reset_step(uint16_t state, uint8_t sid) {
   switch (state) {
-    case UDS_STATE_SOFT_RESET_START: {
-      const uint8_t reset_type = 0x03;
-      send_sequence_message(UDS_STATE_SOFT_RESET, SID::ECUReset, &reset_type, 1, 10, 0);
+    case UDS_STATE_RESET_START:
+      // If configured, start by entering the appropriate diagnostic session
+      if (reset_session != 0) {
+        send_sequence_message(UDS_STATE_RESET_SESSION, SID::DiagnosticSessionControl, &reset_session, 1,
+                              UDS_TIMEOUT_SESSION_CONTROL, 2);
+        return true;
+      }
+      // No session change configured: reset straight away.
+      [[fallthrough]];
+    case UDS_STATE_RESET_SESSION:
+      if (sid == kNegativeResponseSid) {
+        logging.println("UDS: session for ECU reset refused");
+        return true;
+      }
+      // The BMS drops off the bus while it restarts which will cause CAN errors
+      ignore_can_errors_for(can_interface, UDS_RESET_IGNORE_CAN_ERRORS_MS);
+      // Don't retry, the BMS might be busy resetting
+      send_sequence_message(UDS_STATE_RESET, SID::ECUReset, &reset_type, 1, UDS_TIMEOUT_RESET, 0);
       return true;
-    }
-    case UDS_STATE_SOFT_RESET:
-      // The reset request is complete on either a positive or negative response.
+    case UDS_STATE_RESET:
+      logging.println(sid == kNegativeResponseSid ? "UDS: ECU reset refused" : "UDS: ECU reset accepted");
       return true;
   }
   return false;
@@ -536,6 +558,9 @@ void UdsCanBattery::setup_uds(uint32_t uds_address, uint32_t uds_response_addres
   this->uds_response_address = uds_response_address;
   restart_pid_scan();
   fd_uds_requests = config.fd;
+  reset_type = config.reset_type;
+  reset_session = config.reset_session;
+  reset_holdoff_s = config.reset_holdoff_s;
 
   // Selects between UDS and KWP2000 'local ID' mode
   const bool use_local_ids = config.pid_scan_mode == UdsPidScanMode::OneByteLocalId;
@@ -585,6 +610,26 @@ void UdsCanBattery::reset_DTC() {
   start_sequence(UDS_STATE_CLEAR_DTC_START);
 }
 
-bool UdsCanBattery::request_uds_soft_reset() {
-  return !uds_is_busy() && start_sequence(UDS_STATE_SOFT_RESET_START);
+void UdsCanBattery::reset_BMS() {
+  if (!request_uds_reset()) {
+    logging.println("UDS: BMS reset not queued (busy, or too soon after the last one)");
+  }
+}
+
+bool UdsCanBattery::request_uds_reset() {
+  if (reset_type == 0) {
+    return false;
+  }
+  // Claim the holdoff first, so concurrent callers can't both get through it.
+  // It also covers the reset itself: the BMS may restart without replying.
+  uint32_t expected = 0;
+  if (!reset_holdoff_ticks.compare_exchange_strong(expected, reset_holdoff_s * 10)) {
+    return false;
+  }
+  if (!start_sequence(UDS_STATE_RESET_START)) {
+    // Another sequence is queued: give the holdoff back.
+    reset_holdoff_ticks = 0;
+    return false;
+  }
+  return true;
 }

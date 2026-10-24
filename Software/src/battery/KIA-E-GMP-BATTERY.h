@@ -21,8 +21,6 @@ class KiaEGmpBattery : public UdsCanBattery {
   bool supports_contactor_close() override { return true; }
   void request_open_contactors() override;
   void request_close_contactors() override;
-  bool supports_reset_BMS() override { return true; }
-  void reset_BMS() override;
   void request_startup_sequence();
   static constexpr const char* Name = "Kia/Hyundai EGMP platform";
 

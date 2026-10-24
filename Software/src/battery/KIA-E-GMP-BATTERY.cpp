@@ -539,12 +539,6 @@ void KiaEGmpBattery::request_close_contactors() {
   logging.println("EGMP: close requested; waiting for safe cells");
 }
 
-void KiaEGmpBattery::reset_BMS() {
-  if (!request_uds_soft_reset()) {
-    logging.println("UDS soft reset request could not be queued");
-  }
-}
-
 
 void KiaEGmpBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
 
@@ -779,7 +773,7 @@ void KiaEGmpBattery::transmit_can(unsigned long currentMillis) {
     }
 
     if (contactorStatus21A == CONTACTOR_STATUS_OPEN && closeTrafficAllowed && !automaticResetAttempted.load() &&
-        request_uds_soft_reset()) {
+        request_uds_reset()) {
       automaticResetAttempted.store(true);
       logging.println("EGMP: automatic soft reset queued");
     }
@@ -799,8 +793,9 @@ void KiaEGmpBattery::setup(void) {  // Performs one time setup at startup
   datalayer.battery.info.max_cell_voltage_mV = MAX_CELL_VOLTAGE_MV;
   datalayer.battery.info.min_cell_voltage_mV = MIN_CELL_VOLTAGE_MV;
   datalayer.battery.info.max_cell_voltage_deviation_mV = MAX_CELL_DEVIATION_MV;
-  // UDS: send requests to 0x7E4, accept replies from the BMS on 0x7EC, using FD frames.
-  setup_uds(0x7E4, 0x7EC, {.fd = true});
+  // UDS: send requests to 0x7E4, accept replies from the BMS on 0x7EC, using FD
+  // frames. reset_BMS() sends a soft ECUReset.
+  setup_uds(0x7E4, 0x7EC, {.fd = true, .reset_type = 0x03});
   static const uint16_t pid_scan_list[] = {
       POLL_GROUP_1,
       // POLL_GROUP_2,
