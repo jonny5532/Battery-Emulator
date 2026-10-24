@@ -1663,8 +1663,7 @@ void Mg4Battery::identify_battery() {
 }
 
 void Mg4Battery::setup(void) {  // Performs one time setup at startup
-  setup_uds(0x7E5, 0);
-  fd_uds_requests = true;
+  setup_uds(0x7E5, 0, {.fd = true});
 
   static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_ISOLATION_RESISTANCE, POLL_BALANCING_STATUS,
                                        // POLL_MIN_CELL_TEMPERATURE,
