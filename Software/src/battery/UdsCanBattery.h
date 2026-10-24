@@ -54,7 +54,9 @@
 // Multi-step UDS operations (resets, writes, routine control, security access,
 // ...) are built from sequences of steps.
 //   - Define an enum with a state for each step in your sequences.
-//   - Start a sequence with `start_sequence(STARTING_STATE)`
+//   - Start a sequence with `start_sequence(STARTING_STATE)`. This is the only
+//     call that is safe from other tasks (e.g. the webserver); everything else
+//     must be called from the battery's own CAN task.
 //   - Override `on_uds_sequence_step(state, sid, data, len)` to handle any
 //     response and send the next step.
 //   - Optionally override `on_uds_sequence_timeout(state)` to handle a step
@@ -179,7 +181,7 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   // Queues a new UDS sequence. Doesn't send anything yet, but during the next
   // UDS tick, `on_uds_sequence_step` will be called with the given state,
   // allowing the subclass to send the first step. Returns false if a sequence
-  // is already queued.
+  // is already queued. Lock-free and safe to call from any task.
   bool start_sequence(uint16_t state);
 
   // Send a single step of a UDS sequence. The state is handed back to
@@ -300,7 +302,7 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   uint16_t seq_state = UDS_STATE_IDLE;
   // The pending next state to start a sequence. Set by start_sequence() and
   // cleared when the sequence is started.
-  uint16_t pending_seq_state = UDS_STATE_IDLE;
+  std::atomic<uint32_t> pending_seq_state{UDS_STATE_IDLE};  // 32 bit is fast on ESP32
   // Number of 100ms ticks of quiet (new sends blocked) remaining, set by
   // pause_uds().
   uint16_t seq_pause_ticks = 0;
