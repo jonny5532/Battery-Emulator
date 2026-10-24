@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../../Software/src/battery/UdsCanBattery.h"
@@ -628,6 +630,36 @@ TEST_F(UdsCanBatteryTest, StartSequenceDuringPidScanIsQueuedNotRefused) {
 }
 
 // While a sequence is queued/active the PID scan is held back.
+// start_sequence() may be called from other tasks (e.g. the webserver). Many
+// callers racing for the slot must admit exactly one.
+TEST_F(UdsCanBatteryTest, StartSequenceAdmitsOneOfManyConcurrentCallers) {
+  constexpr int kThreads = 8;
+  constexpr int kRounds = 2000;
+  for (int round = 0; round < kRounds; round++) {
+    std::atomic<bool> go{false};
+    std::atomic<int> winners{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; t++) {
+      threads.emplace_back([&, t] {
+        while (!go.load()) {}
+        if (battery->start_sequence(0x100 + t)) {
+          winners++;
+        }
+      });
+    }
+    go = true;
+    for (auto& th : threads) {
+      th.join();
+    }
+    ASSERT_EQ(winners.load(), 1) << "round " << round;
+
+    // Consume the queued sequence so the slot is free for the next round.
+    battery->seq_calls.clear();
+    tick(1000 + round * 100);
+    ASSERT_EQ(battery->seq_calls.size(), 1u);
+  }
+}
+
 TEST_F(UdsCanBatteryTest, SequenceHoldsTheBusFromPidScan) {
   const uint16_t pids[] = {0x9001};
   battery->set_pid_scan_list(pids, 1);

@@ -115,13 +115,10 @@ inline bool UdsCanBattery::on_sequence_step_timeout() {
 }
 
 bool UdsCanBattery::start_sequence(uint16_t state) {
-  if (pending_seq_state != UDS_STATE_IDLE) {
-    // A sequence is already queued: refuse.
-    return false;
-  }
-
-  pending_seq_state = state;
-  return true;
+  // May be called from other tasks (e.g. the webserver), so claim the slot
+  // atomically: refuse if a sequence is already queued.
+  uint32_t expected = UDS_STATE_IDLE;
+  return pending_seq_state.compare_exchange_strong(expected, state);
 }
 
 bool UdsCanBattery::send_sequence_message(uint16_t state, SID sid, const uint8_t* data, uint16_t length,
