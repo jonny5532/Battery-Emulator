@@ -55,6 +55,35 @@ static uint8_t mg4_crc8(const uint8_t* d) {
   return crc;
 }
 
+// Final-XOR base key for the application-level seed/key algorithm.
+static constexpr uint32_t MG4_SEC_APP_SECRET_KEY = 0xD18E0306u;
+
+// MG4 BMS seed -> key algorithm (security level 1). The round count is derived
+// from the seed MSB, then a 32-bit Fibonacci LFSR shifts left with feedback
+// from bits 30, 24, 12 and 2, and the result is XORed with the secret base key.
+uint8_t Mg4Battery::security_access_key(uint8_t level, const uint8_t* seed, uint16_t seed_len, uint8_t* key) const {
+  if (level != 1 || seed_len != 4) {
+    return 0;
+  }
+  uint32_t x = ((uint32_t)seed[0] << 24) | ((uint32_t)seed[1] << 16) | ((uint32_t)seed[2] << 8) | seed[3];
+
+  // The firmware computes 0x29 + ((seed >> 24) & 6) and then runs its LOOP
+  // one extra time, so the effective round count is 0x2A + ((seed >> 24) & 6).
+  const uint8_t rounds = (uint8_t)(0x2A + ((x >> 24) & 0x06));
+
+  for (uint8_t i = 0; i < rounds; i++) {
+    const uint32_t feedback = ((x >> 30) ^ (x >> 24) ^ (x >> 12) ^ (x >> 2)) & 1u;
+    x = (x << 1) | feedback;
+  }
+
+  x ^= MG4_SEC_APP_SECRET_KEY;
+  key[0] = x >> 24;
+  key[1] = x >> 16;
+  key[2] = x >> 8;
+  key[3] = x;
+  return 4;
+}
+
 // Linear ramp 0..max, rounded to nearest. Used for simulating ramps in the FD
 // frames. Saturates at max past `end` (no looping), which is what lets the
 // free-running sequencer hold its final levels instead of replaying a loop.
@@ -359,7 +388,7 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
 
   // The BMS's own limit, capped at our hard max. Skipped while the snap clamp
   // is active near the top: the BMS cuts charge to 0 at ~3.70V, short of
-  // SNAP_OVER_MV, and the snap's own end conditions bound how long the 5A
+  // SNAP_OVER_MV, and the snap's own end conditions bound how long the 2A
   // override can run. A cut below SNAP_BMS_OVERRIDE_MV is always respected.
   int32_t max_charge_power_W = MAX_CHARGE_POWER_W;
   if (!snap_overrides_bms && (int32_t)bms_max_charge_W < max_charge_power_W) {
@@ -371,7 +400,7 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
   // hysteresis) until the cell voltage recovers past the trip threshold.
   // LFP snap special-cases:
   // - While a snap is in (latched) absorption, the taper (and, from
-  //   SNAP_BMS_OVERRIDE_MV, the BMS limit above) is replaced by a 5A clamp. SNAP_ABORT_MV in snap_tick() and the
+  //   SNAP_BMS_OVERRIDE_MV, the BMS limit above) is replaced by a 2A clamp. SNAP_ABORT_MV in snap_tick() and the
   //   safety.cpp cell overvoltage limit bound the voltage instead.
   // - Once the snap has ended (succeeded, skipped or given up), taper to
   //   SNAP_ABSORB_MV instead, so the pack keeps working normally below the
@@ -1663,7 +1692,7 @@ void Mg4Battery::identify_battery() {
 }
 
 void Mg4Battery::setup(void) {  // Performs one time setup at startup
-  setup_uds(0x7E5, 0, {.fd = true});
+  setup_uds(0x7E5, 0, {.fd = true, .security_access_level = 1});
 
   static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_ISOLATION_RESISTANCE, POLL_BALANCING_STATUS,
                                        // POLL_MIN_CELL_TEMPERATURE,
@@ -1903,7 +1932,7 @@ void Mg4Battery::render_bal_cycle_html(String& html) {
       break;
     case ContactorState::BAL_HOLD:
       if (!bal_sleep_checked) {
-        html += "awake, waiting for 0xB0E5 page 6";
+        html += "awake, waiting for 0xB0E5 page 7";
       } else if (!bal_hold_have_sum) {
         html += "sleep accepted, waiting for a full 0x689 sweep";
       } else if (bal_stall_sweeps >= BAL_PAUSE_SWEEPS) {
@@ -1984,7 +2013,7 @@ static uint32_t be32(const uint8_t* p) {
   return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
-// One page of DID 0xB0E5 (see BAL_STATUS_LEN). Page 6 changes are logged.
+// One page of DID 0xB0E5 (see BAL_STATUS_LEN). Page 7 changes are logged.
 void Mg4Battery::record_bal_status(const uint8_t* data, uint16_t length) {
   if (length < BAL_STATUS_LEN) {
     return;
@@ -1995,7 +2024,14 @@ void Mg4Battery::record_bal_status(const uint8_t* data, uint16_t length) {
     return;
   }
   uint32_t* w = bal_page[page - 1];
-  if (page == BAL_GATE_PAGE) {
+  if (page == BAL_CELL_SOC_PAGE) {
+    const uint32_t max_pct = be32(data + 12);
+    const uint32_t min_pct = be32(data + 16);
+    if (!bal_page_seen[page - 1] || max_pct != w[2] || min_pct != w[3]) {
+      logging.printf("[MG4] BMS per-cell SoC max %lu%% min %lu%%, pack %lu%%\n", (unsigned long)max_pct,
+                     (unsigned long)min_pct, (unsigned long)be32(data + 20));
+    }
+  } else if (page == BAL_GATE_PAGE) {
     const uint32_t sleep_s = be32(data + 4);
     const uint32_t valid = be32(data + 8);
     if (!bal_page_seen[page - 1] || sleep_s != w[0] || valid != w[1]) {
@@ -2017,11 +2053,32 @@ static void append_hms(String& html, uint32_t s) {
 }
 
 void Mg4Battery::render_bal_status_html(String& html) {
-  char buf[96];
+  char buf[128];
   html += "<h3>Balancing gate (0xB0E5)</h3>";
   if (bal_status_polls == 0) {
     html += "N/A<br>";
     return;
+  }
+  const uint8_t c = BAL_CELL_SOC_PAGE - 1;
+  if (bal_page_seen[c]) {
+    const uint32_t max_pct = bal_page[c][2];
+    const uint32_t min_pct = bal_page[c][3];
+    // Whole-% values: the true spread is within 1 % of max - min.
+    const uint32_t spread_pct = max_pct > min_pct ? max_pct - min_pct : 0;
+    snprintf(buf, sizeof(buf),
+             "Per-cell SoC: max %lu%%, min %lu%%, pack %lu%% (snapshot %lu)<br>Spread: ", (unsigned long)max_pct,
+             (unsigned long)min_pct, (unsigned long)bal_page[c][4], (unsigned long)bal_page[c][1]);
+    html += buf;
+    if (spread_pct + 1 <= BAL_TOP_SPREAD_PCT) {
+      html += "&lt; 1% (too small for top-of-charge balancing)";
+    } else if (spread_pct >= BAL_TOP_SPREAD_PCT + 1) {
+      html += "&gt;= 1% (enough for top-of-charge balancing)";
+    } else {
+      html += "0-2% (whole-% values: can't tell if it is &gt;= 1%)";
+    }
+    html += "<br>";
+  } else {
+    html += "Waiting for page 1<br>";
   }
   const uint8_t g = BAL_GATE_PAGE - 1;
   if (bal_page_seen[g]) {
@@ -2034,9 +2091,11 @@ void Mg4Battery::render_bal_status_html(String& html) {
     html += "<br>Rest time: ";
     append_hms(html, rest_s);
     html += rest_s >= BAL_TOP_REST_S ? " (>= 30 min)" : " (< 30 min: no top-of-charge balancing yet)";
-    html += "<br>";
+    snprintf(buf, sizeof(buf), "<br>SoC gained charging in the previous session: %lu%%<br>",
+             (unsigned long)bal_page[g][2]);
+    html += buf;
   } else {
-    html += "Waiting for page 6<br>";
+    html += "Waiting for page 7<br>";
   }
   // All pages raw, for the fields not decoded yet.
   html += "<div style='font-family: monospace;'>";
