@@ -92,22 +92,25 @@ bool UdsCanBattery::transaction_tick() {
   uds_current_response_address = 0;
 
   if (seq_state != UDS_STATE_IDLE) {
-    // A sequence step timed out, retry if we have any retries left. If the
-    // pause now blocks this priority (e.g. an external tool appeared), don't
-    // retry into it — give the step up instead.
-    if (++seq_msg.retries <= seq_msg.max_retries && !uds_paused_for(seq_msg.priority)) {
-      uds_send((SID)seq_msg.sid, seq_msg.data, seq_msg.len, seq_msg.timeout_ticks);
-      return true;
-    }
-    const uint16_t failed = seq_state;
-    seq_state = UDS_STATE_IDLE;
-    // Notify the subclass that it failed
-    on_uds_sequence_timeout(failed);
-  } else if (pending_pid != 0) {
+    return on_sequence_step_timeout();
+  }
+  if (pending_pid != 0) {
     // Our PID scan must have timed out
     on_uds_pid_scan_timeout();
   }
+  return false;
+}
 
+inline bool UdsCanBattery::on_sequence_step_timeout() {
+  // If the step has retries left and the priority isn't paused, retry it.
+  if (++seq_msg.retries <= seq_msg.max_retries && !uds_paused_for(seq_msg.priority)) {
+    resend_seq_msg();
+    return true;
+  }
+  const uint16_t failed = seq_state;
+  seq_state = UDS_STATE_IDLE;
+  // Notify the subclass that it failed
+  on_uds_sequence_timeout(failed);
   return false;
 }
 
@@ -140,7 +143,7 @@ bool UdsCanBattery::send_sequence_message(uint16_t state, SID sid, const uint8_t
   }
 
   seq_state = state;
-  seq_msg.sid = (uint8_t)sid;
+  seq_msg.sid = sid;
   seq_msg.len = length;
   memcpy(seq_msg.data, data, seq_msg.len);
   seq_msg.timeout_ticks = timeout_ticks;
@@ -167,14 +170,7 @@ bool UdsCanBattery::handle_incoming_uds_can_frame(CAN_frame rx) {
     return true;
   }
 
-  if (uds_current_response_address > 0 && rx.ID != uds_current_response_address) {
-    // Not from the address we're mid-transaction with, ignore
-    return false;
-  } else if (uds_response_address > 0 && rx.ID != uds_response_address) {
-    // Not from the address we're expecting responses from, ignore
-    return false;
-  } else if (uds_response_address == 0 && (rx.ID < MIN_UDS_RESPONSE_ID || rx.ID > MAX_UDS_RESPONSE_ID)) {
-    // Outside the range of potential UDS response IDs, ignore
+  if (!is_from_ecu(rx.ID)) {
     return false;
   }
 
@@ -193,6 +189,19 @@ bool UdsCanBattery::handle_incoming_uds_can_frame(CAN_frame rx) {
   isotp_receive(rx.data.u8, rx.DLC, ISOTP_TATYPE_PHYSICAL);
 
   return true;
+}
+
+inline bool UdsCanBattery::is_from_ecu(uint32_t id) const {
+  if (uds_current_response_address > 0 && id != uds_current_response_address) {
+    // Not from the address we're mid-transaction with
+    return false;
+  }
+  if (uds_response_address > 0) {
+    // Only from the address we're expecting responses from
+    return id == uds_response_address;
+  }
+  // Auto-detecting: anything in the range of potential UDS response IDs
+  return id >= MIN_UDS_RESPONSE_ID && id <= MAX_UDS_RESPONSE_ID;
 }
 
 void UdsCanBattery::on_isotp_can_tx(uint32_t can_id, const uint8_t* can_data, uint8_t can_dlc) {
@@ -263,57 +272,48 @@ bool UdsCanBattery::transmit_uds_pid_scan() {
   return true;
 }
 
+inline void UdsCanBattery::schedule_next_pid(uint16_t detour) {
+  // Ends the current PID request and sets up the next one, which will be
+  // `detour` if nonzero, otherwise the next one in the scan list.
+
+  next_pid = detour;
+  if (detour == 0) {
+    advance_pid_scan();
+  }
+  pending_pid = 0;
+  pid_retries = 0;
+}
+
 bool UdsCanBattery::on_uds_pid_scan_response(uint8_t sid, const uint8_t* data, uint16_t len) {
-  // Possibly a PID response - if so, handle and return true (the PID
-  // transaction is finished). Returns false if the message doesn't finish the
-  // current PID transaction (unmatched frame, malformed response, or
-  // ResponsePending, for which we keep waiting).
+  // Handle a UDS PID scan response, returning true if successful, false to keep
+  // waiting.
 
-  const uint8_t id_bytes = pid_scan_id_bytes;
-  const uint8_t value_offset = 1 + id_bytes;  // SID + identifier
-
-  if (sid == UDS_RESPONSE_SID_OF(pid_scan_sid)) {
-    // This is a normal PID response, pass it to the handler
-    if (len < value_offset) {
-      // Malformed: no identifier present, keep waiting for a proper response.
-      return false;
-    }
-    uint16_t did = data[1];
-    if (id_bytes == 2) {
-      did = (did << 8) | data[2];
-    }
-    if (did != pending_pid) {
-      // Response identifier doesn't match the one we currently have in flight
-      // (maybe an old one?). Ignore it and keep waiting for the right one.
-      return false;
-    }
-    // Value starts after the identifier. Decode up to 4 bytes of value, big endian.
-    uint32_t val = len > value_offset ? parseBigEndianValue(&data[value_offset], len - value_offset) : 0;
-
-    // The handler returns 0 to advance the scan list, or a PID to query
-    // out-of-sequence first (a one-shot detour).
-    next_pid = handle_pid(did, val, &data[value_offset], len - value_offset);
-    if (next_pid == 0) {
-      advance_pid_scan();
-    }
-    pending_pid = 0;
-    pid_retries = 0;
-    return true;
-  } else if (sid == kNegativeResponseSid && len >= 3 && data[1] == pid_scan_sid) {
-    if (data[2] == NegativeResponseCode::RequestCorrectlyReceived_ResponsePending) {
-      // ResponsePending: keep waiting for the real response.
+  if (sid == kNegativeResponseSid) {
+    if (len < 3 || data[1] != pid_scan_sid ||
+        data[2] == NegativeResponseCode::RequestCorrectlyReceived_ResponsePending) {
       return false;
     }
     // Negative response to a PID request. Errors are swallowed for now: move
     // on to the next PID in the scan list.
-    next_pid = 0;
-    advance_pid_scan();
-    pending_pid = 0;
-    pid_retries = 0;
+    schedule_next_pid(0);
     return true;
   }
 
-  return false;
+  const uint8_t value_offset = 1 + pid_scan_id_bytes;  // SID + identifier
+  if (sid != UDS_RESPONSE_SID_OF(pid_scan_sid) || len < value_offset) {
+    return false;
+  }
+  const uint16_t did = pid_scan_id_bytes == 2 ? (data[1] << 8) | data[2] : data[1];
+  if (did != pending_pid) {
+    // This wasn't for the PID we requested, keep waiting.
+    return false;
+  }
+
+  // Decode and pass the value to the handler, scheduling its response as the next PID.
+  const uint8_t* value = &data[value_offset];
+  const uint16_t value_len = len - value_offset;
+  schedule_next_pid(handle_pid(did, parseBigEndianValue(value, value_len), value, value_len));
+  return true;
 }
 
 void UdsCanBattery::on_uds_pid_scan_timeout() {
@@ -326,10 +326,7 @@ void UdsCanBattery::on_uds_pid_scan_timeout() {
   }
 
   // Move on to the next PID in the scan list.
-  next_pid = 0;
-  advance_pid_scan();
-  pending_pid = 0;
-  pid_retries = 0;
+  schedule_next_pid(0);
 }
 
 void UdsCanBattery::on_uds_receive(const uint8_t* data, uint16_t len) {
@@ -339,11 +336,11 @@ void UdsCanBattery::on_uds_receive(const uint8_t* data, uint16_t len) {
     return;
   }
 
-  const SID sid = (SID)data[0];
+  const uint8_t sid = data[0];
 
 #ifdef UDS_DEBUG
   if (sid != UDS_RESPONSE_SID_OF(SID::ReadDataByIdentifier)) {
-    logging.printf("UDS RX: SID=0x%02X data=", (uint8_t)sid);
+    logging.printf("UDS RX: SID=0x%02X data=", sid);
     for (int i = 0; i < len; i++) {
       logging.printf("%02X ", data[i]);
     }
@@ -359,54 +356,67 @@ void UdsCanBattery::on_uds_receive(const uint8_t* data, uint16_t len) {
   }
 
   if (seq_state != UDS_STATE_IDLE) {
-    // Is this a response to the in-flight sequence step (positive or negative)?
-    const bool matched = (sid == UDS_RESPONSE_SID_OF(seq_msg.sid)) ||
-                         (sid == kNegativeResponseSid && len >= 3 && data[1] == seq_msg.sid);
-    if (matched && sid == kNegativeResponseSid &&
-        data[2] == NegativeResponseCode::RequestCorrectlyReceived_ResponsePending) {
-      // ResponsePending: the ECU is still working on the step. Keep waiting for
-      // the real response and extend the transaction timeout.
-      uds_transaction_timeout = seq_msg.timeout_ticks;
-    } else if (matched) {
-      // The current transaction is now finished.
-      uds_transaction_timeout = 0;
-      uds_current_response_address = 0;
-      const uint16_t state = seq_state;
-      // Go back to idle, the following functions may then override with the next step
-      seq_state = UDS_STATE_IDLE;
-      handle_sequence(state, (uint8_t)sid, data, len);
-    }
+    on_sequence_response(sid, data, len);
+  } else if (on_uds_pid_scan_response(sid, data, len)) {
+    // The response finished the PID transaction.
+    end_transaction();
+  }
+}
+
+inline void UdsCanBattery::end_transaction() {
+  uds_transaction_timeout = 0;
+  uds_current_response_address = 0;
+}
+
+inline void UdsCanBattery::on_sequence_response(uint8_t sid, const uint8_t* data, uint16_t len) {
+  // Is this a response to the in-flight sequence step (positive or negative)?
+  const bool matched =
+      (sid == UDS_RESPONSE_SID_OF(seq_msg.sid)) || (sid == kNegativeResponseSid && len >= 3 && data[1] == seq_msg.sid);
+  if (!matched) {
     // Unmatched messages (stray/late responses) are ignored without touching
     // the in-flight transaction, so a stray frame can't kill the request.
     return;
   }
-
-  // No sequence active, handle PID scan responses.
-  if (pending_pid != 0 && on_uds_pid_scan_response(sid, data, len)) {
-    // The response finished the PID transaction.
-    uds_transaction_timeout = 0;
-    uds_current_response_address = 0;
+  if (sid == kNegativeResponseSid && data[2] == NegativeResponseCode::RequestCorrectlyReceived_ResponsePending) {
+    // ResponsePending: the ECU is still working on the step, so wait again
+    // for the real response.
+    uds_transaction_timeout = seq_msg.timeout_ticks;
+    return;
   }
+
+  end_transaction();
+  const uint16_t state = seq_state;
+  // Go back to idle, the following functions may then override with the next step
+  seq_state = UDS_STATE_IDLE;
+  handle_sequence(state, sid, data, len);
 }
 
 void UdsCanBattery::handle_sequence(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len) {
-  // Dispatches responses for sequence states. Subclasses can override this to
-  // handle their own sequence states.
+  // Dispatches responses for sequence states.
   if (state & UDS_STATE_INTERNAL) {
+    // We handle our internal ones
     handle_internal_sequence(state, sid, data, len);
   } else {
+    // Subclasses can override this to handle their own sequence states.
     on_uds_sequence_step(state, sid, data, len);
   }
 }
 
 void UdsCanBattery::handle_internal_sequence(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len) {
-  // Handle internal sequence responses.
+  // Try each internal sequence handler in turn.
+  if (handle_dtc_step(state, sid, data, len)) {
+    return;
+  }
+  handle_reset_step(state, sid);
+}
+
+inline bool UdsCanBattery::handle_dtc_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len) {
   switch (state) {
     case UDS_STATE_READ_DTC_START:
       // Start a DTC readout sequence
       send_sequence_message(UDS_STATE_READ_DTC, SID::ReadDTCInformation, (const uint8_t*)"\x02\x09", 2,
                             UDS_TIMEOUT_READ_DTC, 2);
-      break;
+      return true;
     case UDS_STATE_READ_DTC:
       if (sid == UDS_RESPONSE_SID_OF(SID::ReadDTCInformation)) {
         handle_dtc_response(data, len);
@@ -415,25 +425,36 @@ void UdsCanBattery::handle_internal_sequence(uint16_t state, uint8_t sid, const 
         dtc->dtc_read_failed = true;
         dtc->dtc_last_read_millis = millis();
       }
-      break;
+      return true;
 
     case UDS_STATE_CLEAR_DTC_START:
       // Start a DTC clear sequence
       send_sequence_message(UDS_STATE_CLEAR_DTC, SID::ClearDiagnosticInformation, (const uint8_t*)"\xFF\xFF\xFF", 3,
                             UDS_TIMEOUT_CLEAR_DTC, 2);
-      break;
+      return true;
     case UDS_STATE_CLEAR_DTC:
       // Positive response (0x54): nothing to do, the sequence has ended.
-      break;
+      return true;
+  }
+  return false;
+}
+
+inline bool UdsCanBattery::handle_reset_step(uint16_t state, uint8_t sid) {
+  switch (state) {
     case UDS_STATE_SOFT_RESET_START: {
       const uint8_t reset_type = 0x03;
       send_sequence_message(UDS_STATE_SOFT_RESET, SID::ECUReset, &reset_type, 1, 10, 0);
-      break;
+      return true;
     }
     case UDS_STATE_SOFT_RESET:
       // The reset request is complete on either a positive or negative response.
-      break;
+      return true;
   }
+  return false;
+}
+
+inline void UdsCanBattery::resend_seq_msg() {
+  uds_send(seq_msg.sid, seq_msg.data, seq_msg.len, seq_msg.timeout_ticks);
 }
 
 void UdsCanBattery::handle_dtc_response(const uint8_t* data, uint16_t len) {
@@ -479,7 +500,8 @@ void UdsCanBattery::handle_dtc_response(const uint8_t* data, uint16_t len) {
 // Low level UDS send
 
 void UdsCanBattery::uds_send(SID service_id, const uint8_t* data, uint16_t length, uint32_t timeout) {
-  uint8_t payload[256];
+  // Allocate a buffer large enough for the biggest UDS payload we might send
+  uint8_t payload[1 + sizeof(seq_msg.data)];
 
   if (length >= sizeof(payload)) {
     return;
@@ -504,9 +526,7 @@ void UdsCanBattery::setup_uds(uint32_t uds_address, uint32_t uds_response_addres
   this->uds_address = uds_address;
   isotp_init(uds_address);
   this->uds_response_address = uds_response_address;
-  this->pid_scan_index = 0;
-  this->next_pid = 0;
-  this->pending_pid = 0;
+  restart_pid_scan();
   fd_uds_requests = config.fd;
 
   // Selects between UDS and KWP2000 'local ID' mode
@@ -516,13 +536,20 @@ void UdsCanBattery::setup_uds(uint32_t uds_address, uint32_t uds_response_addres
 }
 
 void UdsCanBattery::set_pid_scan_list(const uint16_t* pid_list, uint16_t length) {
-  // Point at the (possibly flash-resident) list; the scan restarts from the
-  // beginning of the new list.
+  // Accepts a pointer and length of the list of PIDs to scan, and starts
+  // scanning it from the beginning.
+
   this->pid_list = pid_list;
-  this->pid_list_len = length;
-  this->pid_scan_index = 0;
-  this->next_pid = 0;
-  this->pending_pid = 0;
+  pid_list_len = length;
+  restart_pid_scan();
+}
+
+inline void UdsCanBattery::restart_pid_scan() {
+  // Starts the PID scan again from the beginning of the list.
+
+  pid_scan_index = 0;
+  next_pid = 0;
+  pending_pid = 0;
 }
 
 String UdsBatteryHtmlRenderer::get_status_html() {
