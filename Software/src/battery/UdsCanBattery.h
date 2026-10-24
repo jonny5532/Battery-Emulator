@@ -60,7 +60,8 @@
 //   - Override `on_uds_sequence_step(state, sid, data, len)` to handle any
 //     response and send the next step.
 //   - Optionally override `on_uds_sequence_timeout(state)` to handle a step
-//     timing out (the superclass retries automatically).
+//     timing out (the superclass retries automatically, including after NRC
+//     0x21 BusyRepeatRequest).
 
 class UdsCanBattery;
 

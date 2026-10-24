@@ -385,9 +385,11 @@ inline void UdsCanBattery::on_sequence_response(uint8_t sid, const uint8_t* data
     // the in-flight transaction, so a stray frame can't kill the request.
     return;
   }
-  if (sid == kNegativeResponseSid && data[2] == NegativeResponseCode::RequestCorrectlyReceived_ResponsePending) {
+  if (sid == kNegativeResponseSid && (data[2] == NegativeResponseCode::RequestCorrectlyReceived_ResponsePending ||
+                                      data[2] == NegativeResponseCode::BusyRepeatRequest)) {
     // ResponsePending: the ECU is still working on the step, so wait again
-    // for the real response.
+    // for the real response. BusyRepeatRequest: no response is coming, but
+    // waiting out the timeout makes the usual retry path re-send the step.
     uds_transaction_timeout = seq_msg.timeout_ticks;
     return;
   }
