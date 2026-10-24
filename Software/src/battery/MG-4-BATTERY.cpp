@@ -673,12 +673,14 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
 }
 
 void Mg4Battery::setup(void) {  // Performs one time setup at startup
-  setup_uds(0x7E5, 0);          //POLL_BATTERY_VOLTAGE);
+  setup_uds(0x7E5, 0);
+  fd_uds_requests = true;
 
   static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_BATTERY_VOLTAGE, POLL_MIN_CELL_TEMPERATURE,
                                        POLL_MAX_CELL_TEMPERATURE};
 
   set_pid_scan_list(POLL_LIST, sizeof(POLL_LIST) / sizeof(POLL_LIST[0]));
+  dtc = &datalayer.battery.dtc;
 
   renderer = new Mg4BatteryHtmlRenderer(this);
 
@@ -787,5 +789,9 @@ String Mg4BatteryHtmlRenderer::get_status_html() {
   }
 
   html += "</div>";
+
+  auto& dtc = datalayer.battery.dtc;
+  html += BatteryHtmlRenderer::render_dtc_section_html(dtc, "mg_dtc.json", true);
+
   return html;
 }
