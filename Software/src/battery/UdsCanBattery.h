@@ -107,7 +107,7 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   enum UdsState : uint16_t {
     UDS_STATE_IDLE = 0,
     UDS_STATE_INTERNAL = 0x8000,
-    // Superclass-internal sequences.
+    // Superclass-internal sequences
     UDS_STATE_READ_DTC_START = UDS_STATE_INTERNAL | 0x01,
     UDS_STATE_READ_DTC,  // 0x19 0x02
     UDS_STATE_CLEAR_DTC_START = UDS_STATE_INTERNAL | 0x03,
@@ -226,6 +226,17 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   inline bool uds_paused_for(UdsPriority priority) const { return seq_pause_ticks > 0 && priority <= seq_pause_level; }
 
   bool transaction_tick();
+  // A sequence step's timeout ran out: retry it, or give it up and report.
+  // Returns true if it was retried.
+  bool on_sequence_step_timeout();
+  // Whether a received frame comes from the ECU we're talking to.
+  bool is_from_ecu(uint32_t id) const;
+  // Handles a complete response while a sequence step is in flight.
+  void on_sequence_response(uint8_t sid, const uint8_t* data, uint16_t len);
+  // The in-flight request has been answered: stop waiting for it.
+  void end_transaction();
+  // Re-sends the current sequence step.
+  void resend_seq_msg();
 
   // Advance to the next entry in the PID scan list, wrapping around at the end.
   inline void advance_pid_scan() {
@@ -237,24 +248,29 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   void uds_send(SID service_id, const uint8_t* data, uint16_t length, uint32_t timeout = 0);
   bool transmit_uds_pid_scan();
   bool on_uds_pid_scan_response(uint8_t sid, const uint8_t* data, uint16_t len);
+  void schedule_next_pid(uint16_t detour);
   void on_uds_pid_scan_timeout();
+  void restart_pid_scan();
   void on_uds_receive(const uint8_t* data, uint16_t len);
   void handle_dtc_response(const uint8_t* data, uint16_t len);
   // Dispatches responses for sequence states
   void handle_sequence(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len);
-  // Dispatches responses for superclass-internal sequence states.
+  // Dispatches responses for superclass-internal sequence states, to the
+  // handlers below. Each returns false for states that aren't its own.
   void handle_internal_sequence(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len);
-
+  bool handle_dtc_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len);
+  bool handle_reset_step(uint16_t state, uint8_t sid);
   // The request currently in flight as part of a sequence.
-  struct {
-    uint8_t sid = 0;
+  struct SequenceMessage {
+    SID sid = {};
     uint8_t data[16] = {};
-    uint16_t len = 0;
-    uint32_t timeout_ticks = 0;  // original timeout, re-applied on each retry
+    uint8_t len = 0;
+    uint16_t timeout_ticks = 0;  // original timeout, re-applied on each retry
     uint8_t retries = 0;
     uint8_t max_retries = 0;
     UdsPriority priority = UdsPriority::Sequence;  // pause priority of this step
-  } seq_msg;
+  };
+  SequenceMessage seq_msg;
 
   uint32_t previousUdsMillis100 = 0;
   // The request SID and identifier width used by the PID scan, provided in the
