@@ -485,6 +485,41 @@ TEST_F(UdsCanBatteryTest, SequenceResponsePendingExtendsTheWait) {
   EXPECT_TRUE(battery->seq_timeouts.empty());
 }
 
+// BusyRepeatRequest: no real response will follow, so the step is re-sent
+// once its timeout runs out, using up a retry.
+TEST_F(UdsCanBatteryTest, BusyRepeatRequestResendsTheStep) {
+  uint8_t payload[] = {0x01};
+  battery->send_sequence_message(0x1002, SID::ECUReset, payload, 1, /*timeout=*/2, /*retries=*/2);
+
+  feed_response({0x7F, 0x11, 0x21});
+  EXPECT_TRUE(battery->seq_calls.empty());
+  tick(1000);  // 2->1
+  EXPECT_EQ(get_transmitted_frames().size(), 1u);
+  tick(1100);  // 1->0: re-sent.
+  ASSERT_EQ(get_transmitted_frames().size(), 2u);
+  EXPECT_EQ(last_frame(get_transmitted_frames()).data.u8[1], 0x11);
+
+  feed_response({0x51, 0x01});
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+  EXPECT_EQ(battery->seq_calls[0].sid, 0x51);
+  EXPECT_TRUE(battery->seq_timeouts.empty());
+}
+
+// An ECU that stays busy can't hold a step forever: the retries run out.
+TEST_F(UdsCanBatteryTest, BusyRepeatRequestUsesUpRetries) {
+  uint8_t payload[] = {0x01};
+  battery->send_sequence_message(0x1002, SID::ECUReset, payload, 1, /*timeout=*/2, /*retries=*/1);
+  unsigned long t = 1000;
+  for (int i = 0; i < 10 && battery->seq_timeouts.empty(); i++) {
+    feed_response({0x7F, 0x11, 0x21});
+    tick(t += 100);
+    tick(t += 100);
+  }
+  EXPECT_EQ(get_transmitted_frames().size(), 2u);
+  ASSERT_EQ(battery->seq_timeouts.size(), 1u);
+  EXPECT_EQ(battery->seq_timeouts[0], 0x1002);
+}
+
 // Stray/late frames must not kill an in-flight sequence step.
 TEST_F(UdsCanBatteryTest, UnmatchedFrameDoesNotKillInFlightStep) {
   uint8_t payload[] = {0x01};
