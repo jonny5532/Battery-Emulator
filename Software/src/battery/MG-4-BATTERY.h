@@ -54,6 +54,8 @@ class Mg4Battery : public UdsCanBattery {
  protected:
   // Visible to tests via subclass; production code treats as private.
   bool batteryIdentified = false;
+  // MG4 application security level 1 seed -> key algorithm.
+  uint8_t security_access_key(uint8_t level, const uint8_t* seed, uint16_t seed_len, uint8_t* key) const override;
   ContactorState contactorState = ContactorState::WAITING_FOR_PACK;
   bool reclose_blocked = false;
 
@@ -150,11 +152,11 @@ class Mg4Battery : public UdsCanBattery {
   // that falls from 3.0% at 1 min rest to 1.0% at 60 min. Mid-SoC packs never
   // balance. So the cycle is: graceful shutdown, BAL_CYCLE_SLEEP_MS from the
   // BMS going silent, wake, then BAL_HOLD (open levels, limits 0) while any
-  // cell has 0x689 minutes left. 0xB0E5 page 6 confirms the sleep counted.
+  // cell has 0x689 minutes left. 0xB0E5 page 7 confirms the sleep counted.
   // Not persisted: a reboot mid-cycle starts up into the normal logic.
   static constexpr unsigned long BAL_CYCLE_SLEEP_MS = 35UL * 60 * 1000;
   static constexpr unsigned long BAL_HOLD_MAX_MS = 13UL * 60 * 60 * 1000;  // 12h target cap plus margin
-  // Page 6 must report a valid sleep of at least this long.
+  // Page 7 must report a valid sleep of at least this long.
   static constexpr uint32_t BAL_SLEEP_ACCEPT_S = BAL_CYCLE_SLEEP_MS / 1000 * 9 / 10;
   // End the cycle if the BMS keeps talking this long after shutdown (or a self-wake).
   static constexpr unsigned long BAL_SILENCE_TIMEOUT_MS = 10UL * 60 * 1000;
@@ -175,7 +177,7 @@ class Mg4Battery : public UdsCanBattery {
   unsigned long bal_wake_at_ms = 0;
   unsigned long bal_noisy_since_ms = 0;  // when the BMS last started talking while asleep
   unsigned long bal_hold_start_ms = 0;
-  bool bal_sleep_checked = false;  // 0xB0E5 page 6 accepted
+  bool bal_sleep_checked = false;  // 0xB0E5 page 7 accepted
   uint32_t bal_hold_sweeps = 0;    // bal_sweep_count when BAL_HOLD began / last handled
   bool bal_hold_have_sum = false;  // a full sweep has been seen in this hold
   uint32_t bal_hold_prev_sum = 0;
@@ -266,8 +268,8 @@ class Mg4Battery : public UdsCanBattery {
   static constexpr int32_t SNAP_SKIP_SOC = 9800;  // skip snap if BMS SoC here
   static constexpr int32_t SNAP_RESET_MV = 3450;
   static constexpr int32_t SNAP_HOLD_MV = 3600;  // forced 100% SoC held down to here
-  static constexpr int32_t SNAP_MAX_DA = 50;     // 5A max during snap
-  static constexpr int32_t SNAP_MIN_DA = 30;     // 3A min during snap
+  static constexpr int32_t SNAP_MAX_DA = 20;     // 2A max during snap
+  static constexpr int32_t SNAP_MIN_DA = 10;     // 1A min during snap
   static constexpr float SNAP_EMA_ALPHA = 1.0f / 30;
 
   bool snapEnded = false;
@@ -323,20 +325,30 @@ class Mg4Battery : public UdsCanBattery {
 
   // ---- Balancing gate status (DID 0xB0E5) ----
   // 24 bytes = six big-endian 32-bit words, multiplexed: every read returns the
-  // next of 6 pages (word 0 = page number 1..6), so one page arrives per poll.
-  // Page 6 carries the inputs that gate new balancing decisions: word 1 = how
+  // next of 7 pages (word 0 = page number 1..7), so one page arrives per poll.
+  // The BMS truncates its float values to whole numbers.
+  // Page 1 is a snapshot the BMS refreshes every ~5 min: word 1 = a flag (seen
+  // 1, briefly 0 as the snapshot is refreshed), word 2 = snapshot counter,
+  // word 3 / word 4 = the highest / lowest per-cell SoC (%), word 5 = pack SoC
+  // (%). The per-cell max - min is the spread that top-of-charge balancing
+  // needs >= 1 %.
+  // Page 7 carries the inputs that gate new balancing decisions: word 1 = how
   // long the BMS slept before this wake (s, from its RTC; balancing needs a
   // valid sleep of 2 s .. ~1 year), word 2 = 1 with a valid sleep (0 seen
-  // without one), word 5 = rest time (s) = sleep + time awake with the
-  // contactors open (top-of-charge balancing needs >= 30 min). The other pages
-  // are kept raw. (DID 0xB11A, polled before, is a 16-byte status from an
+  // without one), word 3 = SoC % gained while charging in the previous
+  // session (from its NvM snapshot; not a balancing input), word 5 = rest
+  // time (s) = sleep + time awake with the contactors open (top-of-charge
+  // balancing needs >= 30 min). The other pages are kept raw.
+  // (DID 0xB11A, polled before, is a 16-byte status from an
   // unrelated table: it did not change while the emulated BMS balanced.)
   static constexpr uint16_t BAL_STATUS_LEN = 24;
-  static constexpr uint8_t BAL_STATUS_PAGES = 6;
+  static constexpr uint8_t BAL_STATUS_PAGES = 7;
   static constexpr uint8_t BAL_STATUS_WORDS = 5;  // after the page number
-  static constexpr uint8_t BAL_GATE_PAGE = 6;
+  static constexpr uint8_t BAL_CELL_SOC_PAGE = 1;
+  static constexpr uint8_t BAL_GATE_PAGE = 7;
   static constexpr uint32_t BAL_MIN_SLEEP_S = 2;
   static constexpr uint32_t BAL_TOP_REST_S = 30 * 60;
+  static constexpr uint32_t BAL_TOP_SPREAD_PCT = 1;
 
   bool bal_page_seen[BAL_STATUS_PAGES] = {false};
   uint32_t bal_page[BAL_STATUS_PAGES][BAL_STATUS_WORDS] = {{0}};
@@ -345,7 +357,7 @@ class Mg4Battery : public UdsCanBattery {
   void record_bal_status(const uint8_t* data, uint16_t length);
   void render_bal_status_html(String& html);
   // Worst-case rendered size of the status section.
-  static constexpr uint32_t BAL_STATUS_HTML_BUDGET = 768;
+  static constexpr uint32_t BAL_STATUS_HTML_BUDGET = 1024;
 
  private:
   static const uint16_t MAX_CELL_DEVIATION_LFP_MV = 400;
