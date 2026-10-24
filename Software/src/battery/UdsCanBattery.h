@@ -63,6 +63,13 @@
 //   - Optionally override `on_uds_sequence_timeout(state)` to handle a step
 //     timing out (the superclass retries automatically, including after NRC
 //     0x21 BusyRepeatRequest).
+//   - To wait between steps (e.g. for a routine to run), call
+//     `wait_sequence(next_state, ticks, block_pid_scan)` instead of sending a
+//     step. `on_uds_sequence_step(next_state, 0, nullptr, 0)` is called when
+//     the wait is over. The wait is part of the sequence, so sequences queued
+//     meanwhile run after it finishes. The PID scan stays running during the
+//     wait unless indicated. Consider sending regular TesterPresent messages
+//     every ~5s if PIDs are blocked, to keep a diagnostic session active.
 //
 // SECURITY ACCESS
 //
@@ -157,8 +164,8 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   };
 
   inline bool uds_is_busy() const {
-    return seq_state != UDS_STATE_IDLE || pending_pid != 0 || pending_seq_state != UDS_STATE_IDLE ||
-           seq_pause_ticks > 0 || isotp_is_busy();
+    return seq_state != UDS_STATE_IDLE || seq_wait_state != UDS_STATE_IDLE || pending_pid != 0 ||
+           pending_seq_state != UDS_STATE_IDLE || seq_pause_ticks > 0 || isotp_is_busy();
   }
 
   virtual bool supports_read_DTC();
@@ -218,6 +225,12 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   // allowing the subclass to send the first step. Returns false if a sequence
   // is already queued. Lock-free and safe to call from any task.
   bool start_sequence(uint16_t state);
+
+  // Continues the current sequence at `state` after `ticks` 100ms ticks,
+  // instead of sending a step. Call it from on_uds_sequence_step(). Sequences
+  // queued with start_sequence() are held off until this one finishes. If
+  // `block_pid_scan` is set, the PID scan is paused for the wait too.
+  void wait_sequence(uint16_t state, uint16_t ticks, bool block_pid_scan = false);
 
   // Send a single step of a UDS sequence. The state is handed back to
   // on_uds_sequence_step() along with the response. The step is retried
@@ -374,6 +387,11 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   // The pending next state to start a sequence. Set by start_sequence() and
   // cleared when the sequence is started.
   std::atomic<uint32_t> pending_seq_state{UDS_STATE_IDLE};  // 32 bit is fast on ESP32
+  // The state a waiting sequence continues at, set by wait_sequence(), or
+  // UDS_STATE_IDLE. Only touched by the CAN task.
+  uint16_t seq_wait_state = UDS_STATE_IDLE;
+  // 100ms ticks left before the waiting sequence continues.
+  uint16_t seq_wait_ticks = 0;
   // Number of 100ms ticks of quiet (new sends blocked) remaining, set by
   // pause_uds().
   uint16_t seq_pause_ticks = 0;

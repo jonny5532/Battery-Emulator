@@ -32,6 +32,7 @@ class TestUdsBattery : public UdsCanBattery {
   using UdsCanBattery::setup_uds;
   using UdsCanBattery::start_sequence;
   using UdsCanBattery::transmit_uds_can;
+  using UdsCanBattery::wait_sequence;
 
   struct PidCall {
     uint16_t pid;
@@ -708,6 +709,130 @@ TEST_F(UdsCanBatteryTest, SequenceHoldsTheBusFromPidScan) {
   tick(1100);
   // Sequence finished (subclass sent nothing further) - PID scan proceeds.
   EXPECT_EQ(requested_pid(last_frame(get_transmitted_frames())), 0x9001);
+}
+
+// ---------------------------------------------------------------------------
+// Waits between sequence steps
+// ---------------------------------------------------------------------------
+
+TEST_F(UdsCanBatteryTest, WaitContinuesTheSequenceAfterTheDelay) {
+  battery->wait_sequence(0x1005, 3);
+  EXPECT_TRUE(battery->uds_is_busy());
+  tick(1000);  // 3->2
+  tick(1100);  // 2->1
+  EXPECT_TRUE(battery->seq_calls.empty());
+  tick(1200);  // 1->0: continues.
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+  EXPECT_EQ(battery->seq_calls[0].state, 0x1005);
+  EXPECT_EQ(battery->seq_calls[0].sid, 0);
+  EXPECT_TRUE(battery->seq_calls[0].data.empty());
+  EXPECT_FALSE(battery->uds_is_busy());
+}
+
+// Some batteries rely on the PID scan for safety-relevant values, so by
+// default it keeps running through a wait.
+TEST_F(UdsCanBatteryTest, PidScanRunsDuringAWait) {
+  const uint16_t pids[] = {0x9001, 0x9002};
+  battery->set_pid_scan_list(pids, 2);
+  battery->wait_sequence(0x1005, 5);
+
+  unsigned long t = 1000;
+  for (int i = 0; i < 4; i++) {
+    tick(t += 100);
+    ASSERT_FALSE(get_transmitted_frames().empty());
+    const CAN_frame& f = last_frame(get_transmitted_frames());
+    feed_response({0x62, f.data.u8[2], f.data.u8[3], 0x01});
+  }
+  EXPECT_EQ(battery->pid_calls.size(), 4u);
+  EXPECT_TRUE(battery->seq_calls.empty());
+  tick(t += 100);
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+  EXPECT_EQ(battery->seq_calls[0].state, 0x1005);
+}
+
+TEST_F(UdsCanBatteryTest, WaitCanStopThePidScan) {
+  const uint16_t pids[] = {0x9001};
+  battery->set_pid_scan_list(pids, 1);
+  battery->wait_sequence(0x1005, 3, /*block_pid_scan=*/true);
+
+  tick(1000);
+  tick(1100);
+  EXPECT_TRUE(get_transmitted_frames().empty());
+  tick(1200);
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+}
+
+// An external tool's (shorter) backoff mustn't end the wait early, nor keep the
+// PID scan stopped for the rest of the wait.
+TEST_F(UdsCanBatteryTest, ExternalToolPauseDoesNotShortenAWait) {
+  const uint16_t pids[] = {0x9001};
+  battery->set_pid_scan_list(pids, 1);
+  battery->wait_sequence(0x1005, 100);
+  battery->handle_incoming_can_frame(make_frame(0x7DF, {0x02, 0x01, 0x00}));  // 5 s backoff
+
+  unsigned long t = 1000;
+  for (int i = 0; i < 60; i++) {
+    tick(t += 100);
+  }
+  EXPECT_TRUE(battery->seq_calls.empty());
+  EXPECT_FALSE(get_transmitted_frames().empty());  // PIDs resumed after the backoff.
+
+  for (int i = 0; i < 40 && battery->seq_calls.empty(); i++) {
+    tick(t += 100);
+  }
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+  EXPECT_EQ(battery->seq_calls[0].state, 0x1005);
+}
+
+// The wait is part of the sequence: a sequence queued meanwhile (e.g. from the
+// webserver) runs once it has finished, rather than cutting in.
+TEST_F(UdsCanBatteryTest, SequenceQueuedDuringAWaitRunsAfterIt) {
+  battery->wait_sequence(0x1005, 3);
+  EXPECT_TRUE(battery->start_sequence(0x2001));
+
+  tick(1000);
+  tick(1100);
+  EXPECT_TRUE(battery->seq_calls.empty());
+  tick(1200);  // the wait is over
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+  EXPECT_EQ(battery->seq_calls[0].state, 0x1005);
+
+  tick(1300);  // the waiting sequence ended without a step: the queued one starts
+  ASSERT_EQ(battery->seq_calls.size(), 2u);
+  EXPECT_EQ(battery->seq_calls[1].state, 0x2001);
+}
+
+// Waiting doesn't need the start_sequence() slot, so it works even when that is
+// already taken.
+TEST_F(UdsCanBatteryTest, WaitWorksWhileAnotherSequenceIsQueued) {
+  EXPECT_TRUE(battery->start_sequence(0x2001));
+  battery->wait_sequence(0x1005, 2);
+
+  tick(1000);
+  EXPECT_TRUE(battery->seq_calls.empty());
+  tick(1100);
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+  EXPECT_EQ(battery->seq_calls[0].state, 0x1005);
+  tick(1200);
+  ASSERT_EQ(battery->seq_calls.size(), 2u);
+  EXPECT_EQ(battery->seq_calls[1].state, 0x2001);
+}
+
+// A wait that ends during a pause blocking sequences continues once the pause
+// is over, rather than being lost.
+TEST_F(UdsCanBatteryTest, WaitEndingDuringAPauseContinuesAfterIt) {
+  battery->wait_sequence(0x1005, 2);
+  battery->pause_uds(5, UdsCanBattery::UdsPriority::Sequence);
+
+  unsigned long t = 1000;
+  for (int k = 0; k < 4; k++, t += 100) {
+    tick(t);
+  }
+  EXPECT_TRUE(battery->seq_calls.empty());
+  EXPECT_TRUE(battery->uds_is_busy());
+  tick(t);
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+  EXPECT_EQ(battery->seq_calls[0].state, 0x1005);
 }
 
 // ---------------------------------------------------------------------------
