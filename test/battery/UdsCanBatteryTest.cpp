@@ -781,6 +781,82 @@ TEST_F(UdsCanBatteryTest, DtcReadDuringExternalToolBackoffIsNotLost) {
   EXPECT_TRUE(sent_dtc_request);
 }
 
+// While the BMS is silent, a timed-out PID stays pending between its retries.
+// A sequence queued in that window must still be sent, not refused by
+// send_sequence_message() because a PID "is in flight".
+TEST_F(UdsCanBatteryTest, SequenceQueuedBetweenPidRetriesIsSent) {
+  const uint16_t pids[] = {0x9001};
+  battery->set_pid_scan_list(pids, 1);
+
+  // Let the PID time out a few times; nothing ever answers.
+  for (int k = 0; k <= 30; k++) {
+    tick(1000 + 100 * k);
+  }
+
+  // Try a DTC read at every point of the retry cycle.
+  for (int attempt = 0; attempt < 20; attempt++) {
+    clear_transmitted_frames();
+    battery->read_DTC();
+    unsigned long t = 4100 + attempt * 10000;
+    bool sent_dtc_request = false;
+    // Run past the DTC read's own timeout (3 x 2 s) so the next attempt starts clean.
+    for (int k = 0; k < 80; k++) {
+      tick(t + 100 * k);
+    }
+    for (const auto& f : get_transmitted_frames()) {
+      if (f.data.u8[1] == 0x19) {
+        sent_dtc_request = true;
+      }
+    }
+    ASSERT_TRUE(sent_dtc_request) << "attempt " << attempt;
+    // Offset the next attempt by one tick to land at a different retry phase.
+    tick(t + 8000 + 100 * (attempt % 3));
+  }
+}
+
+// A long stretch of PID timeouts (BMS asleep) must not wedge the scan: once
+// the BMS answers again, responses are handled.
+TEST_F(UdsCanBatteryTest, PidScanRecoversAfterLongSilence) {
+  const uint16_t pids[] = {0x9001, 0x9002};
+  battery->set_pid_scan_list(pids, 2);
+
+  unsigned long t = 1000;
+  for (int k = 0; k < 5000; k++, t += 100) {
+    tick(t);
+  }
+  ASSERT_TRUE(battery->pid_calls.empty());
+
+  // The BMS wakes and answers whatever is being requested.
+  for (int k = 0; k < 10 && battery->pid_calls.empty(); k++, t += 100) {
+    tick(t);
+    uint16_t pid = requested_pid(last_frame(get_transmitted_frames()));
+    feed_response({0x62, (uint8_t)(pid >> 8), (uint8_t)pid, 0x01});
+  }
+  EXPECT_FALSE(battery->pid_calls.empty());
+}
+
+// A pause that only blocks sequences keeps a queued sequence waiting, but
+// mustn't stop the PID scan.
+TEST_F(UdsCanBatteryTest, SequenceOnlyPauseLetsThePidScanRun) {
+  const uint16_t pids[] = {0x9001};
+  battery->set_pid_scan_list(pids, 1);
+  battery->pause_uds(5, UdsCanBattery::UdsPriority::Sequence);
+  ASSERT_TRUE(battery->start_sequence(0x1001));
+
+  unsigned long t = 1000;
+  for (int k = 0; k < 4; k++, t += 100) {
+    tick(t);
+    ASSERT_FALSE(get_transmitted_frames().empty()) << "tick " << k;
+    EXPECT_EQ(requested_pid(last_frame(get_transmitted_frames())), 0x9001);
+    feed_response({0x62, 0x90, 0x01, 0x01});
+  }
+  EXPECT_TRUE(battery->seq_calls.empty());
+
+  tick(t);  // pause expires: the sequence starts.
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+  EXPECT_EQ(battery->seq_calls[0].state, 0x1001);
+}
+
 TEST_F(UdsCanBatteryTest, ExternalToolTrafficBacksOff) {
   const uint16_t pids[] = {0x9001};
   battery->set_pid_scan_list(pids, 1);
