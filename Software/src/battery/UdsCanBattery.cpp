@@ -9,6 +9,7 @@ constexpr uint16_t UDS_TIMEOUT_SESSION_CONTROL = 10;
 constexpr uint16_t UDS_TIMEOUT_CLEAR_DTC = 25;
 constexpr uint16_t UDS_TIMEOUT_READ_DTC = 20;
 constexpr uint16_t UDS_TIMEOUT_READ_DID = 2;
+constexpr uint16_t UDS_TIMEOUT_SECURITY = 20;
 // The ECU answers an ECUReset before it resets, so a short wait is enough.
 constexpr uint16_t UDS_TIMEOUT_RESET = 10;
 // How long to ignore CAN errors after a reset, while the BMS restarts.
@@ -26,6 +27,12 @@ constexpr uint32_t MAX_UDS_RESPONSE_ID = 0x7EF;
 constexpr uint8_t UDS_SID_READ_LOCAL_IDENTIFIER = 0x21;
 // How long to back off after detecting another diagnostic tool on the bus.
 constexpr uint16_t UDS_EXTERNAL_TOOL_BACKOFF_TICKS = 50;  // 5 seconds
+// How long to hold off sequences after a failed unlock, so callers retrying
+// straight away can't run up the ECU's failed-attempt counter (NRC 0x36) and
+// any required delay (NRC 0x37) has time to expire.
+constexpr uint16_t UDS_SECURITY_FAIL_BACKOFF_TICKS = 100;  // 10 seconds
+// Largest key we can send: the sequence buffer less the sendKey sub-function.
+constexpr uint8_t UDS_SECURITY_MAX_KEY_LEN = 15;
 
 //#define UDS_DEBUG 1
 
@@ -123,8 +130,14 @@ inline bool UdsCanBattery::on_sequence_step_timeout() {
   }
   const uint16_t failed = seq_state;
   seq_state = UDS_STATE_IDLE;
-  // Notify the subclass that it failed
-  on_uds_sequence_timeout(failed);
+  security_retry_in_flight = false;
+  if (deferred_seq_state != UDS_STATE_IDLE) {
+    // A step of the unlock itself timed out.
+    security_access_failed(failed, 0);
+  } else {
+    // Notify the subclass that it failed
+    on_uds_sequence_timeout(failed);
+  }
   return false;
 }
 
@@ -407,6 +420,15 @@ inline void UdsCanBattery::on_sequence_response(uint8_t sid, const uint8_t* data
   const uint16_t state = seq_state;
   // Go back to idle, the following functions may then override with the next step
   seq_state = UDS_STATE_IDLE;
+  // If this was a security-denied response, engage the security access
+  // mechanism (if enabled)
+  const bool was_security_retry = security_retry_in_flight;
+  security_retry_in_flight = false;
+  const bool security_denied = sid == kNegativeResponseSid && data[2] == NegativeResponseCode::SecurityAccessDenied;
+  if (security_denied && !was_security_retry && begin_security_access(state)) {
+    // The step is deferred until the seed/key exchange completes.
+    return;
+  }
   handle_sequence(state, sid, data, len);
 }
 
@@ -426,7 +448,10 @@ void UdsCanBattery::handle_internal_sequence(uint16_t state, uint8_t sid, const 
   if (handle_dtc_step(state, sid, data, len)) {
     return;
   }
-  handle_reset_step(state, sid);
+  if (handle_reset_step(state, sid)) {
+    return;
+  }
+  handle_security_step(state, sid, data, len);
 }
 
 inline bool UdsCanBattery::handle_dtc_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len) {
@@ -492,8 +517,151 @@ inline bool UdsCanBattery::handle_reset_step(uint16_t state, uint8_t sid) {
   return false;
 }
 
+static bool all_zero(const uint8_t* data, uint16_t len) {
+  for (uint16_t i = 0; i < len; i++) {
+    if (data[i] != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline bool UdsCanBattery::handle_security_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len) {
+  switch (state) {
+    case UDS_STATE_SECURITY_START:
+      if (security_access_session != 0) {
+        // Request a security access session of the configured type
+        const uint8_t session = security_access_session;
+        if (!send_sequence_message(UDS_STATE_SECURITY_SESSION, SID::DiagnosticSessionControl, &session, 1,
+                                   UDS_TIMEOUT_SESSION_CONTROL, 2)) {
+          security_access_failed(UDS_STATE_SECURITY_SESSION, 0);
+        }
+        return true;
+      }
+      // No session change configured: request the seed straight away.
+      [[fallthrough]];
+    case UDS_STATE_SECURITY_SESSION: {
+      if (sid == kNegativeResponseSid) {
+        security_access_failed(UDS_STATE_SECURITY_SESSION, len >= 3 ? data[2] : 0);
+        return true;
+      }
+      // Now request the seed for the configured security access level.
+      const uint8_t level = security_access_level;
+      if (!send_sequence_message(UDS_STATE_SECURITY_SEED, SID::SecurityAccess, &level, 1, UDS_TIMEOUT_SECURITY, 2)) {
+        security_access_failed(UDS_STATE_SECURITY_SEED, 0);
+      }
+      return true;
+    }
+    case UDS_STATE_SECURITY_SEED: {
+      // 67 <level> <seed...>
+      if (sid == kNegativeResponseSid || len < 3 || data[1] != security_access_level) {
+        security_access_failed(UDS_STATE_SECURITY_SEED, sid == kNegativeResponseSid && len >= 3 ? data[2] : 0);
+        return true;
+      }
+      // Extract the seed from the response.
+      const uint8_t* seed = &data[2];
+      const uint16_t seed_len = len - 2;
+      if (all_zero(seed, seed_len)) {
+        // The ECU is already unlocked for this level.
+        resume_deferred_sequence();
+        return true;
+      }
+      uint8_t key_payload[1 + UDS_SECURITY_MAX_KEY_LEN];
+      key_payload[0] = security_access_level + 1;
+      // Generate the key via the subclass implementation
+      const uint8_t key_len = security_access_key(security_access_level, seed, seed_len, &key_payload[1]);
+      // Only try once (the seed is single-use, so re-sending a stale key is futile)
+      if (key_len == 0 || key_len > UDS_SECURITY_MAX_KEY_LEN ||
+          !send_sequence_message(UDS_STATE_SECURITY_KEY, SID::SecurityAccess, key_payload, 1 + key_len,
+                                 UDS_TIMEOUT_SECURITY, 0)) {
+        security_access_failed(UDS_STATE_SECURITY_KEY, 0);
+      }
+      return true;
+    }
+    case UDS_STATE_SECURITY_KEY:
+      if (sid == kNegativeResponseSid) {
+        security_access_failed(UDS_STATE_SECURITY_KEY, len >= 3 ? data[2] : 0);
+      } else {
+        resume_deferred_sequence();
+      }
+      return true;
+  }
+  return false;
+}
+
+bool UdsCanBattery::begin_security_access(uint16_t state) {
+  if (security_access_level == 0 || deferred_seq_state != UDS_STATE_IDLE) {
+    return false;
+  }
+
+  // Save the request that hit NRC 0x33, then start the unlock straight away.
+  // We can bypass start_sequence() because we're on the CAN task, which also
+  // leaves its slot free for other callers.
+  deferred_seq_state = state;
+  deferred_seq_msg = seq_msg;
+  security_retry_in_flight = false;
+  handle_internal_sequence(UDS_STATE_SECURITY_START, 0, nullptr, 0);
+  return true;
+}
+
+void UdsCanBattery::resume_deferred_sequence() {
+  if (deferred_seq_state == UDS_STATE_IDLE) {
+    return;
+  }
+
+  // Retry the deferred step with a fresh timeout and retry budget.
+  seq_msg = deferred_seq_msg;
+  seq_msg.retries = 0;
+  seq_state = deferred_seq_state;
+  deferred_seq_state = UDS_STATE_IDLE;
+  security_retry_in_flight = true;  // so we don't get stuck in a loop
+  resend_seq_msg();
+}
+
 inline void UdsCanBattery::resend_seq_msg() {
   uds_send(seq_msg.sid, seq_msg.data, seq_msg.len, seq_msg.timeout_ticks);
+}
+
+void UdsCanBattery::security_access_failed(uint16_t failed_state, uint8_t nrc) {
+  if (deferred_seq_state == UDS_STATE_IDLE) {
+    // We weren't in the middle of a sequence so nothing to resume
+    return;
+  }
+
+  log_security_failure(failed_state, nrc);
+  // Backoff so we don't get locked out by the BMS
+  extend_pause(UDS_SECURITY_FAIL_BACKOFF_TICKS, UdsPriority::Sequence);
+
+  // Let the routine see the original security-denied response.
+  const uint16_t state = deferred_seq_state;
+  const uint8_t denied[3] = {kNegativeResponseSid, deferred_seq_msg.sid,
+                             (uint8_t)NegativeResponseCode::SecurityAccessDenied};
+  deferred_seq_state = UDS_STATE_IDLE;
+  security_retry_in_flight = false;
+  handle_sequence(state, kNegativeResponseSid, denied, sizeof(denied));
+}
+
+inline void UdsCanBattery::log_security_failure(uint16_t failed_state, uint8_t nrc) {
+  static const char* const steps[] = {"session", "seed request", "key"};
+  const uint16_t step = failed_state - UDS_STATE_SECURITY_SESSION;
+  const char* step_name = step < 3 ? steps[step] : "start";
+  logging.printf("UDS: l%u security access failed at %s: ", security_access_level, step_name);
+  if (nrc != 0) {
+    logging.printf("NRC 0x%02X\n", nrc);
+  } else {
+    logging.println("no valid response");
+  }
+}
+
+inline void UdsCanBattery::extend_pause(uint16_t ticks, UdsPriority block_upto) {
+  // Don't weaken an existing stronger pause.
+  if (seq_pause_ticks > 0 &&
+      (seq_pause_level > block_upto || (seq_pause_level == block_upto && seq_pause_ticks >= ticks))) {
+    return;
+  }
+
+  // Replace the current pause with the new one.
+  pause_uds(ticks, block_upto);
 }
 
 void UdsCanBattery::handle_dtc_response(const uint8_t* data, uint16_t len) {
@@ -561,6 +729,8 @@ void UdsCanBattery::setup_uds(uint32_t uds_address, uint32_t uds_response_addres
   reset_type = config.reset_type;
   reset_session = config.reset_session;
   reset_holdoff_s = config.reset_holdoff_s;
+  security_access_level = config.security_access_level;
+  security_access_session = config.security_access_session;
 
   // Selects between UDS and KWP2000 'local ID' mode
   const bool use_local_ids = config.pid_scan_mode == UdsPidScanMode::OneByteLocalId;

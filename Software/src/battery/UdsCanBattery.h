@@ -14,8 +14,9 @@
 //       requests)
 //     - uds_response_address (the CAN ID that UDS responses must come from, or
 //       0 to auto-detect)
-//     - config (optional): FD requests, PID scan wire format and BMS reset
-//       settings. Defaults leave the existing behaviour unchanged.
+//     - config (optional): FD requests, PID scan wire format, BMS reset and
+//       security access settings. Defaults leave the existing behaviour
+//       unchanged.
 //
 // 2. Call `set_pid_scan_list(const uint16_t* pids, uint16_t length)` to set the
 //    list of PIDs to query, in scan order (e.g. {0xF18A, 0xF120, ...}). The
@@ -62,6 +63,18 @@
 //   - Optionally override `on_uds_sequence_timeout(state)` to handle a step
 //     timing out (the superclass retries automatically, including after NRC
 //     0x21 BusyRepeatRequest).
+//
+// SECURITY ACCESS
+//
+// Security access (UDS 0x27) is handled automatically if enabled in UdsConfig,
+// via `security_access_level` set to the desired level and
+// `security_access_session` set to the session to use for unlocking (if
+// required). When a sequence step gets NRC 0x33 (SecurityAccessDenied), the
+// step is deferred while the superclass enters the session, requests a seed
+// and sends the key from the subclass's `security_access_key()`, then the step
+// is retried. The subclass only sees the final response; if the unlock fails,
+// that is the original NRC 0x33. There is a 10 second backoff on sequences
+// after a failed unlock attempt to avoid getting locked out.
 
 class UdsCanBattery;
 
@@ -100,6 +113,9 @@ struct UdsConfig {
   uint8_t reset_type = 0;        // ECUReset (0x11) type for reset_BMS(): 0x01 hard, 0x03 soft, 0 = unsupported
   uint8_t reset_session = 0;     // Session entered before the reset, 0 = stay in the current session
   uint8_t reset_holdoff_s = 10;  // Minimum time between resets, so the BMS can come back first
+
+  uint8_t security_access_level = 0;       // 0 = no automatic seed/key exchange
+  uint8_t security_access_session = 0x03;  // Session entered before 27 <level>, 0 = stay in the current session
 };
 
 class UdsCanBattery : public CanBattery, public IsoTp {
@@ -124,6 +140,11 @@ class UdsCanBattery : public CanBattery, public IsoTp {
     UDS_STATE_RESET_START,
     UDS_STATE_RESET_SESSION,  // 0x10 <reset_session>
     UDS_STATE_RESET,          // 0x11 <reset_type>
+
+    UDS_STATE_SECURITY_START = UDS_STATE_INTERNAL | 0x10,
+    UDS_STATE_SECURITY_SESSION,  // 0x10 <security_access_session>
+    UDS_STATE_SECURITY_SEED,     // 0x27 <level>
+    UDS_STATE_SECURITY_KEY,      // 0x27 <level + 1> <key...>
   };
 
   // Priority levels for UDS traffic, used by pause_uds() and
@@ -217,6 +238,15 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   // handed back here.
   virtual void on_uds_sequence_timeout(uint16_t state) {}
 
+  // Computes the key for a SecurityAccess seed. Only called when
+  // UdsConfig::security_access_level is non-zero, after the seed request for
+  // `level` returns a non-zero seed (the bytes after 67 <level>). Write the key
+  // bytes (up to 15) to `key` in wire order and return how many, or return 0
+  // to abort the unlock.
+  virtual uint8_t security_access_key(uint8_t level, const uint8_t* seed, uint16_t seed_len, uint8_t* key) const {
+    return 0;
+  }
+
   // Override this to be passed successful PID query responses. A return value
   // of 0 causes the PID list to be scanned in order. Return a PID to read it
   // next, out-of-sequence (e.g. to sample a specific PID more often), after
@@ -242,6 +272,9 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   uint8_t reset_holdoff_s = 10;
   // 100ms ticks left before another reset may be requested.
   std::atomic<uint32_t> reset_holdoff_ticks{0};  // 32 bit is fast on ESP32
+  // Automatic SecurityAccess (0x27) settings, from UdsConfig.
+  uint8_t security_access_level = 0;       // 0 = disabled
+  uint8_t security_access_session = 0x03;  // session entered before 27 <level>, 0 = none
 
  private:
   // True if the current pause blocks new sends of the given priority.
@@ -282,6 +315,18 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   void handle_internal_sequence(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len);
   bool handle_dtc_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len);
   bool handle_reset_step(uint16_t state, uint8_t sid);
+  bool handle_security_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len);
+  // Security access handling: defer the step that hit NRC 0x33, run the
+  // seed/key exchange, then either resume or report the original failure.
+  bool begin_security_access(uint16_t state);
+  void resume_deferred_sequence();
+  // Logs and reports a failed unlock. `failed_state` is the request that
+  // failed, `nrc` its negative response code (0 if none).
+  void security_access_failed(uint16_t failed_state, uint8_t nrc);
+  void log_security_failure(uint16_t failed_state, uint8_t nrc);
+  // Pauses sends up to `block_upto` for at least `ticks`, without weakening
+  // a stronger pause already in force.
+  void extend_pause(uint16_t ticks, UdsPriority block_upto);
   // The request currently in flight as part of a sequence.
   struct SequenceMessage {
     SID sid = {};
@@ -293,6 +338,12 @@ class UdsCanBattery : public CanBattery, public IsoTp {
     UdsPriority priority = UdsPriority::Sequence;  // pause priority of this step
   };
   SequenceMessage seq_msg;
+  // The sequence step deferred while security access runs.
+  SequenceMessage deferred_seq_msg;
+  uint16_t deferred_seq_state = UDS_STATE_IDLE;
+  // Set while the deferred step is retried after a successful unlock, so a
+  // second NRC 0x33 is reported instead of starting another unlock.
+  bool security_retry_in_flight = false;
 
   uint32_t previousUdsMillis100 = 0;
   // The request SID and identifier width used by the PID scan, provided in the
