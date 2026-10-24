@@ -731,14 +731,13 @@ void UdsCanBattery::uds_send(SID service_id, const uint8_t* data, uint16_t lengt
   memcpy(&payload[1], data, length);
   isotp_send(payload, length + 1);
 
-  // Debugging
-  if (service_id != SID::ReadDataByIdentifier) {
-    logging.printf("UDS TX: SID=0x%02X data=", (uint8_t)service_id);
-    for (int i = 0; i < length; i++) {
-      logging.printf("%02X ", data[i]);
-    }
-    logging.println();
+#ifdef UDS_DEBUG
+  logging.printf("UDS TX: SID=0x%02X data=", (uint8_t)service_id);
+  for (int i = 0; i < length; i++) {
+    logging.printf("%02X ", data[i]);
   }
+  logging.println();
+#endif
 
   uds_transaction_timeout = timeout;
 }
