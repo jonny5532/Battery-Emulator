@@ -835,6 +835,57 @@ TEST_F(UdsCanBatteryTest, PidScanRecoversAfterLongSilence) {
   EXPECT_FALSE(battery->pid_calls.empty());
 }
 
+// A multi-frame response still arriving when the step's timeout runs out must
+// be allowed to finish, rather than being cut off by a retry.
+TEST_F(UdsCanBatteryTest, TimeoutWaitsForAMultiFrameResponseInProgress) {
+  const uint8_t did[] = {0xF1, 0x90};
+  ASSERT_TRUE(battery->send_sequence_message(0x1001, SID::ReadDataByIdentifier, did, sizeof(did), 2, 2));
+  tick(1000);  // timeout 2 -> 1
+
+  // The first frame of a 20-byte reply arrives just before the timeout.
+  battery->handle_incoming_uds_can_frame(make_frame(0x7BB, {0x10, 0x14, 0x62, 0xF1, 0x90, 0x41, 0x42, 0x43}));
+  tick(1100);  // timeout 1 -> 0, but the reply is mid-transfer
+  tick(1200);
+
+  size_t requests = 0;
+  for (const auto& f : get_transmitted_frames()) {
+    requests += f.data.u8[1] == 0x22;
+  }
+  EXPECT_EQ(requests, 1u);  // not retried
+
+  battery->handle_incoming_uds_can_frame(make_frame(0x7BB, {0x21, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A}));
+  battery->handle_incoming_uds_can_frame(make_frame(0x7BB, {0x22, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51}));
+
+  ASSERT_EQ(battery->seq_calls.size(), 1u);
+  EXPECT_EQ(battery->seq_calls[0].sid, 0x62);
+  EXPECT_EQ(battery->seq_calls[0].data.size(), 20u);
+  EXPECT_TRUE(battery->seq_timeouts.empty());
+}
+
+// If the transfer never completes, the ISO-TP timeout ends it and the step is
+// retried as normal.
+TEST_F(UdsCanBatteryTest, StalledMultiFrameResponseStillRetries) {
+  const uint8_t did[] = {0xF1, 0x90};
+  ASSERT_TRUE(battery->send_sequence_message(0x1001, SID::ReadDataByIdentifier, did, sizeof(did), 2, 2));
+  tick(1000);
+  battery->handle_incoming_uds_can_frame(make_frame(0x7BB, {0x10, 0x14, 0x62, 0xF1, 0x90, 0x41, 0x42, 0x43}));
+
+  // ISO-TP gives up waiting for consecutive frames after its own timeout
+  // (100 polls); the UDS layer then retries the step.
+  unsigned long t = 1100;
+  for (int k = 0; k < 150; k++, t += 1) {
+    set_millis64(t);
+    battery->transmit_uds_can(t);
+  }
+  tick(t + 100);
+
+  size_t requests = 0;
+  for (const auto& f : get_transmitted_frames()) {
+    requests += f.data.u8[1] == 0x22;
+  }
+  EXPECT_EQ(requests, 2u);
+}
+
 // A pause that only blocks sequences keeps a queued sequence waiting, but
 // mustn't stop the PID scan.
 TEST_F(UdsCanBatteryTest, SequenceOnlyPauseLetsThePidScanRun) {

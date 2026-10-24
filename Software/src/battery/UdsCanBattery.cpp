@@ -85,6 +85,14 @@ bool UdsCanBattery::transaction_tick() {
     return true;
   }
 
+  if (isotp_is_busy()) {
+    // We're still waiting for the ISO-TP transfer to complete, so we don't
+    // consider this a timeout yet. We'll retry once the transfer finishes.
+
+    uds_transaction_timeout = 1;
+    return true;
+  }
+
   // The current request timed out.
   uds_current_response_address = 0;
 
