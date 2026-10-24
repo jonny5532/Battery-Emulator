@@ -898,6 +898,34 @@ TEST_F(UdsCanBatteryTest, ReadDtcNegativeResponseMarksReadFailed) {
   EXPECT_NE(datalayer.battery.dtc.dtc_last_read_millis, 0u);
 }
 
+// A response too short to hold the report type is a failed readout, and must
+// not be read past its end.
+TEST_F(UdsCanBatteryTest, ReadDtcTruncatedResponseMarksReadFailed) {
+  battery->dtc = &datalayer.battery.dtc;
+  datalayer.battery.dtc = DATALAYER_BATTERY_DTC_TYPE{};
+
+  battery->read_DTC();
+  tick(1000);
+
+  feed_response({0x59});
+  EXPECT_TRUE(datalayer.battery.dtc.dtc_read_failed);
+  EXPECT_EQ(datalayer.battery.dtc.dtc_count, 0);
+}
+
+// A trailing partial entry (fewer than 4 bytes) is dropped.
+TEST_F(UdsCanBatteryTest, ReadDtcIgnoresATrailingPartialEntry) {
+  battery->dtc = &datalayer.battery.dtc;
+  datalayer.battery.dtc = DATALAYER_BATTERY_DTC_TYPE{};
+
+  battery->read_DTC();
+  tick(1000);
+
+  // 59 02 FF, then a code with no status byte.
+  feed_response({0x59, 0x02, 0xFF, 0xC1, 0x9B, 0x00});
+  EXPECT_FALSE(datalayer.battery.dtc.dtc_read_failed);
+  EXPECT_EQ(datalayer.battery.dtc.dtc_count, 0);
+}
+
 TEST_F(UdsCanBatteryTest, ClearDtcSequenceCompletesOnAcknowledgment) {
   battery->dtc = &datalayer.battery.dtc;
   datalayer.battery.dtc = DATALAYER_BATTERY_DTC_TYPE{};
