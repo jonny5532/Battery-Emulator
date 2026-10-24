@@ -60,12 +60,9 @@ void UdsCanBattery::transmit_uds_can(unsigned long currentMillis) {
     return;
   }
 
-  if (pending_seq_state != UDS_STATE_IDLE) {
-    if (seq_pause_ticks > 0) {
-      // Don't start the sequence until the pause expires.
-      return;
-    }
-    // A new sequence was requested, start it now.
+  if (pending_seq_state != UDS_STATE_IDLE && !uds_paused_for(UdsPriority::Sequence)) {
+    // A new sequence was requested, start it now. While paused it stays
+    // queued, and the PID scan carries on if the pause allows it.
     uint16_t state = pending_seq_state;
     pending_seq_state = UDS_STATE_IDLE;
     handle_sequence(state, 0, nullptr, 0);
@@ -123,7 +120,8 @@ bool UdsCanBattery::start_sequence(uint16_t state) {
 
 bool UdsCanBattery::send_sequence_message(uint16_t state, SID sid, const uint8_t* data, uint16_t length,
                                           uint16_t timeout_ticks, uint8_t max_retries, UdsPriority priority) {
-  if (seq_state != UDS_STATE_IDLE || pending_pid != 0 || uds_paused_for(priority)) {
+  const bool pid_in_flight = pending_pid != 0 && uds_transaction_timeout > 0;
+  if (seq_state != UDS_STATE_IDLE || pid_in_flight || uds_paused_for(priority)) {
     // A sequence is already active, a PID request is in flight, or the pause
     // blocks this priority: refuse.
     return false;
@@ -138,6 +136,11 @@ bool UdsCanBattery::send_sequence_message(uint16_t state, SID sid, const uint8_t
     // Timeout must be non-zero.
     return false;
   }
+
+  // A timed-out PID waiting for its retry gives way to the sequence. next_pid
+  // is kept, so the scan resumes on it afterwards.
+  pending_pid = 0;
+  pid_retries = 0;
 
   seq_state = state;
   seq_msg.sid = sid;
