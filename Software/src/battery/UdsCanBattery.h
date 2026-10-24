@@ -7,20 +7,23 @@
 
 // Extend this class to add UDS features to a battery integration.
 //
-// 1. Call `setup_uds(uint32_t uds_address, uint32_t uds_response_address)` in
-//    your battery's setup() function to initialize UDS handling.
+// 1. Call `setup_uds(uint32_t uds_address, uint32_t uds_response_address, const
+//    UdsConfig& config = UdsConfig{})` in your battery's setup() function to
+//    initialize UDS handling.
 //     - uds_address (the CAN ID of the ECU to query, e.g. 0x7DF for generic
 //       requests)
 //     - uds_response_address (the CAN ID that UDS responses must come from, or
 //       0 to auto-detect)
+//     - config (optional): FD requests and PID scan wire format. Defaults
+//       leave the existing behaviour unchanged.
 //
 // 2. Call `set_pid_scan_list(const uint16_t* pids, uint16_t length)` to set the
 //    list of PIDs to query, in scan order (e.g. {0xF18A, 0xF120, ...}). The
 //    list is walked from start to end and then wraps around. Call it again at
 //    any time to switch to a different list. PID scanning runs whenever no
 //    sequence (below) is active. The scan uses two-byte UDS DIDs with
-//    ReadDataByIdentifier (0x22) by default; call
-//    `set_pid_scan_mode(PidScanMode::OneByteLocalId)` to query ECUs that only
+//    ReadDataByIdentifier (0x22) by default, pass
+//    UdsPidScanMode::OneByteLocalId to `setup_uds` to query ECUs that only
 //    speak KWP2000-style one-byte local identifiers (0x21) instead. The list
 //    and handle_pid() interface stay the same in both modes.
 //
@@ -77,6 +80,22 @@ class UdsBatteryHtmlRenderer : public BatteryHtmlRenderer {
   UdsCanBattery& battery;
 };
 
+// Wire format used by the PID scan. Standard UDS ECUs are queried with two-byte
+// DIDs via ReadDataByIdentifier (0x22). Some ECUs (e.g. Renault Zoe Gen1 /
+// Kangoo) instead speak KWP2000-style one-byte local identifiers via
+// ReadDataByLocalIdentifier (0x21). Both modes share the same scan list,
+// handle_pid() interface and scan cycling.
+enum class UdsPidScanMode : uint8_t {
+  TwoByteDID = 0,      // UDS 0x22 ReadDataByIdentifier, two-byte DIDs (default)
+  OneByteLocalId = 1,  // KWP2000 0x21 ReadDataByLocalIdentifier, one-byte local IDs
+};
+
+// Per-battery UDS setup, passed to setup_uds().
+struct UdsConfig {
+  bool fd = false;                                            // Send UDS requests as CAN-FD frames
+  UdsPidScanMode pid_scan_mode = UdsPidScanMode::TwoByteDID;  // UDS vs KWP2000
+};
+
 class UdsCanBattery : public CanBattery, public IsoTp {
  public:
   UdsCanBattery(CAN_Speed speed = CAN_Speed::CAN_SPEED_500KBPS) : CanBattery(speed), uds_renderer(*this) {}
@@ -104,16 +123,6 @@ class UdsCanBattery : public CanBattery, public IsoTp {
     Sequence = 0,  // Sequence steps (the send_sequence_message() default)
     PidScan = 1,   // Regular PID scanning
     Custom = 2,    // User-initiated custom diagnostic messages
-  };
-
-  // Wire format used by the PID scan. Standard UDS ECUs are queried with
-  // two-byte DIDs via ReadDataByIdentifier (0x22). Some ECUs (e.g. Renault
-  // Zoe Gen1 / Kangoo) instead speak KWP2000-style one-byte local identifiers
-  // via ReadDataByLocalIdentifier (0x21). Both modes share the same scan list,
-  // handle_pid() interface and scan cycling - only the wire format differs.
-  enum class PidScanMode : uint8_t {
-    TwoByteDID = 0,      // UDS 0x22 ReadDataByIdentifier, two-byte DIDs (default)
-    OneByteLocalId = 1,  // KWP2000 0x21 ReadDataByLocalIdentifier, one-byte local IDs
   };
 
   inline bool uds_is_busy() const {
@@ -153,14 +162,11 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   DATALAYER_BATTERY_DTC_TYPE* dtc = nullptr;
 
  protected:
-  // Initializes the UDS layer. Must be called by subclasses in their setup() function. Has optional isFD overload
-  void setup_uds(uint32_t uds_address, uint32_t uds_response_address, bool isFD = false);
+  // Initializes the UDS layer. Must be called by subclasses in their setup() function.
+  void setup_uds(uint32_t uds_address, uint32_t uds_response_address, const UdsConfig& config = UdsConfig{});
   // Set (or change) the list of PIDs to scan, in order. The list is cycled
   // repeatedly - the scan restarts from the beginning of the new list.
   void set_pid_scan_list(const uint16_t* pid_list, uint16_t length);
-  // Set (or change) the wire format used by the PID scan (default:
-  // TwoByteDID).
-  void set_pid_scan_mode(PidScanMode mode);
 
   // Queue a one-shot UDS soft reset (0x11 0x03). The request is not retried.
   bool request_uds_soft_reset();
@@ -212,6 +218,8 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   uint32_t uds_response_address = 0;
   // The address we are currently receiving a UDS response from.
   uint32_t uds_current_response_address = 0;
+  // Whether UDS requests are sent as FD frames
+  bool fd_uds_requests = false;
 
  private:
   // True if the current pause blocks new sends of the given priority.
@@ -249,8 +257,8 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   } seq_msg;
 
   uint32_t previousUdsMillis100 = 0;
-  // The request SID and identifier width used by the PID scan, derived from
-  // the scan mode in set_pid_scan_mode() (default: UDS 0x22 / two bytes).
+  // The request SID and identifier width used by the PID scan, provided in the
+  // setup_uds() config (default: UDS 0x22 / two bytes).
   uint8_t pid_scan_sid = static_cast<uint8_t>(SID::ReadDataByIdentifier);
   uint8_t pid_scan_id_bytes = 2;
   // The list of PIDs to scan, in order. Set with set_pid_scan_list(). The list
@@ -286,8 +294,6 @@ class UdsCanBattery : public CanBattery, public IsoTp {
   // How many ticks left for the current request to complete, before it is
   // retried (or given up).
   int32_t uds_transaction_timeout = 0;
-  // Should the PID message be sent with CAN-FD flag enabled?
-  bool send_messages_asFD = false;
 
   UdsBatteryHtmlRenderer uds_renderer;
 };

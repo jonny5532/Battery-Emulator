@@ -235,11 +235,9 @@ String RenaultZoeGen1Battery::get_uds_info_html() {
 }
 
 void RenaultZoeGen1Battery::setup(void) {  // Performs one time setup at startup
-  // UDS: send requests/flow control to 0x79B, accept replies from the BMS on 0x7BB.
-  setup_uds(0x79B, 0x7BB);
-
-  // The Zoe Gen1 BMS only speaks KWP2000-style one-byte local identifiers.
-  set_pid_scan_mode(PidScanMode::OneByteLocalId);
+  // UDS: send requests/flow control to 0x79B, accept replies from the BMS on
+  // 0x7BB. The Zoe Gen1 BMS only speaks KWP2000-style one-byte local IDs.
+  setup_uds(0x79B, 0x7BB, {.pid_scan_mode = UdsPidScanMode::OneByteLocalId});
 
   static const uint16_t pid_scan_list[] = {
       GROUP1_CELLVOLTAGES_1_POLL,  // Cells 1-62

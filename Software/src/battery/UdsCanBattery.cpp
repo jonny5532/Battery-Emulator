@@ -213,7 +213,7 @@ void UdsCanBattery::on_isotp_can_tx(uint32_t can_id, const uint8_t* can_data, ui
   } else {
     frame.ext_ID = false;
   }
-  frame.FD = send_messages_asFD;
+  frame.FD = fd_uds_requests;
   frame.DLC = can_dlc;
   memcpy(frame.data.u8, can_data, can_dlc);
   transmit_can_frame(&frame);
@@ -230,14 +230,6 @@ static inline uint32_t parseBigEndianValue(const uint8_t* data, uint16_t length)
     val = (val << 8) | data[i];
   }
   return val;
-}
-
-void UdsCanBattery::set_pid_scan_mode(PidScanMode mode) {
-  // Derive the request SID and identifier width for this mode once, so the
-  // scan hot paths only read plain fields.
-  pid_scan_sid =
-      (mode == PidScanMode::OneByteLocalId) ? UDS_SID_READ_LOCAL_IDENTIFIER : (uint8_t)SID::ReadDataByIdentifier;
-  pid_scan_id_bytes = (mode == PidScanMode::OneByteLocalId) ? 1 : 2;
 }
 
 bool UdsCanBattery::transmit_uds_pid_scan() {
@@ -508,14 +500,19 @@ void UdsCanBattery::uds_send(SID service_id, const uint8_t* data, uint16_t lengt
   uds_transaction_timeout = timeout;
 }
 
-void UdsCanBattery::setup_uds(uint32_t uds_address, uint32_t uds_response_address, bool isFD) {
+void UdsCanBattery::setup_uds(uint32_t uds_address, uint32_t uds_response_address, const UdsConfig& config) {
   this->uds_address = uds_address;
   isotp_init(uds_address);
   this->uds_response_address = uds_response_address;
   this->pid_scan_index = 0;
   this->next_pid = 0;
   this->pending_pid = 0;
-  this->send_messages_asFD = isFD;
+  fd_uds_requests = config.fd;
+
+  // Selects between UDS and KWP2000 'local ID' mode
+  const bool use_local_ids = config.pid_scan_mode == UdsPidScanMode::OneByteLocalId;
+  pid_scan_sid = use_local_ids ? UDS_SID_READ_LOCAL_IDENTIFIER : (uint8_t)SID::ReadDataByIdentifier;
+  pid_scan_id_bytes = use_local_ids ? 1 : 2;
 }
 
 void UdsCanBattery::set_pid_scan_list(const uint16_t* pid_list, uint16_t length) {

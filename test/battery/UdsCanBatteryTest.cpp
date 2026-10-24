@@ -210,6 +210,34 @@ TEST_F(UdsCanBatteryTest, SetupUdsRestartsTheScanAtTheFirstPid) {
   EXPECT_EQ(requested_pid(last_frame(get_transmitted_frames())), 0x9001);
 }
 
+TEST_F(UdsCanBatteryTest, ConfigSelectsOneBytePidScanModeAndFd) {
+  battery->setup_uds(0x79B, 0x7BB, {.fd = true, .pid_scan_mode = UdsPidScanMode::OneByteLocalId});
+  const uint16_t pids[] = {0x42};
+  battery->set_pid_scan_list(pids, 1);
+
+  tick(1000);
+  ASSERT_FALSE(get_transmitted_frames().empty());
+  const CAN_frame& request = last_frame(get_transmitted_frames());
+  EXPECT_EQ(request.data.u8[0], 0x02);  // SF length: 21 42
+  EXPECT_EQ(request.data.u8[1], 0x21);  // ReadDataByLocalIdentifier
+  EXPECT_EQ(request.data.u8[2], 0x42);
+  EXPECT_TRUE(request.FD);
+
+  // The one-byte identifier is matched in the response, too.
+  feed_response({0x61, 0x42, 0x12, 0x34});
+  ASSERT_EQ(battery->pid_calls.size(), 1u);
+  EXPECT_EQ(battery->pid_calls[0].pid, 0x42);
+  EXPECT_EQ(battery->pid_calls[0].value, 0x1234u);
+}
+
+TEST_F(UdsCanBatteryTest, RequestsAreClassicCanByDefault) {
+  const uint16_t pids[] = {0x9001};
+  battery->set_pid_scan_list(pids, 1);
+  tick(1000);
+  ASSERT_FALSE(get_transmitted_frames().empty());
+  EXPECT_FALSE(last_frame(get_transmitted_frames()).FD);
+}
+
 // ---------------------------------------------------------------------------
 // PID scan: response decoding
 // ---------------------------------------------------------------------------
