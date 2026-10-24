@@ -53,14 +53,9 @@ static constexpr int32_t MIN_WATTS_PER_DC = 280;  // gradient is 14kW per 5dC
 // Taper down to 0W at max temp with a linear gradient (both charge and discharge)
 static constexpr int32_t MAX_WATTS_PER_DC = 140;  // gradient is 14kW per 10dC
 
-// UDS sequence timeouts (in 100ms ticks)
-static constexpr uint16_t MG_UDS_TIMEOUT_SESSION_CONTROL = 10;
-static constexpr uint16_t MG_UDS_TIMEOUT_RESET = 50;
-
-// Pause after a reset (in 100ms ticks)
-static constexpr uint16_t MG_UDS_POST_RESET_PAUSE = 50;
-// Suppress CAN errors for a while after reset
-static constexpr uint32_t MG_BMS_RESET_IGNORE_CAN_ERRORS_MS = 10000;
+// UDS setup: reset_BMS() enters an extended session (0x10 0x03), then sends a
+// hard ECUReset (0x11 0x01).
+static constexpr UdsConfig MG_UDS_CONFIG = {.reset_type = 0x01, .reset_session = 0x03};
 
 /* Clamped linear interpolation: output_min at input_min, output_max at
    input_max, linear between. Inputs outside the range are clamped. */
@@ -359,9 +354,9 @@ void MgGen1Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
   // We start polling with UDS ID 0x7DF, the generic broadcast one. Our first
   // reply will indicate what the BMS-specific one is, which we switch to.
   if (uds_address == 0x7DF && rx_frame.ID == 0x789) {
-    setup_uds(0x781, 0);
+    setup_uds(0x781, 0, MG_UDS_CONFIG);
   } else if (uds_address == 0x7DF && rx_frame.ID == 0x7ED) {
-    setup_uds(0x7E5, 0);
+    setup_uds(0x7E5, 0, MG_UDS_CONFIG);
   }
 
   rx_count++;
@@ -415,8 +410,8 @@ void MgGen1Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
         // A weird 'stuck' state where the battery won't reconnect
         announce_contactor_state(false);
         if (batteryType == BATTERY_TYPE_MG_HS_PHEV) {
-          if (!uds_is_busy()) {
-            reset_BMS();
+          // Holds off while the last reset is still taking effect.
+          if (request_uds_reset()) {
             logging.printf("[MG] Stuck, resetting.\n");
           }
         }
@@ -424,8 +419,7 @@ void MgGen1Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
         // A fault state (likely isolation failure)
         announce_contactor_state(false);
         if (batteryType == BATTERY_TYPE_MG_HS_PHEV) {
-          if (!uds_is_busy()) {
-            reset_BMS();
+          if (request_uds_reset()) {
             logging.printf("[MG] Fault, resetting.\n");
           }
         }
@@ -697,36 +691,6 @@ uint16_t MgGen1Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* 
   return 0;
 }
 
-void MgGen1Battery::reset_BMS() {
-  start_sequence(MG_STATE_RESET_START);
-}
-
-bool MgGen1Battery::supports_reset_BMS() {
-  return true;
-}
-
-void MgGen1Battery::on_uds_sequence_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len) {
-  // Called by the superclass when a response in a UDS sequence is received.
-  switch (state) {
-    case MG_STATE_RESET_START:
-      // Start the reset. First we suppress the inevitable CAN errors that will occur.
-      ignore_can_errors_for(can_interface, MG_BMS_RESET_IGNORE_CAN_ERRORS_MS);
-      // Then we enter an extended diagnostic session.
-      send_sequence_message(MG_STATE_RESET_DIAG, SID::DiagnosticSessionControl, (const uint8_t*)"\x03", 1,
-                            MG_UDS_TIMEOUT_SESSION_CONTROL, 2);
-      break;
-    case MG_STATE_RESET_DIAG:
-      // Extended diagnostic session entered, do the reset itself.
-      send_sequence_message(MG_STATE_RESET_SEND, SID::ECUReset, (const uint8_t*)"\x01", 1, MG_UDS_TIMEOUT_RESET, 2);
-      break;
-    case MG_STATE_RESET_SEND:
-      logging.println("[MG] UDS ECUReset successful");
-      // Pause for a while (to avoid sending any more resets)
-      pause_uds(MG_UDS_POST_RESET_PAUSE, UdsPriority::Sequence);
-      break;
-  }
-}
-
 void MgGen1Battery::transmit_can(unsigned long currentMillis) {
   static int8_t send_phase = -1;
   if (++send_phase > 2) {
@@ -841,7 +805,7 @@ void MgGen1Battery::transmit_can(unsigned long currentMillis) {
 void MgGen1Battery::setup(void) {
   // Setup UDS on the generic broadcast address, we'll switch to the
   // BMS-specific one (varies by battery) when we get a reply.
-  setup_uds(0x7DF, 0);
+  setup_uds(0x7DF, 0, MG_UDS_CONFIG);
   set_pid_scan_list(UDS_BOOT_PID_LIST, sizeof(UDS_BOOT_PID_LIST) / sizeof(UDS_BOOT_PID_LIST[0]));
   dtc = &datalayer_battery->dtc;
 

@@ -16,9 +16,6 @@ class MgGen1Battery : public UdsCanBattery {
   virtual void update_values();
   virtual void transmit_can(unsigned long currentMillis);
   virtual void got_battery_type(uint32_t type);
-  virtual void reset_BMS() override;
-  virtual bool supports_reset_BMS() override;
-  virtual void on_uds_sequence_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len) override;
 
   static constexpr const char* Name = "MG Gen1 (HS/ZS/MG5/MarvelR)";
 
@@ -119,13 +116,6 @@ class MgGen1Battery : public UdsCanBattery {
   int limit_message_counter = 0;
   uint8_t previousState = 0;
 
-  // UDS sequence states for this battery.
-  enum MgUdsState : uint16_t {
-    // UDS reset sequence
-    MG_STATE_RESET_START = 0x01,
-    MG_STATE_RESET_DIAG,  // 0x10 0x03 (extended session)
-    MG_STATE_RESET_SEND,  // 0x11 0x01 (ECU reset)
-  };
   // CAN reception goes to pieces during OTA, so have long enough timeouts to
   // allow for that.
   static const uint8_t CELL_VOLTAGE_TIMEOUT = 25;  // in seconds
