@@ -52,6 +52,10 @@ void UdsCanBattery::transmit_uds_can(unsigned long currentMillis) {
     reset_holdoff_ticks--;
   }
 
+  if (seq_wait_ticks > 0) {
+    seq_wait_ticks--;
+  }
+
   if (seq_pause_ticks > 0) {
     // We're in a pause period (eg. after a BMS reset, or while an external
     // tool is using the bus); count it down. New sends are gated by priority
@@ -76,7 +80,17 @@ void UdsCanBattery::transmit_uds_can(unsigned long currentMillis) {
     return;
   }
 
-  if (pending_seq_state != UDS_STATE_IDLE && !uds_paused_for(UdsPriority::Sequence)) {
+  if (seq_wait_state != UDS_STATE_IDLE) {
+    // A sequence is waiting between steps. Queued sequences stay queued until
+    // it finishes, but the PID scan carries on if the pause allows it.
+    if (seq_wait_ticks == 0 && !uds_paused_for(UdsPriority::Sequence)) {
+      // The wait is over: continue the sequence.
+      const uint16_t state = seq_wait_state;
+      seq_wait_state = UDS_STATE_IDLE;
+      handle_sequence(state, 0, nullptr, 0);
+      return;
+    }
+  } else if (pending_seq_state != UDS_STATE_IDLE && !uds_paused_for(UdsPriority::Sequence)) {
     // A new sequence was requested, start it now. While paused it stays
     // queued, and the PID scan carries on if the pause allows it.
     uint16_t state = pending_seq_state;
@@ -146,6 +160,15 @@ bool UdsCanBattery::start_sequence(uint16_t state) {
   // atomically: refuse if a sequence is already queued.
   uint32_t expected = UDS_STATE_IDLE;
   return pending_seq_state.compare_exchange_strong(expected, state);
+}
+
+void UdsCanBattery::wait_sequence(uint16_t state, uint16_t ticks, bool block_pid_scan) {
+  // Only called from the CAN task, so no need for the start_sequence() slot.
+  seq_wait_state = state;
+  seq_wait_ticks = ticks;
+  if (block_pid_scan) {
+    extend_pause(ticks, UdsPriority::PidScan);
+  }
 }
 
 bool UdsCanBattery::send_sequence_message(uint16_t state, SID sid, const uint8_t* data, uint16_t length,
