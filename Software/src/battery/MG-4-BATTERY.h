@@ -206,8 +206,14 @@ class Mg4Battery : public UdsCanBattery {
   bool bms_charging() const;
   const char* bms_mode_label() const;
   void render_mode_html(String& html);
-  // Worst-case rendered size of the BMS mode section.
+  // Worst-case rendered size of the BMS mode line.
   static constexpr uint32_t MODE_HTML_BUDGET = 96;
+
+  // Summary section at the top of the info page: the values most often asked
+  // for when diagnosing a pack, gathered from the sections below.
+  void render_summary_html(String& html);
+  // Worst-case rendered size of the summary, excluding the mode line.
+  static constexpr uint32_t SUMMARY_HTML_BUDGET = 1024;
 
   // Drive-mode car frames (found by emulating the pack firmware, matching the
   // driving car's FD bus). The original 0x313 template came from an AC-charge
@@ -356,6 +362,8 @@ class Mg4Battery : public UdsCanBattery {
 
   void record_bal_status(const uint8_t* data, uint16_t length);
   void render_bal_status_html(String& html);
+  void render_sleep_rest_html(String& html);
+  void render_cell_soc_spread_html(String& html);
   // Worst-case rendered size of the status section.
   static constexpr uint32_t BAL_STATUS_HTML_BUDGET = 1024;
 
@@ -450,22 +458,30 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t POLL_MIN_CELL_TEMPERATURE = 0xB057;
   static const uint16_t POLL_MAX_CELL_TEMPERATURE = 0xB056;
   static const uint16_t POLL_BATTERY_SOH = 0xB061;
-  static const uint16_t POLL_ISOLATION_RESISTANCE = 0xB045;
   static const uint16_t POLL_BALANCING_STATUS = 0xB0E5;
   static const uint16_t POLL_ECU_HARDWARE_NUMBER = 0xF192;
   static const uint16_t POLL_ECU_SOFTWARE_NUMBER = 0xF194;
+  static const uint16_t POLL_VIN = 0xF190;
 
   // ECU identifier payloads (10 ASCII characters each)
   uint8_t pid_ecu_hw_number[10] = {0};
   uint8_t pid_ecu_sw_number[10] = {0};
+  uint8_t pid_vin[17] = {0};
 
-  // Pack-reported isolation resistance. The PID value is a 2-byte count scaled
-  // by 500 to get ohms. Keep a 1 Hz ring of recent raw counts so the info page
-  // can dump a plottable series without storing every PID response.
+  // Pack-reported isolation resistance from the 0x30B broadcast (the same
+  // value as PID 0xB045), a 14-bit count scaled by 500 to get ohms. Keep a
+  // 1 Hz ring of recent raw counts so the info page can dump a plottable
+  // series, and the lowest valid count seen with the contactors open and
+  // closed (ISO_NONE until one is seen).
   static constexpr uint32_t ISO_OHMS_PER_COUNT = 500;
   static constexpr int ISO_HISTORY_SAMPLES = 120;  // 2 minutes at 1 Hz
-  uint16_t iso_raw = 0;
-  bool iso_received = false;
+  static constexpr uint16_t ISO_NONE = 0xFFFF;
+  bool iso_bcast_received = false;
+  bool iso_bcast_valid = false;
+  uint16_t iso_bcast_raw = 0;
+  uint16_t iso_min_open_raw = ISO_NONE;
+  uint16_t iso_min_closed_raw = ISO_NONE;
+  void record_isolation(uint16_t v);
   uint16_t iso_history[ISO_HISTORY_SAMPLES] = {0};
   uint16_t iso_history_count = 0;
   uint16_t iso_history_head = 0;  // next write position

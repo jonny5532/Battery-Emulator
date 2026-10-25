@@ -92,6 +92,22 @@ class Mg4BatteryTest : public ::testing::Test {
     battery->handle_incoming_can_frame(frame);
   }
 
+  // 0x30B subfield 000519, isolation count in bytes 3-4 (bit 14 = invalid).
+  void send_30b_iso(uint16_t v) {
+    CAN_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.ID = 0x30B;
+    frame.FD = true;
+    frame.DLC = 12;
+    frame.data.u8[0] = 0x00;
+    frame.data.u8[1] = 0x05;
+    frame.data.u8[2] = 0x19;
+    frame.data.u8[3] = 8;
+    frame.data.u8[7] = v >> 8;
+    frame.data.u8[8] = v & 0xFF;
+    battery->handle_incoming_can_frame(frame);
+  }
+
   void send_308_serial() {
     // Captured 0x308 payloads (subfield 000554, NTSC serial). Decodes to
     // "0AFPEF20878703D782000497", index 4 = 'E' => NMC chemistry.
@@ -613,27 +629,72 @@ TEST_F(Mg4BatteryTest, StoresAndDisplaysEcuPartNumbers) {
 }
 
 TEST_F(Mg4BatteryTest, StoresAndDisplaysIsolationResistance) {
-  // Before any 0xB045 response the page must say so rather than report 0 ohms.
+  // Before any 0x30B the page must say so rather than report 0 ohms.
   std::string html_before = battery->get_uds_info_html().c_str();
   EXPECT_NE(html_before.find("Isolation resistance: N/A"), std::string::npos);
 
-  // Raw 2-byte value 1000 scaled by 500 => 500000 ohms.
-  const uint8_t data[2] = {0x03, 0xE8};
-  battery->handle_pid(0xB045, 1000, data, sizeof(data));
+  // Raw count 1000 scaled by 500 => 500000 ohms.
+  send_30b_iso(1000);
   std::string html = battery->get_uds_info_html().c_str();
   EXPECT_NE(html.find("Isolation resistance: 500000 ohms"), std::string::npos);
+
+  send_30b_iso(0x7FFF);
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Isolation resistance: invalid"), std::string::npos);
 }
 
 TEST_F(Mg4BatteryTest, IsolationResistanceHistoryCsv) {
   // One sample per simulated second, raw counts 1000..1004 => 500000..502000 ohms.
   for (int i = 0; i < 5; i++) {
-    const uint8_t data[2] = {(uint8_t)((1000 + i) >> 8), (uint8_t)((1000 + i) & 0xFF)};
-    battery->handle_pid(0xB045, 1000 + i, data, sizeof(data));
+    send_30b_iso(1000 + i);
     battery->update_values();
   }
+  // Invalid readings are not sampled.
+  send_30b_iso(0x7FFF);
+  battery->update_values();
   std::string html = battery->get_uds_info_html().c_str();
   // Oldest first, comma separated, scaled to ohms.
   EXPECT_NE(html.find("Isolation history (ohms): 500000,500500,501000,501500,502000"), std::string::npos);
+}
+
+TEST_F(Mg4BatteryTest, SummaryLowestIsolationByContactorState) {
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Lowest isolation resistance, contactors open: N/A"), std::string::npos);
+  EXPECT_NE(html.find("Lowest isolation resistance, contactors closed: N/A"), std::string::npos);
+
+  // No contactor state yet: not counted.
+  send_30b_iso(100);
+  send_15b_fd(3);
+  send_30b_iso(2000);
+  send_30b_iso(1500);
+  send_30b_iso(1800);
+  send_30b_iso(0x7FFF);  // invalid, ignored
+  send_15b_fd(11);       // precharge counts as neither
+  send_30b_iso(200);
+  send_15b_fd(7);
+  send_30b_iso(900);
+  send_30b_iso(1200);
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Lowest isolation resistance, contactors open: 750000 ohms"), std::string::npos);
+  EXPECT_NE(html.find("Lowest isolation resistance, contactors closed: 450000 ohms"), std::string::npos);
+}
+
+TEST_F(Mg4BatteryTest, SummaryShowsIdentifiersAndModeFirst) {
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_EQ(html.find("<h3>Summary</h3>Contactor state: Unknown<br>Drive/charge mode: unknown"), 0u);
+  EXPECT_NE(html.find("VIN: N/A"), std::string::npos);
+  EXPECT_NE(html.find("Traceability code: N/A"), std::string::npos);
+  EXPECT_NE(html.find("Cell SoC imbalance: N/A"), std::string::npos);
+  EXPECT_LT(html.find("<h3>Summary</h3>"), html.find("<h3>Power state</h3>"));
+
+  const uint8_t vin[17] = {'L', 'S', 'J', 'W', '7', '4', 'C', '9', '1', 'P', 'Z', '0', '0', '0', '0', '0', '1'};
+  battery->handle_pid(0xF190, 0, vin, sizeof(vin));
+  send_308_serial();
+  send_15b_fd(7);
+  html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Contactor state: Closed (7)"), std::string::npos);
+  EXPECT_NE(html.find("VIN: LSJW74C91PZ000001"), std::string::npos);
+  EXPECT_NE(html.find("Traceability code: 0AFPEF20878703D782000497"), std::string::npos);
 }
 
 TEST_F(Mg4BatteryTest, SnapClampOnlyInAbsorption) {
@@ -1633,6 +1694,20 @@ static void send_b0e5(TestableMg4Battery* battery, uint32_t page, uint32_t w1, u
   battery->handle_pid(0xB0E5, 0, data, sizeof(data));
 }
 
+TEST_F(Mg4BatteryTest, SummaryCellSocImbalanceFromPage1) {
+  uint8_t data[24] = {0};
+  put_be32(data, 1);
+  put_be32(data + 4, 1);
+  put_be32(data + 8, 42);
+  put_be32(data + 12, 97);  // max per-cell SoC
+  put_be32(data + 16, 94);  // min per-cell SoC
+  put_be32(data + 20, 95);
+  battery->handle_pid(0xB0E5, 0, data, sizeof(data));
+  std::string html = battery->get_uds_info_html().c_str();
+  EXPECT_NE(html.find("Cell SoC imbalance: 3% (max 97%, min 94%): &gt;= 1% (enough"), std::string::npos);
+  EXPECT_NE(html.find("Pack SoC: 95% (snapshot 42)"), std::string::npos);
+}
+
 TEST_F(Mg4BatteryTest, BalancingGateDecodesPage7) {
   std::string html = battery->get_uds_info_html().c_str();
   EXPECT_NE(html.find("Balancing gate (0xB0E5)</h3>N/A"), std::string::npos);
@@ -1641,6 +1716,8 @@ TEST_F(Mg4BatteryTest, BalancingGateDecodesPage7) {
   html = battery->get_uds_info_html().c_str();
   EXPECT_NE(html.find("Waiting for page 7"), std::string::npos);
   EXPECT_NE(html.find("page 2: 11 22 0 0 55"), std::string::npos);
+
+  EXPECT_NE(html.find("Sleep before this wake: N/A"), std::string::npos);
 
   send_b0e5(battery, 7, 7200, 1, 7300);
   html = battery->get_uds_info_html().c_str();
