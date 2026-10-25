@@ -17,6 +17,7 @@ class Mg4Battery : public UdsCanBattery {
   // Sleep/wake (More battery info buttons): shut the pack down the way the car
   // does, then stop all transmission so the BMS can go to sleep.
   bool supports_sleep() override { return true; }
+  bool supports_insulation_resistance() override { return true; }
   bool is_sleeping() override;
   void request_sleep() override { sleep_requested = true; }
   void request_wake() override { wake_requested = true; }
@@ -207,6 +208,19 @@ class Mg4Battery : public UdsCanBattery {
   // Worst-case rendered size of the BMS mode section.
   static constexpr uint32_t MODE_HTML_BUDGET = 96;
 
+  // ---- BMS session, display only ----
+  // 0x15B PDU 0x000505: b2 >> 3 = BMS mode (= DID B048), b5 bits 0x10/0x20/0x40
+  // = AC / DC / V2L session, b6 bit 0x20 = close window. 0x211 PDU 0x000514:
+  // charge current limit, 11 bits at 0.5 A, 0x7FF = none (charge sessions only).
+  bool pack_status_received = false;
+  uint8_t pack_bms_mode = 0xFF;
+  uint8_t pack_status_b5 = 0;
+  uint8_t pack_status_b6 = 0;
+  uint16_t pack_charge_limit_raw = 0x7FF;
+  void render_session_html(String& html);
+  // Rendered size of the BMS session section, help texts included.
+  static constexpr uint32_t SESSION_HTML_BUDGET = 2048;
+
   // Drive-mode car frames (found by emulating the pack firmware, matching the
   // driving car's FD bus). The original 0x313 template came from an AC-charge
   // log: its PDU 0x000402 b5 = 0xF2 and close status b6 = 1/3/5 make the BMS
@@ -384,6 +398,13 @@ class Mg4Battery : public UdsCanBattery {
   struct PackContactorFeedback {
     bool received = false;
     uint8_t state = 0xFF;  // 0xFF = no data yet
+    // Timestamps (millis) of the last time the pack reported closed (state 7).
+    // If the pack was already closed when the driver first saw it, closed_at_ms
+    // is the time of that first sighting.
+    bool ever_closed = false;
+    bool closed_at_boot = false;     // closed_at_ms is our first sighting, not a close we saw
+    unsigned long closed_at_ms = 0;  // when the pack last became closed
+    unsigned long opened_at_ms = 0;  // when it last left closed (valid if ever_closed && !isClosed())
     bool isClosed() const { return received && state == 7; }
     bool isPrecharging() const { return received && state == 11; }
     const char* label() const {
@@ -402,6 +423,9 @@ class Mg4Battery : public UdsCanBattery {
   };
 
   char ntsc_serial[29] = {0};  // eg: 0AFPEG10879103D7N3000095
+  // Time to full from 0x308 sub-PDU 0x515 b4: minutes, counting down 1/min while
+  // charging in a BMS charge session. 0xFF = not available, 0xFC+ while estimating.
+  uint8_t minutes_to_full = 0xFF;
   PackContactorFeedback pack_contactors;
   unsigned long contactorWaitStartMillis = 0;
 
@@ -423,6 +447,14 @@ class Mg4Battery : public UdsCanBattery {
   void update_047_08a();
   void update_313_314();
   void update_169();
+
+  // Extra car-side frames for modules the BMS reports missing (U0293 / P1F84
+  // IMCU, U1112 OBC/CCU, U0151 SDM), from MG4_EXTRA_FRAMES. The SDM frame
+  // (0x163) clears U0151 (bench 2026-10-16, bisected from the car frame table).
+  static constexpr int MG4_MAX_EXTRA_FRAMES = 20;
+  uint8_t extra_counter[MG4_MAX_EXTRA_FRAMES] = {0};
+  uint32_t extra_tick = 0;
+  void send_extra_frames_10ms();
   void contactor_state_tick(unsigned long currentMillis);
   void reset_reclose_tracker();
   bool record_contactor_reclose(unsigned long now_ms);
@@ -442,21 +474,36 @@ class Mg4Battery : public UdsCanBattery {
   static const uint16_t POLL_BALANCING_STATUS = 0xB0E5;
   static const uint16_t POLL_ECU_HARDWARE_NUMBER = 0xF192;
   static const uint16_t POLL_ECU_SOFTWARE_NUMBER = 0xF194;
+  static const uint16_t POLL_VIN = 0xF190;  // VIN stored in the BMS (17 ASCII characters)
 
   // ECU identifier payloads (10 ASCII characters each)
   uint8_t pid_ecu_hw_number[10] = {0};
   uint8_t pid_ecu_sw_number[10] = {0};
+  uint8_t pid_vin[17] = {0};
 
-  // Pack-reported isolation resistance. The PID value is a 2-byte count scaled
-  // by 500 to get ohms. Keep a 1 Hz ring of recent raw counts so the info page
-  // can dump a plottable series without storing every PID response.
-  static constexpr uint32_t ISO_OHMS_PER_COUNT = 500;
-  static constexpr int ISO_HISTORY_SAMPLES = 120;  // 2 minutes at 1 Hz
-  uint16_t iso_raw = 0;
-  bool iso_received = false;
-  uint16_t iso_history[ISO_HISTORY_SAMPLES] = {0};
-  uint16_t iso_history_count = 0;
-  uint16_t iso_history_head = 0;  // next write position
+  // Pack-reported isolation resistance (UDS B045), 0.5 kOhm (500 ohm) per
+  // count, published as datalayer insulation_resistance_kOhm. Between
+  // measurements the BMS answers 0x3FFE/0x3FFF ("no result"); a real result
+  // arrives every 30-60 s.
+  static constexpr uint16_t ISO_NO_RESULT = 0x3FFE;  // this and above
+  // While charging, a result below 270 kOhm for 3 s sets P1EB2 and the BMS
+  // withdraws charge permission (bench 2026-10-15).
+  static constexpr uint16_t ISO_P1EB2_KOHM = 270;
+  // The BMS grades isolation in three levels: below 500 / 400 / 270 kOhm.
+  static constexpr uint16_t ISO_LEVEL1_KOHM = 500;
+  static constexpr uint16_t ISO_LEVEL2_KOHM = 400;
+  bool iso_received = false;         // any B045 answer yet
+  bool iso_measuring = false;        // latest answer was "no result"
+  uint16_t iso_valid_raw = 0;        // latest real measurement
+  bool iso_valid = false;            // a real measurement has been seen
+  unsigned long iso_valid_ms = 0;    // when it arrived
+  uint16_t iso_min_raw = 0xFFFF;     // lowest real measurement since the pack last closed
+
+  // 12 V supply at the pack: DID 0x0112, one byte, value / 10 V (0xFF = not
+  // available). Confirmed on the bench by stepping the supply 13.5 -> 11.8 V.
+  // The BMS sets P1E48 below 9 V and P1E49 above 16 V.
+  static const uint16_t POLL_LV_SUPPLY = 0x0112;
+  uint16_t lv_supply_raw = 0xFFFF;  // 0xFFFF = no reading yet; otherwise volts x 10
 
   CAN_frame MG4_4F3_FD = {.FD = true,
                           .ext_ID = false,

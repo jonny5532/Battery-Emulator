@@ -382,15 +382,34 @@ receive_frame_can_native() {  // This section checks if we have a complete CAN m
     }
   }
 
-  // Diagnostic heartbeat: log the CAN health every 10 s so slow climbs and
-  // recoveries are visible even without a latched error. rxHealth is the
+  // Diagnostic heartbeat, checked every 10 s: log the CAN health only when it
+  // has something to say - a non-zero error counter that changed since the
+  // last line (so slow climbs stay visible), a new peripheral reset, or the
+  // return to a clean bus. A healthy bus stays silent. rxHealth is the
   // software REC mirror (see TWAI_Lite::rxHealth): it keeps climbing where
   // the hardware rec can't, because the errata resets keep zeroing it.
   static uint32_t last_health_log_ms = 0;
+  static unsigned last_tec = 0, last_rec = 0, last_rx_health = 0, last_resets = 0;
   if (millis() - last_health_log_ms >= 10000) {
     last_health_log_ms = millis();
-    logging.printf("Native CAN health: tec=%u rec=%u rxHealth=%u resets=%u\n", twai_lite.tec(), twai_lite.rec(),
-                   twai_lite.rxHealth(), (unsigned)twai_lite.periphResetCount());
+    const unsigned tec = twai_lite.tec();
+    const unsigned rec = twai_lite.rec();
+    const unsigned rx_health = twai_lite.rxHealth();
+    const unsigned resets = (unsigned)twai_lite.periphResetCount();
+    const bool clean = tec == 0 && rec == 0 && rx_health == 0;
+    const bool was_clean = last_tec == 0 && last_rec == 0 && last_rx_health == 0;
+    const bool counters_changed = tec != last_tec || rec != last_rec || rx_health != last_rx_health;
+    if (!clean && (counters_changed || resets != last_resets)) {
+      logging.printf("Native CAN health: tec=%u rec=%u rxHealth=%u resets=%u\n", tec, rec, rx_health, resets);
+    } else if (clean && !was_clean) {
+      logging.printf("Native CAN health: clean again (resets=%u)\n", resets);
+    } else if (clean && resets != last_resets) {
+      logging.printf("Native CAN health: controller reset, bus clean (resets=%u)\n", resets);
+    }
+    last_tec = tec;
+    last_rec = rec;
+    last_rx_health = rx_health;
+    last_resets = resets;
   }
 }
 
