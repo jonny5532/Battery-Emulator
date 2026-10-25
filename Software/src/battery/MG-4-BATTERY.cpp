@@ -491,8 +491,8 @@ void Mg4Battery::
 
   // Sample the latest isolation resistance once per second into the ring the
   // info page dumps as a comma-separated series.
-  if (iso_received) {
-    iso_history[iso_history_head] = iso_raw;
+  if (iso_bcast_received && iso_bcast_valid) {
+    iso_history[iso_history_head] = iso_bcast_raw;
     iso_history_head = (iso_history_head + 1) % ISO_HISTORY_SAMPLES;
     if (iso_history_count < ISO_HISTORY_SAMPLES) {
       iso_history_count++;
@@ -756,6 +756,21 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
         }
       }
       break;
+    case 0x30B:
+      // Isolation resistance, subfield 000519 bytes 3-4: the same value as
+      // PID 0xB045 (lower of the two sides, 500 ohm/count). Bit 14 set means
+      // invalid (0x7FFF); 0x3FFF is valid but at full scale.
+      for (int i = 0; i + 12 <= rx_frame.DLC; i += 12) {
+        if (rx_frame.data.u8[i + 3] != 8) {
+          break;
+        }
+        uint32_t addr = (rx_frame.data.u8[i] << 16) | (rx_frame.data.u8[i + 1] << 8) | rx_frame.data.u8[i + 2];
+        if (addr == 0x519) {
+          const uint8_t* sub = &rx_frame.data.u8[i + 4];
+          record_isolation((sub[3] << 8) | sub[4]);
+        }
+      }
+      break;
     case 0x4E1:
       // BMS NM frame, b7 = partial network: 0x01 default, else a charge session.
       if (rx_frame.DLC >= 8 && (rx_frame.data.u8[7] != bms_pn || !bms_pn_received)) {
@@ -766,6 +781,25 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
       break;
     default:
       break;
+  }
+}
+
+void Mg4Battery::record_isolation(uint16_t v) {
+  iso_bcast_received = true;
+  iso_bcast_valid = !(v & 0x4000);
+  iso_bcast_raw = v & 0x3FFF;
+  if (!iso_bcast_valid || !pack_contactors.received) {
+    return;
+  }
+  // Precharge and the other transient states count as neither.
+  uint16_t* min_raw = nullptr;
+  if (pack_contactors.isClosed()) {
+    min_raw = &iso_min_closed_raw;
+  } else if (pack_contactors.state == 3) {
+    min_raw = &iso_min_open_raw;
+  }
+  if (min_raw && iso_bcast_raw < *min_raw) {
+    *min_raw = iso_bcast_raw;
   }
 }
 
@@ -1599,11 +1633,6 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
     case POLL_BATTERY_SOH:
       datalayer.battery.status.soh_pptt = value;
       break;
-    case POLL_ISOLATION_RESISTANCE:
-      // 2-byte count, scaled by 500 to get ohms.
-      iso_raw = (uint16_t)value;
-      iso_received = true;
-      break;
     case POLL_BALANCING_STATUS:
       record_bal_status(data, length);
       break;
@@ -1619,6 +1648,9 @@ uint16_t Mg4Battery::handle_pid(uint16_t pid, uint32_t value, const uint8_t* dat
       memcpy(pid_ecu_hw_number, data, length > sizeof(pid_ecu_hw_number) ? sizeof(pid_ecu_hw_number) : length);
       if (!batteryIdentified)
         identify_battery();
+      break;
+    case POLL_VIN:
+      memcpy(pid_vin, data, length > sizeof(pid_vin) ? sizeof(pid_vin) : length);
       break;
     case POLL_ECU_SOFTWARE_NUMBER:
       memcpy(pid_ecu_sw_number, data, length > sizeof(pid_ecu_sw_number) ? sizeof(pid_ecu_sw_number) : length);
@@ -1694,10 +1726,11 @@ void Mg4Battery::identify_battery() {
 void Mg4Battery::setup(void) {  // Performs one time setup at startup
   setup_uds(0x7E5, 0, {.fd = true, .security_access_level = 1});
 
-  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_ISOLATION_RESISTANCE, POLL_BALANCING_STATUS,
+  // Isolation resistance comes from the 0x30B broadcast, not PID 0xB045.
+  static const uint16_t POLL_LIST[] = {POLL_BATTERY_SOH, POLL_BALANCING_STATUS,
                                        // POLL_MIN_CELL_TEMPERATURE,
                                        // POLL_MAX_CELL_TEMPERATURE,
-                                       POLL_ECU_HARDWARE_NUMBER, POLL_ECU_SOFTWARE_NUMBER};
+                                       POLL_ECU_HARDWARE_NUMBER, POLL_VIN, POLL_ECU_SOFTWARE_NUMBER};
 
   set_pid_scan_list(POLL_LIST, sizeof(POLL_LIST) / sizeof(POLL_LIST[0]));
   dtc = &datalayer.battery.dtc;
@@ -1748,25 +1781,23 @@ String Mg4Battery::get_uds_info_html() {
   // fixed text, up to 9 chars per isolation history sample (8-digit ohms +
   // comma) and the balancing listing.
   String html;
-  html.reserve(1024 + SLEEP_HTML_BUDGET + MODE_HTML_BUDGET + iso_history_count * 9 + BAL_HTML_BUDGET +
-               BAL_STATUS_HTML_BUDGET);
+  html.reserve(1024 + SUMMARY_HTML_BUDGET + SLEEP_HTML_BUDGET + MODE_HTML_BUDGET + iso_history_count * 9 +
+               BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET);
 
+  render_summary_html(html);
   render_sleep_html(html);
 
-  // Pack-reported precharge/contactor state (0x15B byte[21]&0xF)
-  html += "<h3>Precharge/contactor state</h3>";
-  html += "State: ";
-  html += pack_contactors.label();
-  html += " (";
-  html += pack_contactors.state;
-  html += ")<br>Snap attempt active: ";
+  html += "<h3>Pack details</h3>";
+  html += "Snap attempt active: ";
   html += snapEnded ? "NO" : "YES";
   html += "<br>Isolation resistance: ";
-  if (iso_received) {
-    html += String((uint32_t)iso_raw * ISO_OHMS_PER_COUNT);
-    html += " ohms";
-  } else {
+  if (!iso_bcast_received) {
     html += "N/A";
+  } else if (!iso_bcast_valid) {
+    html += "invalid";
+  } else {
+    html += String((uint32_t)iso_bcast_raw * ISO_OHMS_PER_COUNT);
+    html += " ohms";
   }
   if (iso_history_count > 0) {
     // Oldest sample first, comma separated, so the series can be pasted into a
@@ -1780,8 +1811,7 @@ String Mg4Battery::get_uds_info_html() {
       html += String((uint32_t)iso_history[idx] * ISO_OHMS_PER_COUNT);
     }
   }
-  html += "<br>Pack serial: " + String(ntsc_serial);
-  char buf[64];
+  char buf[96];
   if (bms_limit_freshness > 0) {
     // Limits are whole multiples of 0.5kW, so one decimal place is exact.
     snprintf(buf, sizeof(buf), "<br>BMS limits: charge %lu.%lu kW, discharge %lu.%lu kW",
@@ -1791,18 +1821,58 @@ String Mg4Battery::get_uds_info_html() {
   } else {
     html += "<br>BMS limits: N/A";
   }
-  print_chars_or_hex(buf, sizeof(buf), pid_ecu_hw_number, sizeof(pid_ecu_hw_number));
-  html += "<br>ECU hardware: ";
-  html += buf;
-  print_chars_or_hex(buf, sizeof(buf), pid_ecu_sw_number, sizeof(pid_ecu_sw_number));
-  html += "<br>ECU software: ";
-  html += buf;
 
-  render_mode_html(html);
   render_bal_status_html(html);
   render_balancing_html(html);
 
   return html;
+}
+
+void Mg4Battery::render_summary_html(String& html) {
+  char buf[96];
+  // Identifiers read as all zeros until the BMS has answered.
+  auto append_id = [&](const uint8_t* data, uint16_t length) {
+    if (data[0] == 0) {
+      html += "N/A";
+      return;
+    }
+    print_chars_or_hex(buf, sizeof(buf), data, length);
+    html += buf;
+  };
+  auto append_iso_min = [&](uint16_t raw) {
+    if (raw == ISO_NONE) {
+      html += "N/A";
+      return;
+    }
+    html += String((uint32_t)raw * ISO_OHMS_PER_COUNT);
+    html += " ohms";
+  };
+  html += "<h3>Summary</h3>";
+  // Pack-reported precharge/contactor state (0x15B byte[21]&0xF)
+  html += "Contactor state: ";
+  html += pack_contactors.label();
+  if (pack_contactors.received) {
+    html += " (";
+    html += pack_contactors.state;
+    html += ")";
+  }
+  html += "<br>";
+  render_mode_html(html);
+  html += "<br>BMS hardware version: ";
+  append_id(pid_ecu_hw_number, sizeof(pid_ecu_hw_number));
+  html += "<br>BMS software version: ";
+  append_id(pid_ecu_sw_number, sizeof(pid_ecu_sw_number));
+  html += "<br>Traceability code: ";
+  html += ntsc_serial[0] ? ntsc_serial : "N/A";
+  html += "<br>VIN: ";
+  append_id(pid_vin, sizeof(pid_vin));
+  html += "<br>";
+  render_sleep_rest_html(html);
+  render_cell_soc_spread_html(html);
+  html += "Lowest isolation resistance, contactors open: ";
+  append_iso_min(iso_min_open_raw);
+  html += "<br>Lowest isolation resistance, contactors closed: ";
+  append_iso_min(iso_min_closed_raw);
 }
 
 // Mark every cell not-seen, so the next complete sweep is clearly fresh, and
@@ -1954,7 +2024,7 @@ void Mg4Battery::render_bal_cycle_html(String& html) {
 
 void Mg4Battery::render_mode_html(String& html) {
   char buf[48];
-  html += "<h3>BMS mode</h3>Mode: ";
+  html += "Drive/charge mode: ";
   html += bms_mode_label();
   if (bms_pn_received) {
     snprintf(buf, sizeof(buf), " (PN %02X)", bms_pn);
@@ -2052,6 +2122,52 @@ static void append_hms(String& html, uint32_t s) {
   html += buf;
 }
 
+// Sleep and rest from 0xB0E5 page 7, and whether each is enough to balance.
+void Mg4Battery::render_sleep_rest_html(String& html) {
+  const uint8_t g = BAL_GATE_PAGE - 1;
+  if (!bal_page_seen[g]) {
+    html += "Sleep before this wake: N/A<br>Rest time: N/A<br>";
+    return;
+  }
+  const uint32_t sleep_s = bal_page[g][0];
+  const uint32_t rest_s = bal_page[g][4];
+  const bool sleep_ok = bal_page[g][1] != 0 && sleep_s >= BAL_MIN_SLEEP_S;
+  html += "Sleep before this wake: ";
+  append_hms(html, sleep_s);
+  html += sleep_ok ? " (valid: balancing can be planned)" : " (not valid: no new balancing this wake)";
+  html += "<br>Rest time: ";
+  append_hms(html, rest_s);
+  html += rest_s >= BAL_TOP_REST_S ? " (>= 30 min)" : " (< 30 min: no top-of-charge balancing yet)";
+  html += "<br>";
+}
+
+// Per-cell SoC max - min from 0xB0E5 page 1, and whether it is enough for
+// top-of-charge balancing.
+void Mg4Battery::render_cell_soc_spread_html(String& html) {
+  const uint8_t c = BAL_CELL_SOC_PAGE - 1;
+  if (!bal_page_seen[c]) {
+    html += "Cell SoC imbalance: N/A<br>";
+    return;
+  }
+  char buf[80];
+  const uint32_t max_pct = bal_page[c][2];
+  const uint32_t min_pct = bal_page[c][3];
+  // Whole-% values: the true spread is within 1 % of max - min.
+  const uint32_t spread_pct = max_pct > min_pct ? max_pct - min_pct : 0;
+  snprintf(buf, sizeof(buf), "Cell SoC imbalance: %lu%% (max %lu%%, min %lu%%): ", (unsigned long)spread_pct,
+           (unsigned long)max_pct, (unsigned long)min_pct);
+  html += buf;
+  if (spread_pct + 1 <= BAL_TOP_SPREAD_PCT) {
+    html += "&lt; 1% (too small for top-of-charge balancing)";
+  } else if (spread_pct >= BAL_TOP_SPREAD_PCT + 1) {
+    html += "&gt;= 1% (enough for top-of-charge balancing)";
+  } else {
+    html += "0-2% (whole-% values: can't tell if it is &gt;= 1%)";
+  }
+  html += "<br>";
+}
+
+// Sleep, rest and the per-cell SoC spread are in the summary.
 void Mg4Battery::render_bal_status_html(String& html) {
   char buf[128];
   html += "<h3>Balancing gate (0xB0E5)</h3>";
@@ -2061,38 +2177,15 @@ void Mg4Battery::render_bal_status_html(String& html) {
   }
   const uint8_t c = BAL_CELL_SOC_PAGE - 1;
   if (bal_page_seen[c]) {
-    const uint32_t max_pct = bal_page[c][2];
-    const uint32_t min_pct = bal_page[c][3];
-    // Whole-% values: the true spread is within 1 % of max - min.
-    const uint32_t spread_pct = max_pct > min_pct ? max_pct - min_pct : 0;
-    snprintf(buf, sizeof(buf),
-             "Per-cell SoC: max %lu%%, min %lu%%, pack %lu%% (snapshot %lu)<br>Spread: ", (unsigned long)max_pct,
-             (unsigned long)min_pct, (unsigned long)bal_page[c][4], (unsigned long)bal_page[c][1]);
+    snprintf(buf, sizeof(buf), "Pack SoC: %lu%% (snapshot %lu)<br>", (unsigned long)bal_page[c][4],
+             (unsigned long)bal_page[c][1]);
     html += buf;
-    if (spread_pct + 1 <= BAL_TOP_SPREAD_PCT) {
-      html += "&lt; 1% (too small for top-of-charge balancing)";
-    } else if (spread_pct >= BAL_TOP_SPREAD_PCT + 1) {
-      html += "&gt;= 1% (enough for top-of-charge balancing)";
-    } else {
-      html += "0-2% (whole-% values: can't tell if it is &gt;= 1%)";
-    }
-    html += "<br>";
   } else {
     html += "Waiting for page 1<br>";
   }
   const uint8_t g = BAL_GATE_PAGE - 1;
   if (bal_page_seen[g]) {
-    const uint32_t sleep_s = bal_page[g][0];
-    const uint32_t rest_s = bal_page[g][4];
-    const bool sleep_ok = bal_page[g][1] != 0 && sleep_s >= BAL_MIN_SLEEP_S;
-    html += "Sleep before this wake: ";
-    append_hms(html, sleep_s);
-    html += sleep_ok ? " (valid: balancing can be planned)" : " (not valid: no new balancing this wake)";
-    html += "<br>Rest time: ";
-    append_hms(html, rest_s);
-    html += rest_s >= BAL_TOP_REST_S ? " (>= 30 min)" : " (< 30 min: no top-of-charge balancing yet)";
-    snprintf(buf, sizeof(buf), "<br>SoC gained charging in the previous session: %lu%%<br>",
-             (unsigned long)bal_page[g][2]);
+    snprintf(buf, sizeof(buf), "SoC gained charging in the previous session: %lu%%<br>", (unsigned long)bal_page[g][2]);
     html += buf;
   } else {
     html += "Waiting for page 7<br>";
