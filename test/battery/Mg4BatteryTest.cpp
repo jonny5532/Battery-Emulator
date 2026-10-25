@@ -677,6 +677,27 @@ TEST_F(Mg4BatteryTest, IgnoresWakePlaceholdersIn12C) {
   EXPECT_EQ(datalayer.battery.status.cell_max_voltage_mV, 3300);
 }
 
+// The other two wake placeholders: an all-zero 0x159 cell row (mux 0) and SoC 0x3FF (102.3 %).
+TEST_F(Mg4BatteryTest, IgnoresWakePlaceholdersIn159And15B) {
+  datalayer.battery.status.cell_voltages_mV[0] = 3300;
+  CAN_frame f;
+  memset(&f, 0, sizeof(f));
+  f.ID = 0x159;
+  f.FD = true;
+  f.DLC = 12;
+  f.data.u8[0] = 0x00;
+  f.data.u8[1] = 0x05;
+  f.data.u8[2] = 0x09;
+  f.data.u8[3] = 8;  // all-zero payload, mux byte 0
+  battery->handle_incoming_can_frame(f);
+  EXPECT_EQ(datalayer.battery.status.cell_voltages_mV[0], 3300);
+
+  send_15b_fd(7, 500);
+  EXPECT_EQ(datalayer.battery.status.real_soc, 5000);
+  send_15b_fd(7, 0x3FF);
+  EXPECT_EQ(datalayer.battery.status.real_soc, 5000);
+}
+
 TEST_F(Mg4BatteryTest, DisplaysBmsSession) {
   std::string html = battery->get_uds_info_html().c_str();
   EXPECT_NE(html.find("Charge session: N/A"), std::string::npos);

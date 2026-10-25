@@ -624,7 +624,13 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
           uint16_t c3 = ((sub[5] & 0x1F) << 8) | sub[6];
 
           int idx = celloffset * 4;
-          if (idx + 3 < MAX_AMOUNT_CELLS) {
+          // Skip the all-zero placeholder rows sent just after a BMS wake. Their mux byte is 0,
+          // which would also put idx at -4, before the start of cell_voltages_mV.
+          const bool plausible = c0 >= CELL_PLAUSIBLE_MIN_MV && c1 >= CELL_PLAUSIBLE_MIN_MV &&
+                                 c2 >= CELL_PLAUSIBLE_MIN_MV && c3 >= CELL_PLAUSIBLE_MIN_MV &&
+                                 c0 <= CELL_PLAUSIBLE_MAX_MV && c1 <= CELL_PLAUSIBLE_MAX_MV &&
+                                 c2 <= CELL_PLAUSIBLE_MAX_MV && c3 <= CELL_PLAUSIBLE_MAX_MV;
+          if (plausible && idx >= 0 && idx + 3 < MAX_AMOUNT_CELLS) {
             // This seemingly arbitrary ordering is guessed based on the
             // min/max cell indices given in the 12C messages.
             // The 51kWh LFP pack has the first two cells of each group of four
@@ -684,9 +690,12 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
       //          bits: 4 42
 
       soc_times_ten = ((rx_frame.data.u8[7] << 6) | (rx_frame.data.u8[8] >> 2)) & 0x3FF;
-      bms_soc_centipercent = soc_times_ten * 10;
-      soc_freshness = 10;
-      update_soc(snap_should_force_soc() ? 10000 : bms_soc_centipercent);
+      // 0x3FF (102.3 %) is the "not yet valid" placeholder after a BMS wake.
+      if (soc_times_ten <= 1000) {
+        bms_soc_centipercent = soc_times_ten * 10;
+        soc_freshness = 10;
+        update_soc(snap_should_force_soc() ? 10000 : bms_soc_centipercent);
+      }
 
       // Precharge/contactor state, confirmed against a real vehicle
       // capture: 3=idle, 11=precharge active, 7=closed/charging. Single
