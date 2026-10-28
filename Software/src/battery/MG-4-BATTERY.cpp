@@ -566,16 +566,26 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
         datalayer.battery.status.current_dA = -((current_raw - 20000) / 2);
       }
 
-      datalayer.battery.status.cell_min_voltage_mV = ((rx_frame.data.u8[30] << 8) | (rx_frame.data.u8[31])) / 8;
-      datalayer.battery.status.cell_max_voltage_mV = ((rx_frame.data.u8[32] << 8) | (rx_frame.data.u8[33])) / 8;
+      {
+        // While the BMS is starting up the cell and temperature fields are
+        // all-ones (cell 0x1FFF, temp 0xFF), which would read as ~1V cells
+        // and 87.5C. Skip them and let the freshness counters run down.
+        uint16_t cell_min_raw = (rx_frame.data.u8[30] << 8) | rx_frame.data.u8[31];
+        uint16_t cell_max_raw = (rx_frame.data.u8[32] << 8) | rx_frame.data.u8[33];
+        if ((cell_min_raw >> 3) != 0x1FFF && (cell_max_raw >> 3) != 0x1FFF) {
+          datalayer.battery.status.cell_min_voltage_mV = cell_min_raw / 8;
+          datalayer.battery.status.cell_max_voltage_mV = cell_max_raw / 8;
+          cell_voltage_freshness = 10;
+        }
+      }
 
       // [20] contains the max temperature sensor ID
       // [21] contains the min temperature sensor ID
-      datalayer.battery.status.temperature_max_dC = ((int)rx_frame.data.u8[22] * 5) - 400;
-      datalayer.battery.status.temperature_min_dC = ((int)rx_frame.data.u8[23] * 5) - 400;
-      temp_freshness = 10;
-
-      cell_voltage_freshness = 10;
+      if (rx_frame.data.u8[22] != 0xFF && rx_frame.data.u8[23] != 0xFF) {
+        datalayer.battery.status.temperature_max_dC = ((int)rx_frame.data.u8[22] * 5) - 400;
+        datalayer.battery.status.temperature_min_dC = ((int)rx_frame.data.u8[23] * 5) - 400;
+        temp_freshness = 10;
+      }
 
       break;
     case 0x159:
@@ -666,9 +676,13 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
       //          bits: 4 42
 
       soc_times_ten = ((rx_frame.data.u8[7] << 6) | (rx_frame.data.u8[8] >> 2)) & 0x3FF;
-      bms_soc_centipercent = soc_times_ten * 10;
-      soc_freshness = 10;
-      update_soc(snap_should_force_soc() ? 10000 : bms_soc_centipercent);
+      if (soc_times_ten != 0x3FF) {
+        // 0x3FF while the BMS is starting up. The contactor state below is
+        // valid from the first frame, so keep decoding that regardless.
+        bms_soc_centipercent = soc_times_ten * 10;
+        soc_freshness = 10;
+        update_soc(snap_should_force_soc() ? 10000 : bms_soc_centipercent);
+      }
 
       // Precharge/contactor state, confirmed against a real vehicle
       // capture: 3=idle, 11=precharge active, 7=closed/charging. Single
@@ -1666,20 +1680,6 @@ void Mg4Battery::identify_battery() {
     return;
   }
 
-  if (ntsc_serial[4] == 0) {
-    // No valid NTSC serial chemistry received yet
-    return;
-  }
-
-  battery_chemistry_enum chemistry;
-  if (ntsc_serial[4] == 'B') {
-    chemistry = LFP;
-  } else {
-    chemistry = NMC;
-  }
-
-  uint8_t capacity = ((pid_ecu_hw_number[8] - '0') * 10) + (pid_ecu_hw_number[9] - '0');
-
   auto setup_battery = [&](battery_chemistry_enum chem, uint32_t cap, uint8_t num_cells) {
     datalayer.battery.info.chemistry = chem;
     datalayer.battery.info.number_of_cells = num_cells;
@@ -1705,10 +1705,33 @@ void Mg4Battery::identify_battery() {
         (datalayer.battery.info.min_cell_voltage_mV * (uint32_t)datalayer.battery.info.number_of_cells) / 100;
 
     logging.printf("[MG4] Detected %ds %dWh %s battery\n", datalayer.battery.info.number_of_cells,
-                   datalayer.battery.info.total_capacity_Wh, chemistry == LFP ? "LFP" : "NMC");
+                   datalayer.battery.info.total_capacity_Wh, chem == LFP ? "LFP" : "NMC");
 
     batteryIdentified = true;
   };
+
+  // MG HS gen2 (120s LFP, 24.7kWh). It doesn't broadcast the 0x554 NTSC
+  // serial, so there's no chemistry letter to check; match the one known
+  // ECU hardware number exactly instead.
+  static const char MG_HS2_HW_NUMBER[] = "33X2240429";
+  if (memcmp(pid_ecu_hw_number, MG_HS2_HW_NUMBER, sizeof(pid_ecu_hw_number)) == 0) {
+    setup_battery(LFP, 24700, 120);
+    return;
+  }
+
+  if (ntsc_serial[4] == 0) {
+    // No valid NTSC serial chemistry received yet
+    return;
+  }
+
+  battery_chemistry_enum chemistry;
+  if (ntsc_serial[4] == 'B') {
+    chemistry = LFP;
+  } else {
+    chemistry = NMC;
+  }
+
+  uint8_t capacity = ((pid_ecu_hw_number[8] - '0') * 10) + (pid_ecu_hw_number[9] - '0');
 
   if (capacity == 49 && chemistry == LFP) {
     setup_battery(chemistry, 49000, 100);

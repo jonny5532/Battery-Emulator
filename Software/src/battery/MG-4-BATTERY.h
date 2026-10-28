@@ -308,9 +308,9 @@ class Mg4Battery : public UdsCanBattery {
   // balancing with 12 h targets reported 719 and 718 min. BAL_NOT_SEEN until
   // that cell has been reported.
   static constexpr uint8_t BAL_SLOT = 0x0D;
-  static constexpr uint8_t BAL_MAX_CELLS = 108;
+  static constexpr uint8_t BAL_MAX_CELLS = 120;  // MG HS gen2 has 120 cells
   static constexpr uint16_t BAL_NOT_SEEN = 0xFFFF;
-  // Worst-case rendered size: header text plus "108: 1092h15m<br>" per cell.
+  // Worst-case rendered size: header text plus "120: 1092h15m<br>" per cell.
   static constexpr uint32_t BAL_HTML_BUDGET = 256 + BAL_MAX_CELLS * 18;
 
   uint16_t bal_demand[BAL_MAX_CELLS];
