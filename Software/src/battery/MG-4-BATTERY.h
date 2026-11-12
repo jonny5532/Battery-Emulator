@@ -297,6 +297,112 @@ class Mg4Battery : public UdsCanBattery {
   bool snap_should_force_soc();
   int32_t snap_clamp_power_W();
 
+  // ---- SoC snap via a drive -> AC switch (BMS firmware 43A12430R9) ----
+  // This firmware only resets its SoC to 100% in a charge mode, never in drive. Its AC charge
+  // manager declares the charge complete once max cell >= ~3.64V (3.6383V + 0.93mV/A) with the
+  // current <= ~10A for 30s, and the SoC then snaps. It aborts the AC charge if max cell >= 3.66V
+  // for 10s. The pack can be moved from drive into AC charge mode without opening the contactors,
+  // by changing 0x313 PDU 0x000402 b5 to 0xF2 with close status b6 1 (1s) -> 3 (2.3s) -> 5 and
+  // stopping 0x169; going back to the drive frames completes the SoC ramp at once.
+  // Sequence:
+  // - Runs at the top of every charge, also as a safety net: from SNAP_AC_TAPER_MV the charge
+  //   limit tapers linearly to SNAP_AC_DA at SNAP_AC_TRIGGER_MV, then holds SNAP_AC_DA.
+  // - After SNAP_AC_SETTLE_S at that current (the cells drop back as the charge current falls),
+  //   wait for cell max >= SNAP_AC_TRIGGER_MV again, with the isolation broadcast
+  //   valid and >= SNAP_AC_MIN_ISO_OHMS for SNAP_AC_ISO_OK_S without a break (the BMS drops out of
+  //   AC charge within 40ms of its own < 270k isolation fault).
+  // - Switch to the AC frames. Hold SNAP_AC_DA, cut to 0 at SNAP_AC_HOLD_MAX_MV (resume below
+  //   SNAP_AC_RESUME_MV), until the BMS SoC rises SNAP_AC_SOC_RISE_CP above its value at the
+  //   switch (the post-charge-complete ramp), then switch straight back to drive.
+  // - Back in drive: success if the BMS reports >= SNAP_AC_DONE_SOC_CP. Otherwise retry after
+  //   SNAP_AC_RETRY_S, up to SNAP_AC_MAX_TRIES per charge.
+  // - Abort to drive: isolation low, contactors not closed, or SNAP_AC_TIMEOUT_S in AC (the BMS
+  //   itself leaves AC charge 60s after the switch without charge complete).
+  // - Skipped (no switch; the 1A taper still applies) if the BMS already reports
+  //   >= SNAP_AC_FULL_SOC_CP: its SoC couldn't show the ramp, so success couldn't be verified, and
+  //   the correction would be at most SNAP_AC_SOC_RISE_CP.
+  // - Blocked while the BMS woke
+  //   with a cell >= SNAP_AC_WAKE_MV: at every wake it keeps a "maybe full" mark until max cell
+  //   has been under ~3.409V (and the pack under ~356V) for 10s without a break, and refuses the
+  //   AC switch while the mark is set and the cells are above ~3.414V. A spell of
+  //   SNAP_AC_WAKE_CLEAR_S below SNAP_AC_WAKE_MV lifts our block. That is below the SNAP_RESET_MV
+  //   re-arm, so a blocked charge goes straight to DONE (charge stops at the trigger) rather than
+  //   waiting at 1A.
+  // - After success or giving up, charge is tapered to stop at SNAP_AC_TRIGGER_MV until cell max
+  //   falls below SNAP_RESET_MV, which re-arms.
+  static constexpr bool SNAP_VIA_AC_SWITCH = true;  // false: the drive-mode 3.75V snap above
+  static constexpr int32_t SNAP_AC_TRIGGER_MV = 3645;
+  static constexpr int32_t SNAP_AC_HOLD_MAX_MV = 3655;
+  static constexpr int32_t SNAP_AC_RESUME_MV = 3650;
+  static constexpr int32_t SNAP_AC_DA = 10;               // 1A
+  static constexpr int16_t SNAP_AC_MAX_MEASURED_DA = 30;  // don't switch while drawing more than 3A
+  static constexpr uint32_t SNAP_AC_MIN_ISO_OHMS = 500000;
+  static constexpr int32_t SNAP_AC_ISO_OK_S = 10;
+  static constexpr int32_t SNAP_AC_WAIT_MAX_S = 30 * 60;  // give up waiting for the cells at 1A
+  static constexpr int32_t SNAP_AC_SETTLE_S = 30;         // at 1A before the cells count again
+  // In AC mode: the BMS fires charge complete ~32s after the switch at the earliest, and its SoC
+  // then climbs slowly (~0.1% per 10s at 98%) until we go back to drive.
+  static constexpr int32_t SNAP_AC_TIMEOUT_S = 70;
+  // Back in drive: waiting for the SoC to show 100% and 0x4E1 PN to return to 0x01 (~10s).
+  static constexpr int32_t SNAP_AC_RETURN_S = 30;
+  // Warn if the BMS still reports a charge PN this long after we went back to the drive frames.
+  static constexpr int32_t SNAP_AC_MODE_WARN_S = 30;
+  static constexpr int32_t SNAP_AC_RETRY_S = 60;
+  static constexpr uint8_t SNAP_AC_MAX_TRIES = 3;
+  static constexpr uint16_t SNAP_AC_SOC_RISE_CP = 20;  // 0.2%: 1A adds ~0.02%/min
+  static constexpr uint16_t SNAP_AC_DONE_SOC_CP = 9950;
+  static constexpr uint16_t SNAP_AC_FULL_SOC_CP = 10000 - SNAP_AC_SOC_RISE_CP;
+  static constexpr int32_t SNAP_AC_TAPER_MV = 3600;
+  static constexpr int32_t SNAP_AC_WAKE_MV = 3405;
+  static constexpr int32_t SNAP_AC_WAKE_WINDOW_MS = 15000;  // after the BMS starts talking
+  static constexpr int32_t SNAP_AC_WAKE_CLEAR_S = 12;
+  // Stretch of the 10ms sequencer for the AC close status: 1 until 1s, 3 until 3.3s, then 5.
+  static constexpr uint32_t SNAP_AC_STAT3_T = 100;
+  static constexpr uint32_t SNAP_AC_STAT5_T = 330;
+
+  enum class AcSnap : uint8_t {
+    ARMED,      // charging normally, cell max below the trigger
+    WAIT,       // clamped to 1A, waiting for the cells and the isolation
+    SWITCHING,  // AC frames, waiting for the charge complete SoC ramp
+    RETURNING,  // drive frames again, waiting for the SoC to show 100%
+    COOLDOWN,   // drive, 1A, before another attempt
+    DONE,       // succeeded, skipped or gave up; re-arms below SNAP_RESET_MV
+  };
+  AcSnap acsnap = AcSnap::ARMED;
+  int32_t acsnap_state_s = 0;  // seconds in the current state
+  int32_t acsnap_iso_ok_s = 0;
+  uint8_t acsnap_tries = 0;
+  uint16_t acsnap_soc_at_switch = 0;
+  uint32_t acsnap_switch_tick = 0;  // mg4_seq_tick when the AC frames started
+  bool acsnap_cut = false;          // over SNAP_AC_HOLD_MAX_MV: charge cut to 0
+  // 0x4E1 PN went to 0x13 during this attempt. It only shows the BMS joined the AC network: a
+  // refused switch (wake mark) also reports 0x13 while the BMS stays in drive internally.
+  bool acsnap_saw_ac_pn = false;
+  int32_t acsnap_mode_mismatch_s = 0;  // seconds on drive frames with the BMS reporting a charge PN
+  // Wake check: armed when the BMS starts talking with the pack open, blocks while a cell was at
+  // or above SNAP_AC_WAKE_MV in the first SNAP_AC_WAKE_WINDOW_MS.
+  bool acsnap_wake_watch = false;
+  unsigned long acsnap_wake_start_ms = 0;
+  bool acsnap_wake_blocked = false;
+  int32_t acsnap_wake_low_s = 0;
+  bool acsnap_bms_seen = false;
+  bool acsnap_wake_high = false;
+  uint8_t acsnap_wake_state = 0xFF;  // first 0x15B contactor state in the wake window
+  unsigned long acsnap_last_12c_ms = 0;
+  int32_t iso_freshness = 0;  // seconds since the last isolation broadcast, counting down
+  char acsnap_result[96] = {0};
+
+  bool acsnap_ac_frames() const { return acsnap == AcSnap::SWITCHING; }
+  void acsnap_tick();
+  void acsnap_set(AcSnap next);
+  void acsnap_finish(const char* fmt, ...);
+  void acsnap_wake_tick(unsigned long now_ms);
+  bool acsnap_iso_ok() const;
+  int32_t acsnap_limit_W(int32_t upstream_W) const;  // upstream_W: the limit so far; < 0: no clamp
+  const char* acsnap_label() const;
+  void render_acsnap_html(String& html);
+  static constexpr uint32_t ACSNAP_HTML_BUDGET = 256;
+
   // ---- Per-cell balancing remaining time ----
   // The BMS debug stream on 0x689 carries a 50-slot multiplex (payload byte 0
   // = 0x92, byte 1 = slot). Slot 0x0D walks the pack cells one at a time
