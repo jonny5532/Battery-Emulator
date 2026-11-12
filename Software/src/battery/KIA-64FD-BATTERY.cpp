@@ -457,8 +457,8 @@ void Kia64FDBattery::setup(void) {  // Performs one time setup at startup
     *allows_contactor_closing = true;
   }
 
-  // UDS: send requests to 0x7E4, accept replies from the BMS on 0x7EC. Also passing true to isFD
-  setup_uds(0x7E4, 0x7EC, true);
+  // UDS: send requests to 0x7E4, accept replies from the BMS on 0x7EC, as CAN-FD frames
+  setup_uds(0x7E4, 0x7EC, {.fd = true});
   static const uint16_t pid_scan_list[] = {
       POLL_GROUP_1, POLL_GROUP_2, POLL_GROUP_3, POLL_GROUP_4, POLL_GROUP_5, POLL_GROUP_6,
       POLL_GROUP_7, POLL_GROUP_8, POLL_GROUP_A, POLL_GROUP_B, POLL_GROUP_C,
