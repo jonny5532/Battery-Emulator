@@ -328,6 +328,250 @@ int32_t Mg4Battery::snap_clamp_power_W() {
   return w > 0 ? w : 0;
 }
 
+// ---- SoC snap via a drive -> AC switch (see MG-4-BATTERY.h) ----
+
+const char* Mg4Battery::acsnap_label() const {
+  switch (acsnap) {
+    case AcSnap::ARMED:
+      return "armed";
+    case AcSnap::WAIT:
+      return "1A, waiting for the cells and isolation";
+    case AcSnap::SWITCHING:
+      return "in AC charge mode, waiting for charge complete";
+    case AcSnap::RETURNING:
+      return "back in drive, waiting for 100%";
+    case AcSnap::COOLDOWN:
+      return "1A, waiting to retry";
+    case AcSnap::DONE:
+      return "done";
+  }
+  return "?";
+}
+
+void Mg4Battery::acsnap_set(AcSnap next) {
+  acsnap = next;
+  acsnap_state_s = 0;
+}
+
+void Mg4Battery::acsnap_finish(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(acsnap_result, sizeof(acsnap_result), fmt, args);
+  va_end(args);
+  logging.printf("[MG4] AC snap %s\n", acsnap_result);
+  acsnap_set(AcSnap::DONE);
+}
+
+bool Mg4Battery::acsnap_iso_ok() const {
+  return iso_freshness > 0 && iso_bcast_valid && (uint32_t)iso_bcast_raw * ISO_OHMS_PER_COUNT >= SNAP_AC_MIN_ISO_OHMS;
+}
+
+int32_t Mg4Battery::acsnap_limit_W(int32_t upstream_W) const {
+  const int32_t one_amp_W = (SNAP_AC_DA * (int32_t)datalayer.battery.status.voltage_dV) / 100;
+  if (acsnap == AcSnap::DONE) {
+    return -1;  // the cell-max taper stops charge at SNAP_AC_TRIGGER_MV
+  }
+  if (acsnap == AcSnap::ARMED) {
+    // Approach: the limit so far at SNAP_AC_TAPER_MV, down to 1A at the trigger.
+    const int32_t vmax = datalayer.battery.status.cell_max_voltage_mV;
+    if (vmax < SNAP_AC_TAPER_MV || upstream_W <= one_amp_W) {
+      return -1;
+    }
+    return battery_linear_taper(vmax, SNAP_AC_TAPER_MV, SNAP_AC_TRIGGER_MV, upstream_W, one_amp_W);
+  }
+  if (acsnap_cut) {
+    return 0;
+  }
+  return one_amp_W;
+}
+
+// Once a second. A wake with a high cell blocks the attempt until the cells have been low for a
+// while (see SNAP_AC_WAKE_MV). A BMS that was already closed when we first heard it (we
+// rebooted under it) isn't a wake we saw, so it doesn't block.
+void Mg4Battery::acsnap_wake_tick(unsigned long now_ms) {
+  if (acsnap_wake_watch && now_ms - acsnap_wake_start_ms >= (unsigned long)SNAP_AC_WAKE_WINDOW_MS) {
+    acsnap_wake_watch = false;
+    if (acsnap_wake_high && acsnap_wake_state != 7) {
+      if (!acsnap_wake_blocked) {
+        logging.printf("[MG4] AC snap blocked: the BMS woke with a cell at or above %d mV\n", SNAP_AC_WAKE_MV);
+      }
+      acsnap_wake_blocked = true;
+      acsnap_wake_low_s = 0;
+    }
+  }
+  if (!acsnap_wake_blocked || acsnap_wake_watch) {
+    return;
+  }
+  if (cell_voltage_freshness > 0 && datalayer.battery.status.cell_max_voltage_mV < SNAP_AC_WAKE_MV) {
+    if (++acsnap_wake_low_s >= SNAP_AC_WAKE_CLEAR_S) {
+      acsnap_wake_blocked = false;
+      logging.printf("[MG4] AC snap unblocked: cells below %d mV for %ds\n", SNAP_AC_WAKE_MV, SNAP_AC_WAKE_CLEAR_S);
+    }
+  } else {
+    acsnap_wake_low_s = 0;
+  }
+}
+
+void Mg4Battery::acsnap_tick() {
+  acsnap_wake_tick(last_tick_ms);
+  if (datalayer.battery.info.chemistry != battery_chemistry_enum::LFP || cell_voltage_freshness <= 0 ||
+      soc_freshness <= 0) {
+    if (acsnap == AcSnap::SWITCHING) {
+      logging.printf("[MG4] AC snap: BMS data stale, back to drive\n");
+      acsnap_set(AcSnap::COOLDOWN);
+    }
+    return;
+  }
+  const int32_t vmax = datalayer.battery.status.cell_max_voltage_mV;
+  const uint16_t soc = bms_soc_centipercent;
+  const bool closed = contactorState == ContactorState::CLOSED && pack_contactors.isClosed();
+  acsnap_iso_ok_s = acsnap_iso_ok() ? acsnap_iso_ok_s + 1 : 0;
+  if (vmax >= SNAP_AC_HOLD_MAX_MV) {
+    acsnap_cut = true;
+  } else if (vmax < SNAP_AC_RESUME_MV) {
+    acsnap_cut = false;
+  }
+  acsnap_state_s++;
+
+  // A failed attempt: retry from drive after a while, or give up.
+  auto failed = [&](const char* why) {
+    if (acsnap_tries >= SNAP_AC_MAX_TRIES) {
+      acsnap_finish("gave up after %u attempts: %s", acsnap_tries, why);
+    } else {
+      logging.printf("[MG4] AC snap attempt %u failed: %s; retrying in %ds\n", acsnap_tries, why, SNAP_AC_RETRY_S);
+      acsnap_set(AcSnap::COOLDOWN);
+    }
+  };
+
+  switch (acsnap) {
+    case AcSnap::ARMED:
+      if (vmax >= SNAP_AC_TRIGGER_MV) {
+        acsnap_tries = 0;
+        acsnap_result[0] = 0;
+        if (soc >= SNAP_AC_FULL_SOC_CP) {
+          acsnap_finish("skipped: BMS already at %u.%02u%%", soc / 100, soc % 100);
+          break;
+        }
+        if (acsnap_wake_blocked) {
+          // Our block only lifts below SNAP_AC_WAKE_MV, under the SNAP_RESET_MV re-arm, so an
+          // attempt can't succeed before this charge ends. DONE still stops charge at the trigger.
+          acsnap_finish("not possible this charge: the BMS woke with a cell at or above %d mV", SNAP_AC_WAKE_MV);
+          break;
+        }
+        logging.printf("[MG4] AC snap: cell max %ld mV, holding 1A (BMS SoC %u.%02u%%)\n", (long)vmax, soc / 100,
+                       soc % 100);
+        acsnap_set(AcSnap::WAIT);
+      }
+      break;
+    case AcSnap::WAIT:
+    case AcSnap::COOLDOWN:
+      if (vmax < SNAP_RESET_MV) {
+        logging.printf("[MG4] AC snap: cells fell below %d mV, re-armed\n", SNAP_RESET_MV);
+        acsnap_set(AcSnap::ARMED);
+        break;
+      }
+      if (acsnap_wake_blocked) {
+        // The BMS woke (or restarted) with a high cell while we were waiting.
+        acsnap_finish("stopped: the BMS woke with a cell at or above %d mV", SNAP_AC_WAKE_MV);
+        break;
+      }
+      if (acsnap == AcSnap::COOLDOWN) {
+        if (acsnap_state_s >= SNAP_AC_RETRY_S) {
+          acsnap_set(AcSnap::WAIT);
+        }
+        break;
+      }
+      if (acsnap_state_s >= SNAP_AC_WAIT_MAX_S) {
+        acsnap_finish("gave up: no switch within %d min", SNAP_AC_WAIT_MAX_S / 60);
+        break;
+      }
+      if (soc >= SNAP_AC_FULL_SOC_CP) {
+        acsnap_finish("skipped: BMS reached %u.%02u%% at 1A", soc / 100, soc % 100);
+        break;
+      }
+      if (closed && bms_driving() && acsnap_state_s > SNAP_AC_SETTLE_S && vmax >= SNAP_AC_TRIGGER_MV &&
+          acsnap_iso_ok_s >= SNAP_AC_ISO_OK_S && datalayer.battery.status.current_dA <= SNAP_AC_MAX_MEASURED_DA) {
+        acsnap_tries++;
+        acsnap_soc_at_switch = soc;
+        acsnap_switch_tick = mg4_seq_tick;
+        acsnap_saw_ac_pn = false;
+        logging.printf(
+            "[MG4] AC snap attempt %u: switching to AC charge (cell max %ld mV, isolation %lu kOhm, "
+            "SoC %u.%02u%%)\n",
+            acsnap_tries, (long)vmax, (unsigned long)iso_bcast_raw * ISO_OHMS_PER_COUNT / 1000, soc / 100, soc % 100);
+        acsnap_set(AcSnap::SWITCHING);
+      }
+      break;
+    case AcSnap::SWITCHING:
+      if (bms_pn_received && bms_pn == 0x13 && !acsnap_saw_ac_pn) {
+        acsnap_saw_ac_pn = true;
+        logging.printf("[MG4] AC snap: BMS reports AC charge (PN 13) %lds after the switch\n", (long)acsnap_state_s);
+      }
+      if (!closed) {
+        acsnap_finish("stopped: contactors no longer closed");
+      } else if (!acsnap_iso_ok()) {
+        failed("isolation below 500 kOhm or invalid");
+      } else if (soc >= acsnap_soc_at_switch + SNAP_AC_SOC_RISE_CP) {
+        logging.printf("[MG4] AC snap: charge complete after %lds (SoC %u.%02u -> %u.%02u%%), back to drive\n",
+                       (long)acsnap_state_s, acsnap_soc_at_switch / 100, acsnap_soc_at_switch % 100, soc / 100,
+                       soc % 100);
+        acsnap_set(AcSnap::RETURNING);
+      } else if (acsnap_state_s >= SNAP_AC_TIMEOUT_S) {
+        if (acsnap_saw_ac_pn) {
+          failed("no charge complete in AC mode");
+        } else {
+          static char why[64];
+          snprintf(why, sizeof(why), "BMS never reported AC charge (PN %02X)", bms_pn);
+          failed(why);
+        }
+      }
+      break;
+    case AcSnap::RETURNING:
+      // Success needs both the SoC and the BMS back in drive (PN 0x01 takes ~10s).
+      if (soc >= SNAP_AC_DONE_SOC_CP && bms_driving()) {
+        acsnap_finish("succeeded on attempt %u: BMS SoC %u.%02u%% (was %u.%02u%%), back in drive after %lds",
+                      acsnap_tries, soc / 100, soc % 100, acsnap_soc_at_switch / 100, acsnap_soc_at_switch % 100,
+                      (long)acsnap_state_s);
+      } else if (acsnap_state_s >= SNAP_AC_RETURN_S) {
+        if (soc >= SNAP_AC_DONE_SOC_CP) {
+          // The snap happened; the mode problem is reported by the mismatch check below.
+          acsnap_finish("SoC reset to %u.%02u%%, but the BMS is not back in drive (%s, PN %02X)", soc / 100, soc % 100,
+                        bms_mode_label(), bms_pn);
+        } else {
+          failed("SoC didn't reach 100% back in drive");
+        }
+      }
+      break;
+    case AcSnap::DONE:
+      if (vmax < SNAP_RESET_MV) {
+        logging.printf("[MG4] AC snap: cells fell below %d mV, re-armed\n", SNAP_RESET_MV);
+        acsnap_set(AcSnap::ARMED);
+      }
+      break;
+  }
+
+  // We send drive frames in every state but SWITCHING: the BMS should report PN 0x01 while closed.
+  if (closed && !acsnap_ac_frames() && bms_charging()) {
+    if (++acsnap_mode_mismatch_s == SNAP_AC_MODE_WARN_S) {
+      logging.printf("[MG4] AC snap: BMS still reports %s (PN %02X) %ds after the drive frames resumed\n",
+                     bms_mode_label(), bms_pn, SNAP_AC_MODE_WARN_S);
+    }
+  } else {
+    if (acsnap_mode_mismatch_s >= SNAP_AC_MODE_WARN_S) {
+      logging.printf("[MG4] AC snap: BMS back in %s after %lds\n", bms_mode_label(), (long)acsnap_mode_mismatch_s);
+    }
+    acsnap_mode_mismatch_s = 0;
+  }
+}
+
+void Mg4Battery::render_acsnap_html(String& html) {
+  char buf[ACSNAP_HTML_BUDGET];
+  snprintf(buf, sizeof(buf), "AC-switch SoC snap: %s%s (attempts %u)%s%s", acsnap_label(),
+           acsnap_wake_blocked ? ", blocked by a high-cell wake" : "", acsnap_tries,
+           acsnap_result[0] ? "<br>Last: " : "", acsnap_result);
+  html += buf;
+}
+
 uint32_t Mg4Battery::calculate_max_discharge_power_W() {
   // Fail-closed: no fresh cell voltages, temperatures or BMS limits means we
   // cannot prove the pack is safe, so allow no power. This also covers the
@@ -411,13 +655,24 @@ uint32_t Mg4Battery::calculate_max_charge_power_W() {
     if (snap_clamping) {
       cell_power_W = snap_clamp_power_W();
     } else {
-      const int32_t cell_max_limit_mV = (lfp && snapEnded) ? SNAP_ABSORB_MV : working_cell_max_mV;
+      int32_t cell_max_limit_mV = (lfp && snapEnded) ? SNAP_ABSORB_MV : working_cell_max_mV;
+      if (SNAP_VIA_AC_SWITCH && lfp && acsnap == AcSnap::DONE) {
+        cell_max_limit_mV = SNAP_AC_TRIGGER_MV;
+      }
       cell_power_W = battery_charge_power_by_cell_max(datalayer.battery.status.cell_max_voltage_mV, cell_max_limit_mV,
                                                       CHARGE_TAPER_MV, CHARGE_HYSTERESIS_MV, MAX_CHARGE_POWER_W,
                                                       &voltageAtCellMax);
     }
     if (cell_power_W < max_charge_power_W) {
       max_charge_power_W = cell_power_W;
+    }
+  }
+
+  // The AC-switch snap's 1A clamp (0 above its hold band).
+  if (SNAP_VIA_AC_SWITCH && lfp) {
+    const int32_t snap_W = acsnap_limit_W(max_charge_power_W);
+    if (snap_W >= 0 && snap_W < max_charge_power_W) {
+      max_charge_power_W = snap_W;
     }
   }
 
@@ -506,7 +761,14 @@ void Mg4Battery::
     bms_limit_freshness--;
   }
 
-  snap_tick();
+  if (iso_freshness > 0) {
+    iso_freshness--;
+  }
+  if (SNAP_VIA_AC_SWITCH) {
+    acsnap_tick();
+  } else {
+    snap_tick();
+  }
   if (soc_freshness > 0) {
     update_soc(snap_should_force_soc() ? 10000 : bms_soc_centipercent);
   }
@@ -558,6 +820,15 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
   switch (rx_frame.ID) {
     case 0x12C:
       datalayer.battery.status.CAN_battery_still_alive = CAN_STILL_ALIVE;
+      // The BMS starting to talk (first frame, or after a silence) may be a wake: watch the cells.
+      if (!acsnap_bms_seen || last_tick_ms - acsnap_last_12c_ms > SLEEP_SILENT_MS) {
+        acsnap_wake_watch = true;
+        acsnap_wake_start_ms = last_tick_ms;
+        acsnap_wake_high = false;
+        acsnap_wake_state = 0xFF;
+      }
+      acsnap_bms_seen = true;
+      acsnap_last_12c_ms = last_tick_ms;
 
       datalayer.battery.status.voltage_dV = (((rx_frame.data.u8[8] << 4) | (rx_frame.data.u8[9] >> 4)) * 5) / 2;
       current_raw = ((rx_frame.data.u8[6] << 8) | rx_frame.data.u8[7]);
@@ -576,6 +847,9 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
           datalayer.battery.status.cell_min_voltage_mV = cell_min_raw / 8;
           datalayer.battery.status.cell_max_voltage_mV = cell_max_raw / 8;
           cell_voltage_freshness = 10;
+          if (acsnap_wake_watch && datalayer.battery.status.cell_max_voltage_mV >= SNAP_AC_WAKE_MV) {
+            acsnap_wake_high = true;
+          }
         }
       }
 
@@ -693,6 +967,9 @@ void Mg4Battery::handle_incoming_can_frame(CAN_frame rx_frame) {
         logging.printf("[MG4] Precharge/contactor state changed to %d\n", pack_contactors.state);
       }
       pack_contactors.received = true;
+      if (acsnap_wake_watch && acsnap_wake_state == 0xFF) {
+        acsnap_wake_state = pack_contactors.state;
+      }
 
       // Reflect the pack's own contactor state on the main BE page.
       datalayer.system.status.contactors_engaged = pack_contactors.contactsEngaged();
@@ -802,6 +1079,7 @@ void Mg4Battery::record_isolation(uint16_t v) {
   iso_bcast_received = true;
   iso_bcast_valid = !(v & 0x4000);
   iso_bcast_raw = v & 0x3FFF;
+  iso_freshness = 5;
   if (!iso_bcast_valid || !pack_contactors.received) {
     return;
   }
@@ -994,11 +1272,17 @@ void Mg4Battery::update_313_314() {
     hi314 = seq_314_hi(slow_elapsed);
   }
 
-  if (DRIVE_MODE_FRAMES) {
+  bool ac_frames = !DRIVE_MODE_FRAMES;
+  if (acsnap_ac_frames()) {
+    // The AC-switch snap: the AC charge values with the car's close status sequence.
+    const uint32_t t = tick_after - acsnap_switch_tick;
+    stat = t < SNAP_AC_STAT3_T ? 0x01 : t < SNAP_AC_STAT5_T ? 0x03 : 0x05;
+    ac_frames = true;
+  } else if (DRIVE_MODE_FRAMES) {
     stat = 0x01;  // the driving car's value; 3/5 (and b5 = 0xF2) mean AC charge
   }
   f13[5] = seq_cnt15(slow_abs, 0xF0, SEQ_SLOW_CNT_PHASE);
-  f13[9] = DRIVE_MODE_FRAMES ? 0xF0 : 0xF2;
+  f13[9] = ac_frames ? 0xF2 : 0xF0;
   f13[10] = stat;
   f13[4] = mg4_crc8(&f13[5]);
 
@@ -1602,7 +1886,7 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
       update_047_08a();
       transmit_can_frame(&MG4_047_FD);
       transmit_can_frame(&MG4_08A_FD);
-      if (DRIVE_MODE_FRAMES && (mg4_seq_tick & 1) == 0) {
+      if (DRIVE_MODE_FRAMES && !acsnap_ac_frames() && (mg4_seq_tick & 1) == 0) {
         update_169();
         transmit_can_frame(&MG4_169_FD);
       }
@@ -1805,14 +2089,18 @@ String Mg4Battery::get_uds_info_html() {
   // comma) and the balancing listing.
   String html;
   html.reserve(1024 + SUMMARY_HTML_BUDGET + SLEEP_HTML_BUDGET + MODE_HTML_BUDGET + iso_history_count * 9 +
-               BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET);
+               BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET + ACSNAP_HTML_BUDGET);
 
   render_summary_html(html);
   render_sleep_html(html);
 
   html += "<h3>Pack details</h3>";
-  html += "Snap attempt active: ";
-  html += snapEnded ? "NO" : "YES";
+  if (SNAP_VIA_AC_SWITCH) {
+    render_acsnap_html(html);
+  } else {
+    html += "Snap attempt active: ";
+    html += snapEnded ? "NO" : "YES";
+  }
   html += "<br>Isolation resistance: ";
   if (!iso_bcast_received) {
     html += "N/A";
