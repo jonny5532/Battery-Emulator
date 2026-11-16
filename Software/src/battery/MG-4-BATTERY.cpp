@@ -362,8 +362,11 @@ void Mg4Battery::acsnap_finish(const char* fmt, ...) {
   acsnap_set(AcSnap::DONE);
 }
 
-bool Mg4Battery::acsnap_iso_ok() const {
-  return iso_freshness > 0 && iso_bcast_valid && (uint32_t)iso_bcast_raw * ISO_OHMS_PER_COUNT >= SNAP_AC_MIN_ISO_OHMS;
+bool Mg4Battery::acsnap_iso_ready() const {
+  if (iso_freshness <= 0 || !iso_bcast_valid || iso_bcast_raw < SNAP_AC_ISO_BAD_BELOW) {
+    return false;
+  }
+  return !SNAP_AC_ISO_CONFIRM || iso_good_in_cycle >= 2;
 }
 
 int32_t Mg4Battery::acsnap_limit_W(int32_t upstream_W) const {
@@ -425,7 +428,6 @@ void Mg4Battery::acsnap_tick() {
   const int32_t vmax = datalayer.battery.status.cell_max_voltage_mV;
   const uint16_t soc = bms_soc_centipercent;
   const bool closed = contactorState == ContactorState::CLOSED && pack_contactors.isClosed();
-  acsnap_iso_ok_s = acsnap_iso_ok() ? acsnap_iso_ok_s + 1 : 0;
   if (vmax >= SNAP_AC_HOLD_MAX_MV) {
     acsnap_cut = true;
   } else if (vmax < SNAP_AC_RESUME_MV) {
@@ -490,15 +492,19 @@ void Mg4Battery::acsnap_tick() {
         break;
       }
       if (closed && bms_driving() && acsnap_state_s > SNAP_AC_SETTLE_S && vmax >= SNAP_AC_TRIGGER_MV &&
-          acsnap_iso_ok_s >= SNAP_AC_ISO_OK_S && datalayer.battery.status.current_dA <= SNAP_AC_MAX_MEASURED_DA) {
+          acsnap_iso_ready() && datalayer.battery.status.current_dA <= SNAP_AC_MAX_MEASURED_DA) {
         acsnap_tries++;
+        acsnap_iso_bad = false;
+        acsnap_iso_window_logged = false;
+        acsnap_abort_reason = nullptr;
         acsnap_soc_at_switch = soc;
         acsnap_switch_tick = mg4_seq_tick;
         acsnap_saw_ac_pn = false;
         logging.printf(
-            "[MG4] AC snap attempt %u: switching to AC charge (cell max %ld mV, isolation %lu kOhm, "
+            "[MG4] AC snap attempt %u: switching to AC charge (cell max %ld mV, isolation %s%lu kOhm, "
             "SoC %u.%02u%%)\n",
-            acsnap_tries, (long)vmax, (unsigned long)iso_bcast_raw * ISO_OHMS_PER_COUNT / 1000, soc / 100, soc % 100);
+            acsnap_tries, (long)vmax, iso_bcast_raw == 0x3FFF ? ">= " : "",
+            (unsigned long)iso_bcast_raw * ISO_OHMS_PER_COUNT / 1000, soc / 100, soc % 100);
         acsnap_set(AcSnap::SWITCHING);
       }
       break;
@@ -507,10 +513,24 @@ void Mg4Battery::acsnap_tick() {
         acsnap_saw_ac_pn = true;
         logging.printf("[MG4] AC snap: BMS reports AC charge (PN 13) %lds after the switch\n", (long)acsnap_state_s);
       }
+      if (!acsnap_iso_window_logged && acsnap_state_s >= SNAP_AC_ISO_WINDOW_S && !acsnap_iso_bad) {
+        acsnap_iso_window_logged = true;
+        logging.printf("[MG4] AC snap: %ds isolation window passed with no low reading\n", SNAP_AC_ISO_WINDOW_S);
+      }
       if (!closed) {
         acsnap_finish("stopped: contactors no longer closed");
-      } else if (!acsnap_iso_ok()) {
-        failed("isolation below 500 kOhm or invalid");
+      } else if (acsnap_iso_bad || iso_freshness <= 0) {
+        // The BMS leaves AC charge on its own low reading. Back to drive; RETURNING then tells a
+        // snap that had already happened (charge complete before the low reading) from a failure.
+        if (acsnap_iso_bad) {
+          logging.printf("[MG4] AC snap: low isolation reading %lu kOhm %lds after the switch, back to drive\n",
+                         (unsigned long)acsnap_iso_bad_raw * ISO_OHMS_PER_COUNT / 1000, (long)acsnap_state_s);
+          acsnap_abort_reason = "low isolation reading in AC mode";
+        } else {
+          logging.printf("[MG4] AC snap: no isolation broadcast, back to drive\n");
+          acsnap_abort_reason = "isolation broadcast lost in AC mode";
+        }
+        acsnap_set(AcSnap::RETURNING);
       } else if (soc >= acsnap_soc_at_switch + SNAP_AC_SOC_RISE_CP) {
         logging.printf("[MG4] AC snap: charge complete after %lds (SoC %u.%02u -> %u.%02u%%), back to drive\n",
                        (long)acsnap_state_s, acsnap_soc_at_switch / 100, acsnap_soc_at_switch % 100, soc / 100,
@@ -532,13 +552,16 @@ void Mg4Battery::acsnap_tick() {
         acsnap_finish("succeeded on attempt %u: BMS SoC %u.%02u%% (was %u.%02u%%), back in drive after %lds",
                       acsnap_tries, soc / 100, soc % 100, acsnap_soc_at_switch / 100, acsnap_soc_at_switch % 100,
                       (long)acsnap_state_s);
+      } else if (bms_driving() && soc < SNAP_AC_DONE_SOC_CP) {
+        // Back in drive the SoC is final (leaving AC charge completes any ramp at once).
+        failed(acsnap_abort_reason ? acsnap_abort_reason : "SoC didn't reach 100% back in drive");
       } else if (acsnap_state_s >= SNAP_AC_RETURN_S) {
         if (soc >= SNAP_AC_DONE_SOC_CP) {
           // The snap happened; the mode problem is reported by the mismatch check below.
           acsnap_finish("SoC reset to %u.%02u%%, but the BMS is not back in drive (%s, PN %02X)", soc / 100, soc % 100,
                         bms_mode_label(), bms_pn);
         } else {
-          failed("SoC didn't reach 100% back in drive");
+          failed(acsnap_abort_reason ? acsnap_abort_reason : "SoC didn't reach 100% back in drive");
         }
       }
       break;
@@ -1080,6 +1103,21 @@ void Mg4Battery::record_isolation(uint16_t v) {
   iso_bcast_valid = !(v & 0x4000);
   iso_bcast_raw = v & 0x3FFF;
   iso_freshness = 5;
+  // AC snap: classify every frame. Bit 14 = no result (neutral), else good from
+  // SNAP_AC_ISO_BAD_BELOW counts up (0x3FFF = full scale), bad below.
+  const bool new_reading = v != iso_prev_raw;
+  iso_prev_raw = v;
+  if (!iso_bcast_valid) {
+    iso_good_in_cycle = 0;
+  } else if (iso_bcast_raw < SNAP_AC_ISO_BAD_BELOW) {
+    iso_good_in_cycle = 0;
+    if (acsnap == AcSnap::SWITCHING && !acsnap_iso_bad) {
+      acsnap_iso_bad = true;
+      acsnap_iso_bad_raw = iso_bcast_raw;
+    }
+  } else if (new_reading && iso_good_in_cycle < 255) {
+    iso_good_in_cycle++;
+  }
   if (!iso_bcast_valid || !pack_contactors.received) {
     return;
   }

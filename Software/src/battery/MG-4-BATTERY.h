@@ -308,9 +308,15 @@ class Mg4Battery : public UdsCanBattery {
   // - Runs at the top of every charge, also as a safety net: from SNAP_AC_TAPER_MV the charge
   //   limit tapers linearly to SNAP_AC_DA at SNAP_AC_TRIGGER_MV, then holds SNAP_AC_DA.
   // - After SNAP_AC_SETTLE_S at that current (the cells drop back as the charge current falls),
-  //   wait for cell max >= SNAP_AC_TRIGGER_MV again, with the isolation broadcast
-  //   valid and >= SNAP_AC_MIN_ISO_OHMS for SNAP_AC_ISO_OK_S without a break (the BMS drops out of
-  //   AC charge within 40ms of its own < 270k isolation fault).
+  //   wait for cell max >= SNAP_AC_TRIGGER_MV again, then switch on a good isolation reading.
+  // - Isolation (0x30B PDU 0x519, every 100ms): the BMS cycles a measured value (~7-12s), 0x3FFF
+  //   (>= 8.19M, ~12s) and 0x7FFF (no result while measuring, ~26-32s). Each frame is classed as
+  //   good (0x3FFF or >= SNAP_AC_ISO_BAD_BELOW counts), bad (< SNAP_AC_ISO_BAD_BELOW: the BMS's own
+  //   270k P1EB2 threshold, which drops it out of AC charge within 40ms) or neutral (bit 14 set).
+  //   The switch starts on a good reading (with SNAP_AC_ISO_CONFIRM, only on the second good
+  //   reading of a cycle), so the ~32s to charge complete falls in a SNAP_AC_ISO_WINDOW_S window
+  //   that only a bad reading can spoil. Low readings come from the inverter and are effectively
+  //   independent between cycles, so waiting for a run of good cycles doesn't help.
   // - Switch to the AC frames. Hold SNAP_AC_DA, cut to 0 at SNAP_AC_HOLD_MAX_MV (resume below
   //   SNAP_AC_RESUME_MV), until the BMS SoC rises SNAP_AC_SOC_RISE_CP above its value at the
   //   switch (the post-charge-complete ramp), then switch straight back to drive.
@@ -336,8 +342,12 @@ class Mg4Battery : public UdsCanBattery {
   static constexpr int32_t SNAP_AC_RESUME_MV = 3650;
   static constexpr int32_t SNAP_AC_DA = 10;               // 1A
   static constexpr int16_t SNAP_AC_MAX_MEASURED_DA = 30;  // don't switch while drawing more than 3A
-  static constexpr uint32_t SNAP_AC_MIN_ISO_OHMS = 500000;
-  static constexpr int32_t SNAP_AC_ISO_OK_S = 10;
+  static constexpr uint16_t SNAP_AC_ISO_BAD_BELOW = 540;  // counts of 500 ohm: 270 kOhm
+  static constexpr int32_t SNAP_AC_ISO_WINDOW_S = 35;
+  // Start only on the second good reading of a cycle (a good value out of 0x7FFF, then another
+  // good value with no 0x7FFF between): fewer aborts (bench ~2.4% vs ~3%) but longer waits
+  // (typical ~100s vs ~60s).
+  static constexpr bool SNAP_AC_ISO_CONFIRM = false;
   static constexpr int32_t SNAP_AC_WAIT_MAX_S = 30 * 60;  // give up waiting for the cells at 1A
   static constexpr int32_t SNAP_AC_SETTLE_S = 30;         // at 1A before the cells count again
   // In AC mode: the BMS fires charge complete ~32s after the switch at the earliest, and its SoC
@@ -348,7 +358,7 @@ class Mg4Battery : public UdsCanBattery {
   // Warn if the BMS still reports a charge PN this long after we went back to the drive frames.
   static constexpr int32_t SNAP_AC_MODE_WARN_S = 30;
   static constexpr int32_t SNAP_AC_RETRY_S = 60;
-  static constexpr uint8_t SNAP_AC_MAX_TRIES = 3;
+  static constexpr uint8_t SNAP_AC_MAX_TRIES = 10;     // ~2 min per failed attempt
   static constexpr uint16_t SNAP_AC_SOC_RISE_CP = 20;  // 0.2%: 1A adds ~0.02%/min
   static constexpr uint16_t SNAP_AC_DONE_SOC_CP = 9950;
   static constexpr uint16_t SNAP_AC_FULL_SOC_CP = 10000 - SNAP_AC_SOC_RISE_CP;
@@ -370,7 +380,13 @@ class Mg4Battery : public UdsCanBattery {
   };
   AcSnap acsnap = AcSnap::ARMED;
   int32_t acsnap_state_s = 0;  // seconds in the current state
-  int32_t acsnap_iso_ok_s = 0;
+  // Isolation readings, classified per frame in record_isolation().
+  uint16_t iso_prev_raw = 0xFFFF;  // last raw 0x519 value, to spot a new reading
+  uint8_t iso_good_in_cycle = 0;   // distinct good readings since the last 0x7FFF / bad one
+  bool acsnap_iso_bad = false;     // a bad reading arrived since the switch
+  uint16_t acsnap_iso_bad_raw = 0;
+  bool acsnap_iso_window_logged = false;
+  const char* acsnap_abort_reason = nullptr;  // why SWITCHING went back to drive early
   uint8_t acsnap_tries = 0;
   uint16_t acsnap_soc_at_switch = 0;
   uint32_t acsnap_switch_tick = 0;  // mg4_seq_tick when the AC frames started
@@ -397,7 +413,7 @@ class Mg4Battery : public UdsCanBattery {
   void acsnap_set(AcSnap next);
   void acsnap_finish(const char* fmt, ...);
   void acsnap_wake_tick(unsigned long now_ms);
-  bool acsnap_iso_ok() const;
+  bool acsnap_iso_ready() const;                     // the latest reading may start the window
   int32_t acsnap_limit_W(int32_t upstream_W) const;  // upstream_W: the limit so far; < 0: no clamp
   const char* acsnap_label() const;
   void render_acsnap_html(String& html);
