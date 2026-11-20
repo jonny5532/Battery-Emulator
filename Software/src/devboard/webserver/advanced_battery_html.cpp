@@ -65,6 +65,12 @@ std::vector<BatteryCommand> battery_commands = {
     {"stopBalanceCycle", "Stop balance cycle", "stop the balance cycle and return to normal operation?",
      [](Battery* b) { return b && b->supports_balance_cycle() && b->is_balance_cycle_active(); },
      [](Battery* b) { b->request_balance_stop(); }, true},
+    {"relearnCellSoc", "Re-learn cell SoC",
+     "re-learn the per-cell SoCs from the cell voltages? Use it with the pack at rest (0 A, ideally 30+ minutes "
+     "after charging) and the top cells between about 3.36 and 3.42 V. Straight after a charge every cell reads "
+     "100% and no spread is learnt; on the flat part of the curve (3.30-3.34 V) the spread is overstated.",
+     [](Battery* b) { return b && b->supports_cell_soc_relearn() && !b->is_cell_soc_relearn_active(); },
+     [](Battery* b) { b->request_cell_soc_relearn(); }, true},
     {"isolationTest", "Isolation Test", "start an isolation test?",
      [](Battery* b) { return b && b->supports_isolation_test(); }, [](Battery* b) { b->request_isolation_test(); }},
     {"readDTC", "Read DTC", nullptr, [](Battery* b) { return b && b->supports_read_DTC(); },

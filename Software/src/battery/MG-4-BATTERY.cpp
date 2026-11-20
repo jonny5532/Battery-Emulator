@@ -1954,6 +1954,7 @@ void Mg4Battery::transmit_can(unsigned long currentMillis) {
     }
   }
 
+  relearn_tick(currentMillis);
   if (contactorState != ContactorState::SLEEPING) {
     // UDS polling pauses while sleeping; anything in
     // flight just times out once it resumes.
@@ -2127,7 +2128,7 @@ String Mg4Battery::get_uds_info_html() {
   // comma) and the balancing listing.
   String html;
   html.reserve(1024 + SUMMARY_HTML_BUDGET + SLEEP_HTML_BUDGET + MODE_HTML_BUDGET + iso_history_count * 9 +
-               BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET + ACSNAP_HTML_BUDGET);
+               BAL_HTML_BUDGET + BAL_STATUS_HTML_BUDGET + ACSNAP_HTML_BUDGET + RELEARN_HTML_BUDGET);
 
   render_summary_html(html);
   render_sleep_html(html);
@@ -2218,6 +2219,7 @@ void Mg4Battery::render_summary_html(String& html) {
   html += "<br>";
   render_sleep_rest_html(html);
   render_cell_soc_spread_html(html);
+  render_relearn_html(html);
   html += "Lowest isolation resistance, contactors open: ";
   append_iso_min(iso_min_open_raw);
   html += "<br>Lowest isolation resistance, contactors closed: ";
@@ -2512,6 +2514,151 @@ void Mg4Battery::render_cell_soc_spread_html(String& html) {
     html += "&gt;= 1% (enough for top-of-charge balancing)";
   } else {
     html += "0-2% (whole-% values: can't tell if it is &gt;= 1%)";
+  }
+  html += "<br>";
+}
+
+// ---- Per-cell SoC re-learn (DID 0xB094) ----
+
+// What the BMS will learn from these cell voltages, or nullptr if they are
+// in the useful window. Assumes rested cells (OCV).
+const char* Mg4Battery::relearn_hint(uint16_t max_mV, uint16_t min_mV) const {
+  if (min_mV >= RELEARN_OCV_FULL_MV) {
+    return "every cell is at or above 3.419 V and reads 100%, so no spread is learnt (let the cells rest)";
+  }
+  if (min_mV <= RELEARN_PLATEAU_TOP_MV) {
+    return "the lowest cell is on the flat part of the OCV curve, so the spread is overstated";
+  }
+  if (max_mV >= RELEARN_OCV_FULL_MV) {
+    return "the highest cell reads 100% (at or above 3.419 V), so the spread may be understated";
+  }
+  return nullptr;
+}
+
+void Mg4Battery::relearn_finish(bool ok, const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(relearn_result, sizeof(relearn_result), fmt, args);
+  va_end(args);
+  relearn_state = ok ? Relearn::DONE : Relearn::FAILED;
+  relearn_at_ms = last_tick_ms;
+  logging.printf("[MG4] Cell SoC re-learn %s: %s\n", ok ? "done" : "not done", relearn_result);
+}
+
+// Runs on the CAN task: checks the request against the pack state and starts
+// the UDS sequence.
+void Mg4Battery::relearn_tick(unsigned long now_ms) {
+  if (!relearn_requested) {
+    return;
+  }
+  relearn_requested = false;
+  if (relearn_state == Relearn::RUNNING) {
+    return;
+  }
+  const uint16_t max_mV = datalayer.battery.status.cell_max_voltage_mV;
+  const uint16_t min_mV = datalayer.battery.status.cell_min_voltage_mV;
+  if (is_sleeping() || contactorState == ContactorState::WAKING || contactorState == ContactorState::WAITING_FOR_PACK) {
+    relearn_finish(false, "the BMS is not awake");
+    return;
+  }
+  if (cell_voltage_freshness <= 0) {
+    relearn_finish(false, "no fresh cell voltages from the BMS");
+    return;
+  }
+  if (!shutdown_current_idle()) {
+    const int16_t dA = datalayer.battery.status.current_dA;
+    const unsigned abs_dA = (unsigned)(dA < 0 ? -dA : dA);
+    relearn_finish(false, "current is %s%u.%u A, the cells must be at rest (under 1 A)", dA < 0 ? "-" : "", abs_dA / 10,
+                   abs_dA % 10);
+    return;
+  }
+  if (max_mV >= RELEARN_MAX_CELL_MV || min_mV <= RELEARN_MIN_CELL_MV) {
+    relearn_finish(false, "cells must be between 1.5 and 3.65 V (now %u-%u mV)", (unsigned)min_mV, (unsigned)max_mV);
+    return;
+  }
+  if (!start_sequence(RELEARN_START)) {
+    relearn_finish(false, "another UDS request is queued, try again");
+    return;
+  }
+  relearn_state = Relearn::RUNNING;
+  relearn_at_ms = now_ms;
+  relearn_max_mV = max_mV;
+  relearn_min_mV = min_mV;
+  relearn_result[0] = 0;
+  logging.printf("[MG4] Cell SoC re-learn: sending (cells %u-%u mV)\n", (unsigned)min_mV, (unsigned)max_mV);
+}
+
+void Mg4Battery::on_uds_sequence_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len) {
+  static const uint8_t EXTENDED_SESSION[] = {0x03};
+  static const uint8_t WRITE[] = {RELEARN_DID >> 8, RELEARN_DID & 0xFF, 0x01, 0x00};
+  const uint8_t nrc = (sid == 0x7F && len >= 3) ? data[2] : 0;
+  switch (state) {
+    case RELEARN_START:
+      if (!send_sequence_message(RELEARN_SESSION, SID::DiagnosticSessionControl, EXTENDED_SESSION,
+                                 sizeof(EXTENDED_SESSION), RELEARN_SESSION_TIMEOUT, 2)) {
+        relearn_finish(false, "could not send the session request");
+      }
+      break;
+    case RELEARN_SESSION:
+      if (sid != 0x50) {
+        relearn_finish(false, "extended session refused (NRC %02X)", nrc);
+      } else if (!send_sequence_message(RELEARN_WRITE, SID::WriteDataByIdentifier, WRITE, sizeof(WRITE),
+                                        RELEARN_WRITE_TIMEOUT, 1)) {
+        relearn_finish(false, "could not send the write");
+      }
+      break;
+    case RELEARN_WRITE: {
+      const char* hint = relearn_hint(relearn_max_mV, relearn_min_mV);
+      if (sid == 0x6E) {
+        relearn_finish(true, "accepted at %u-%u mV%s%s", (unsigned)relearn_min_mV, (unsigned)relearn_max_mV,
+                       hint ? ": " : "", hint ? hint : "");
+      } else if (nrc == 0x33) {
+        relearn_finish(false, "security access denied (NRC 33), the unlock failed");
+      } else if (nrc == 0x22) {
+        relearn_finish(false, "conditions not correct (NRC 22)");
+      } else {
+        relearn_finish(false, "write refused (NRC %02X)", nrc);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+void Mg4Battery::on_uds_sequence_timeout(uint16_t state) {
+  if (state == RELEARN_SESSION || state == RELEARN_WRITE) {
+    relearn_finish(false, "no response from the BMS to the %s", state == RELEARN_SESSION ? "session request" : "write");
+  }
+}
+
+void Mg4Battery::render_relearn_html(String& html) {
+  char buf[64];
+  html += "Cell SoC re-learn: ";
+  switch (relearn_state) {
+    case Relearn::IDLE:
+      html += "not run since startup";
+      break;
+    case Relearn::RUNNING:
+      html += "running";
+      break;
+    case Relearn::DONE:
+    case Relearn::FAILED: {
+      const unsigned long ago_s = (last_tick_ms - relearn_at_ms) / 1000;
+      html += relearn_state == Relearn::DONE ? "done, " : "not done, ";
+      html += relearn_result;
+      snprintf(buf, sizeof(buf), " (%lu min ago)", ago_s / 60);
+      html += buf;
+      break;
+    }
+  }
+  if (relearn_state != Relearn::RUNNING && cell_voltage_freshness > 0) {
+    const char* hint =
+        relearn_hint(datalayer.battery.status.cell_max_voltage_mV, datalayer.battery.status.cell_min_voltage_mV);
+    if (hint) {
+      html += "<br>Re-learn now: ";
+      html += hint;
+    }
   }
   html += "<br>";
 }

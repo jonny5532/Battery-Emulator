@@ -135,6 +135,10 @@ class Battery {
   // is_balance_cycle_active() is true from the request until the cycle ends, and picks the button.
   virtual bool supports_balance_cycle() { return false; }
   virtual bool is_balance_cycle_active() { return false; }
+  // Ask the BMS to re-learn its per-cell SoCs from the (rested) cell voltages, so a real imbalance
+  // can show up as a SoC spread that triggers balancing. The result is shown on the battery's page.
+  virtual bool supports_cell_soc_relearn() { return false; }
+  virtual bool is_cell_soc_relearn_active() { return false; }
 
   virtual void request_isolation_test() {}
   virtual void clear_isolation() {}
@@ -164,6 +168,7 @@ class Battery {
   virtual void request_wake() {}
   virtual void request_balance_cycle() {}
   virtual void request_balance_stop() {}
+  virtual void request_cell_soc_relearn() {}
   virtual void end_balancing() {}
   virtual void handle_precharge() {}
   virtual void action(uint32_t action_id, uint32_t value) {}

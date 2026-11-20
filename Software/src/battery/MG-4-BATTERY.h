@@ -26,6 +26,10 @@ class Mg4Battery : public UdsCanBattery {
   bool is_balance_cycle_active() override { return balance_cycle_requested || bal_cycle != BalCycle::OFF; }
   void request_balance_cycle() override { balance_cycle_requested = true; }
   void request_balance_stop() override { balance_stop_requested = true; }
+  // Per-cell SoC re-learn (More battery info button): UDS write of DID 0xB094.
+  bool supports_cell_soc_relearn() override { return true; }
+  bool is_cell_soc_relearn_active() override { return relearn_requested || relearn_state == Relearn::RUNNING; }
+  void request_cell_soc_relearn() override { relearn_requested = true; }
   const char* get_dtc_json_filename() override { return "mg_dtc.json"; }
 
   // Contactor management state machine
@@ -193,6 +197,48 @@ class Mg4Battery : public UdsCanBattery {
   const char* bal_no_plan_hint() const;
   const char* bal_inhibit_hint() const;
   void render_bal_cycle_html(String& html);
+
+  // ---- Per-cell SoC re-learn (DID 0xB094) ----
+  // The BMS keeps each cell's SoC as the pack SoC plus a stored offset and
+  // never re-learns it from voltages by itself, so an imbalance can sit below
+  // the >= 1 % spread that top-of-charge balancing needs. Writing 01 00 to
+  // DID 0xB094 (extended session; 7F 2E 78, then 6E B0 94 ~1.2 s later) makes
+  // it look up the max and min cell in its 25 C OCV table and store those
+  // SoCs. It only takes cells between 1.5 and 3.65 V that move < 10 mV over 5
+  // samples. The table reads 100 % from 3.419 V (97 % 3.342, 99 % 3.362) and
+  // is flat at 3.339 V from 65 to 85 %, so the learnt spread is SoC(max) -
+  // SoC(min) on that curve: 0 when every cell is above ~3.42 V (straight after
+  // a charge), tens of % when the min cell is on the plateau. Best with rested
+  // cells, max ~3.36-3.42 V, min ~3.342-3.36 V. The learnt spread survives a
+  // sleep; balancing is decided at the next wake after a valid sleep.
+  enum Mg4UdsState : uint16_t {
+    RELEARN_START = 1,
+    RELEARN_SESSION,  // 10 03
+    RELEARN_WRITE,    // 2E B0 94 01 00
+  };
+  enum class Relearn : uint8_t { IDLE, RUNNING, DONE, FAILED };
+  static constexpr uint16_t RELEARN_DID = 0xB094;
+  static constexpr uint16_t RELEARN_MAX_CELL_MV = 3650;  // the BMS ignores cells at or above this
+  static constexpr uint16_t RELEARN_MIN_CELL_MV = 1500;
+  static constexpr uint16_t RELEARN_OCV_FULL_MV = 3419;     // reads 100 % from here up
+  static constexpr uint16_t RELEARN_PLATEAU_TOP_MV = 3342;  // 97 %; below it the curve is (nearly) flat
+  static constexpr uint16_t RELEARN_SESSION_TIMEOUT = 20;   // 100ms ticks
+  static constexpr uint16_t RELEARN_WRITE_TIMEOUT = 30;     // per 78 (response pending), 100ms ticks
+  // Set from the web task, consumed by relearn_tick().
+  bool relearn_requested = false;
+  Relearn relearn_state = Relearn::IDLE;
+  unsigned long relearn_at_ms = 0;  // when it was sent / finished
+  uint16_t relearn_max_mV = 0;      // cell max / min when it was sent
+  uint16_t relearn_min_mV = 0;
+  char relearn_result[160] = {0};
+
+  void relearn_tick(unsigned long now_ms);
+  void relearn_finish(bool ok, const char* fmt, ...);
+  const char* relearn_hint(uint16_t max_mV, uint16_t min_mV) const;
+  void render_relearn_html(String& html);
+  static constexpr uint32_t RELEARN_HTML_BUDGET = 400;
+  void on_uds_sequence_step(uint16_t state, uint8_t sid, const uint8_t* data, uint16_t len) override;
+  void on_uds_sequence_timeout(uint16_t state) override;
 
   // ---- BMS mode (drive vs charge), display only ----
   // 0x4E1 (BMS NM) b7 is the partial network: 0x01 default, 0x13 AC, 0x04 DC,
