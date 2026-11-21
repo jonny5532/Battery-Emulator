@@ -387,7 +387,7 @@ void BmwIXBattery::processCompletedUDSResponse() {
   } else if (gUDSContext.UDS_moduleID == 0xCA) {
     // Balancing Data (0x22 0xE4 0xCA -> 0x62 0xE4 0xCA)
     if (len >= 4) {
-      balancing_status = buf[3];
+      parse_balancing_payload(&buf[3], len - 3);
       logging.println("Balancing status updated");
     }
 
@@ -405,6 +405,7 @@ void BmwIXBattery::processCompletedUDSResponse() {
     // Uptime (0x22 0xE4 0xC0 -> 0x62 0xE4 0xC0)
     if (len >= 11) {
       sme_uptime = (buf[7] << 24) | (buf[8] << 16) | (buf[9] << 8) | buf[10];
+      parse_uptime_payload(&buf[3], len - 3);
       logging.println("SME uptime updated");
     }
 
@@ -476,6 +477,12 @@ void BmwIXBattery::update_values() {  //This function maps all the values fetche
 
   //Write actual allowed power to datalayer
   datalayer_battery->status.max_charge_power_W = max_charge_power_temp;
+
+  // No SME data while it sleeps or is still waking: allow no charge or discharge
+  if (is_sleep_cycle_active()) {
+    datalayer_battery->status.max_charge_power_W = 0;
+    datalayer_battery->status.max_discharge_power_W = 0;
+  }
 
   //Check stale values. As values dont change much during idle only consider stale if both parts of this message freeze.
   bool isMinCellVoltageStale =
@@ -575,10 +582,16 @@ void BmwIXBattery::update_values() {  //This function maps all the values fetche
       datalayer_battery->status.balancing_status = BALANCING_STATUS_UNKNOWN;
       break;
   }
+
+  evaluate_balancing_conditions();
 }
 
 void BmwIXBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
-  battery_awake = true;
+  if (!sme_responded) {
+    sme_first_rx_ms = millis();
+    sme_responded = true;
+    logging.println("SME responded, startup BMS reset in 2 s");
+  }
   switch (rx_frame.ID) {
     case 0x12B8D087:
       datalayer_battery->status.CAN_battery_still_alive = CAN_STILL_ALIVE;
@@ -650,7 +663,8 @@ void BmwIXBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       }
 
       if ((rx_frame.DLC == 64) && (rx_frame.data.u8[4] == 0xE4) && (rx_frame.data.u8[5] == 0xCA)) {  //Balancing Data
-        balancing_status = (rx_frame.data.u8[6]);  //4 = No symmetry mode active, invalid qualifier
+        //4 = No symmetry mode active, invalid qualifier (SME clock untrusted after an unclean shutdown)
+        parse_balancing_payload(&rx_frame.data.u8[6], rx_frame.DLC - 6);
       }
       if ((rx_frame.DLC >= 6) && (rx_frame.data.u8[2] == 0x62) && (rx_frame.data.u8[3] == 0x10) &&
           (rx_frame.data.u8[4] == 0x0A)) {
@@ -700,6 +714,7 @@ void BmwIXBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
           (rx_frame.data.u8[5] == 0xC0)) {  // Uptime and Vehicle Time Status
         sme_uptime = (rx_frame.data.u8[10] << 24) | (rx_frame.data.u8[11] << 16) | (rx_frame.data.u8[12] << 8) |
                      rx_frame.data.u8[13];  //Assuming 32bit
+        parse_uptime_payload(&rx_frame.data.u8[6], rx_frame.DLC - 6);
       }
 
       if ((rx_frame.DLC == 8) && (rx_frame.data.u8[3] == 0xAC) && (rx_frame.data.u8[4] == 0x93)) {  // Pyro Status
@@ -722,6 +737,12 @@ void BmwIXBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
         } else {  //Only ingest values if they are not the 10V Error state
           min_cell_voltage = (rx_frame.data.u8[6] << 8 | rx_frame.data.u8[7]);
           max_cell_voltage = (rx_frame.data.u8[8] << 8 | rx_frame.data.u8[9]);
+          cell_minmax_received = true;
+          vmin_history[vmin_history_pos] = min_cell_voltage;  // for the "Vmin stable" condition
+          vmin_history_pos = (vmin_history_pos + 1) % VMIN_HISTORY;
+          if (vmin_history_count < VMIN_HISTORY) {
+            vmin_history_count++;
+          }
         }
       }
 
@@ -730,6 +751,7 @@ void BmwIXBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
         min_battery_temperature = (int16_t)(rx_frame.data.u8[6] << 8 | rx_frame.data.u8[7]) / 10;
         avg_battery_temperature = (int16_t)(rx_frame.data.u8[10] << 8 | rx_frame.data.u8[11]) / 10;
         max_battery_temperature = (int16_t)(rx_frame.data.u8[8] << 8 | rx_frame.data.u8[9]) / 10;
+        temperature_received = true;
       }
       if ((rx_frame.DLC == 7) &&
           (rx_frame.data.u8[4] == 0xA3)) {  //Main Contactor Temperature CHECK FINGERPRINT 2 LEVEL
@@ -800,8 +822,15 @@ void BmwIXBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
 }
 
 void BmwIXBattery::transmit_can(unsigned long currentMillis) {
-  // Perform startup BMS reset after 2 seconds, before allowing contactor close
-  if (!startup_reset_complete && (currentMillis > 2000)) {
+  // Sleep cycle: while it is in its quiet phase nothing at all may be sent to the SME
+  if (handle_sleep_cycle(currentMillis)) {
+    return;
+  }
+
+  // Perform startup BMS reset 2 seconds after the SME first responds, before allowing contactor close.
+  // Signed difference: currentMillis may have been sampled just before the first frame arrived.
+  if (!startup_reset_complete && sme_responded &&
+      (long)(currentMillis - sme_first_rx_ms) >= (long)STARTUP_RESET_DELAY_MS) {
     logging.println("Performing startup BMS reset");
     transmit_can_frame(&BMWiX_6F4_REQUEST_HARD_RESET);
     startup_reset_complete = true;
@@ -1211,4 +1240,324 @@ int BmwIXBattery::get_pyro_status_pss4() const {
 }
 int BmwIXBattery::get_pyro_status_pss6() const {
   return pyro_status_pss6;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Balancing preconditions
+//
+// The SME decides balancing itself; nothing in this integration requests it. Its decision model
+// (decoded from the SME firmware and verified in emulation) blocks balancing while any of the
+// conditions below fails. They are re-evaluated continuously, so balancing can start mid-session
+// once e.g. the rest time is reached. BE can only see pack-level min/avg/max values, so the
+// conditions marked "approximate" estimate what the SME evaluates per cell.
+// ---------------------------------------------------------------------------------------------
+namespace {
+// Rest needed before the SME considers a cell's voltage settled (seconds), from the SME
+// calibration: three tables at -25/0/25 C, rows = cell SOC 10..100 %. Linear interpolation,
+// clamped outside. A cell counts as rested once rest >= 1.1 x this value.
+const int16_t REST_TEMPS_DC[3] = {-250, 0, 250};
+const uint16_t REST_TABLE_S[3][10] = {{20000, 22000, 16000, 12500, 12500, 20000, 21000, 17000, 21500, 22000},
+                                      {15000, 8600, 8000, 5600, 7400, 14500, 6500, 7200, 6800, 11300},
+                                      {15000, 4500, 3800, 3800, 6000, 6500, 6200, 4500, 5000, 7800}};
+const float REST_MARGIN = 1.1f;
+const uint16_t BAL_VMIN_FLOOR_MV = 3400;          // cal 0x80340AA4: lowest cell must be above 3.40 V
+const uint16_t BAL_MIN_SPREAD_MV = 8;             // cal 0x80340A48: below 8 mV nothing to balance
+const uint16_t BAL_VMIN_STABLE_MV = 50;           // cal 0x80340B0C: Vmin variation over 5 samples
+const int16_t BAL_TEMP_MIN_DC = -100;             // cal 0x8034015C / 0x80340160: -10 C
+const int16_t BAL_TEMP_MAX_DC = 450;              // cal 0x803404D8: 45 C
+const uint32_t BAL_REF_AGE_S = 30UL * 86400UL;    // 30-day SOC check
+const uint16_t BAL_REF_SOC_WINDOW_PPTT = 1000;    // +-10 % SOC
+const unsigned long SLEEP_WAKE_SETTLE_MS = 5000;  // ignore E4CA right after waking (transient 4)
+
+uint32_t be_u32(const uint8_t* b) {
+  return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3];
+}
+
+float rest_row(int t, float soc_pct) {
+  if (soc_pct <= 10.0f)
+    return REST_TABLE_S[t][0];
+  if (soc_pct >= 100.0f)
+    return REST_TABLE_S[t][9];
+  int i = (int)((soc_pct - 10.0f) / 10.0f);
+  float f = (soc_pct - 10.0f - 10.0f * i) / 10.0f;
+  return REST_TABLE_S[t][i] + f * (REST_TABLE_S[t][i + 1] - REST_TABLE_S[t][i]);
+}
+
+String format_duration(uint32_t s) {
+  if (s >= 86400UL)
+    return String(s / 86400UL) + "d " + String((s % 86400UL) / 3600UL) + "h";
+  if (s >= 3600UL)
+    return String(s / 3600UL) + "h " + String((s % 3600UL) / 60UL) + "m";
+  if (s >= 60UL)
+    return String(s / 60UL) + "m " + String(s % 60UL) + "s";
+  return String(s) + "s";
+}
+
+String format_dC(int16_t dC) {
+  return String(dC / 10.0f, 1) + " °C";
+}
+}  // namespace
+
+uint32_t BmwIXBattery::required_rest_for(int temp_dC, uint16_t soc_pptt) {
+  float soc = soc_pptt / 100.0f;
+  float v;
+  if (temp_dC <= REST_TEMPS_DC[0]) {
+    v = rest_row(0, soc);
+  } else if (temp_dC >= REST_TEMPS_DC[2]) {
+    v = rest_row(2, soc);
+  } else {
+    int t = temp_dC < REST_TEMPS_DC[1] ? 0 : 1;
+    float f = (float)(temp_dC - REST_TEMPS_DC[t]) / (REST_TEMPS_DC[t + 1] - REST_TEMPS_DC[t]);
+    v = rest_row(t, soc) + f * (rest_row(t + 1, soc) - rest_row(t, soc));
+  }
+  return (uint32_t)(v * REST_MARGIN);
+}
+
+void BmwIXBattery::parse_uptime_payload(const uint8_t* p, uint16_t len) {
+  // E4C0 payload (big-endian u32): +4 SME clock as reported by BE's "uptime", +12 SME model clock,
+  // +16 rest counter (time since the SME's contactors last opened, accumulates while open/asleep,
+  // frozen while closed, 0 after an unclean start), +20 duration of the last sleep (RTC).
+  if (len < 24)
+    return;
+  sme_clock_s = be_u32(p + 12);
+  sme_rest_time_s = be_u32(p + 16);
+  sme_time_asleep_s = be_u32(p + 20);
+  rest_data_received = true;
+}
+
+void BmwIXBattery::parse_balancing_payload(const uint8_t* p, uint16_t len) {
+  // E4CA payload: [0] mode (0 none, 1-3 active, 4 qualifier invalid = unclean start), [1..4]
+  // counter, [5..8] time of the last balancing calculation (SME clock), [9..14] three cell
+  // voltages (mV) and [15..20] three SOCs (0.01 %) recorded at that calculation.
+  if (len < 1)
+    return;
+  balancing_status = p[0];
+  balancing_data_received = true;
+  if (sleep_cycle_state == SLEEP_WAKING && millis() - sleep_cycle_wake_ms >= SLEEP_WAKE_SETTLE_MS) {
+    balancing_status_since_wake = true;
+  }
+  if (len >= 21) {
+    balancing_ref_time_s = be_u32(p + 5);
+    for (int k = 0; k < 3; k++) {
+      balancing_ref_soc[k] = (uint16_t)(p[15 + 2 * k] << 8 | p[16 + 2 * k]);
+    }
+  }
+}
+
+void BmwIXBattery::evaluate_balancing_conditions() {
+  int n = 0;
+  auto add = [&](const char* name, const char* req, const String& cur, BalCondState st, bool approx) {
+    if (n < NUM_BALANCING_CONDITIONS) {
+      balancing_conditions[n].name = name;
+      balancing_conditions[n].requirement = req;
+      balancing_conditions[n].current = cur;
+      balancing_conditions[n].state = st;
+      balancing_conditions[n].approximate = approx;
+      n++;
+    }
+  };
+  const bool unclean = balancing_data_received && balancing_status == 4;
+
+  // 1. Clean previous shutdown: otherwise the SME distrusts its clock and rest time (E4CA = 4)
+  if (!balancing_data_received) {
+    add("Clean previous shutdown", "SME slept or was reset in an orderly way (E4CA &ne; 4)", "no E4CA reply yet",
+        BAL_COND_UNKNOWN, false);
+  } else {
+    add("Clean previous shutdown", "SME slept or was reset in an orderly way (E4CA &ne; 4)",
+        unclean ? String("E4CA = 4: last shutdown was a power cut") : String("E4CA = " + String(balancing_status)),
+        unclean ? BAL_COND_NOT_MET : BAL_COND_MET, false);
+  }
+
+  // 2. The SME's own contactors open (closing them also stops balancing in progress)
+  if (contactor_control_enabled) {
+    add("SME contactors open", "SME has not closed its contactors",
+        "GPIO contactor mode: the SME never closes its own contactors", BAL_COND_MET, false);
+  } else {
+    add("SME contactors open", "SME has not closed its contactors",
+        ContactorState.open ? "open" : "closed via CAN - balancing stops while closed",
+        ContactorState.open ? BAL_COND_MET : BAL_COND_NOT_MET, false);
+  }
+
+  // 3. Rest time (per cell, from temperature and SOC; worst case over BE's min/avg/max values)
+  required_rest_s = 0;
+  if (temperature_received) {
+    const int16_t temps[2] = {min_battery_temperature, max_battery_temperature};
+    const uint16_t socs[3] = {min_soc_state, avg_soc_state, max_soc_state};
+    for (int t = 0; t < 2; t++)
+      for (int s = 0; s < 3; s++) {
+        uint32_t r = required_rest_for(temps[t], socs[s]);
+        if (r > required_rest_s)
+          required_rest_s = r;
+      }
+  }
+  if (!rest_data_received || !temperature_received) {
+    add("Cells rested", "rest counter &ge; ~1.1 &times; table time for temperature and SOC", "waiting for E4C0/DDC0",
+        BAL_COND_UNKNOWN, true);
+  } else if (unclean) {
+    add("Cells rested", "rest counter &ge; ~1.1 &times; table time for temperature and SOC",
+        "rest counter invalid after unclean start", BAL_COND_NOT_MET, true);
+  } else {
+    String cur = format_duration(sme_rest_time_s) + " of ~" + format_duration(required_rest_s);
+    if (sme_rest_time_s < required_rest_s)
+      cur += " (~" + format_duration(required_rest_s - sme_rest_time_s) + " to go)";
+    add("Cells rested", "rest counter &ge; ~1.1 &times; table time for temperature and SOC", cur,
+        sme_rest_time_s >= required_rest_s ? BAL_COND_MET : BAL_COND_NOT_MET, true);
+  }
+
+  // 4. Lowest cell above the floor
+  if (!cell_minmax_received) {
+    add("Lowest cell voltage", "&ge; 3400 mV", "waiting for E553", BAL_COND_UNKNOWN, false);
+  } else {
+    add("Lowest cell voltage", "&ge; 3400 mV", String(min_cell_voltage) + " mV",
+        min_cell_voltage >= BAL_VMIN_FLOOR_MV ? BAL_COND_MET : BAL_COND_NOT_MET, false);
+  }
+
+  // 5. Something to balance
+  if (!cell_minmax_received) {
+    add("Cell spread", "max &minus; min &ge; 8 mV", "waiting for E553", BAL_COND_UNKNOWN, false);
+  } else {
+    int spread = (int)max_cell_voltage - (int)min_cell_voltage;
+    add("Cell spread", "max &minus; min &ge; 8 mV", String(spread) + " mV",
+        spread >= BAL_MIN_SPREAD_MV ? BAL_COND_MET : BAL_COND_NOT_MET, false);
+  }
+
+  // 6./7. Temperature window
+  if (!temperature_received) {
+    add("Coldest cell", "&ge; &minus;10 °C", "waiting for DDC0", BAL_COND_UNKNOWN, false);
+    add("Hottest cell", "&le; 45 °C", "waiting for DDC0", BAL_COND_UNKNOWN, false);
+  } else {
+    add("Coldest cell", "&ge; &minus;10 °C", format_dC(min_battery_temperature),
+        min_battery_temperature >= BAL_TEMP_MIN_DC ? BAL_COND_MET : BAL_COND_NOT_MET, false);
+    add("Hottest cell", "&le; 45 °C", format_dC(max_battery_temperature),
+        max_battery_temperature <= BAL_TEMP_MAX_DC ? BAL_COND_MET : BAL_COND_NOT_MET, false);
+  }
+
+  // 8. 30-day SOC check: within 30 days of the last balancing calculation, the (rested) SOC must be
+  //    within 10 % of the SOC stored then. The SME uses its rested-voltage SOC; BE shows the
+  //    average SOC, so this is an estimate.
+  const char* req30 = "&gt; 30 days since last balancing calculation, or SOC within &plusmn;10 % of the SOC then";
+  if (!balancing_data_received || !rest_data_received || balancing_ref_time_s == 0) {
+    add("30-day SOC check", req30, "waiting for E4CA/E4C0", BAL_COND_UNKNOWN, true);
+  } else if (unclean) {
+    add("30-day SOC check", req30, "SME clock invalid after unclean start", BAL_COND_UNKNOWN, true);
+  } else {
+    uint16_t ref_soc = balancing_ref_soc[1];
+    String age;
+    if (sme_clock_s >= balancing_ref_time_s) {
+      age = format_duration(sme_clock_s - balancing_ref_time_s) + " ago";
+    } else {
+      age = "(SME clock behind reference)";
+    }
+    String cur = "last calculation " + age + " at " + String(ref_soc / 100.0f, 1) + " %, now " +
+                 String(avg_soc_state / 100.0f, 1) + " %";
+    BalCondState st;
+    if (sme_clock_s < balancing_ref_time_s || sme_clock_s - balancing_ref_time_s >= BAL_REF_AGE_S) {
+      st = BAL_COND_MET;
+    } else {
+      int diff = (int)avg_soc_state - (int)ref_soc;
+      st = (diff <= BAL_REF_SOC_WINDOW_PPTT && diff >= -(int)BAL_REF_SOC_WINDOW_PPTT) ? BAL_COND_MET : BAL_COND_NOT_MET;
+      if (st == BAL_COND_NOT_MET) {
+        uint32_t left = BAL_REF_AGE_S - (sme_clock_s - balancing_ref_time_s);
+        cur += " (passes in ~" + format_duration(left) + ")";
+      }
+    }
+    add("30-day SOC check", req30, cur, st, true);
+  }
+
+  // 9. Lowest cell stable (the SME uses its last 5 samples; BE polls less often)
+  if (vmin_history_count < 2) {
+    add("Lowest cell stable", "varies &le; 50 mV over recent samples", "waiting for E553", BAL_COND_UNKNOWN, true);
+  } else {
+    uint16_t lo = 0xFFFF, hi = 0;
+    for (int k = 0; k < vmin_history_count; k++) {
+      lo = min(lo, vmin_history[k]);
+      hi = max(hi, vmin_history[k]);
+    }
+    add("Lowest cell stable", "varies &le; 50 mV over recent samples", String(hi - lo) + " mV",
+        (hi - lo) <= BAL_VMIN_STABLE_MV ? BAL_COND_MET : BAL_COND_NOT_MET, true);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sleep cycle
+// ---------------------------------------------------------------------------------------------
+void BmwIXBattery::start_sleep_cycle(unsigned long currentMillis) {
+  if (is_sleep_cycle_active()) {
+    return;
+  }
+  if (!startup_reset_complete) {
+    sleep_cycle_state = SLEEP_REFUSED;
+    sleep_cycle_message = "Refused: startup not finished yet";
+    return;
+  }
+  if (!contactor_control_enabled && !ContactorState.open) {
+    sleep_cycle_state = SLEEP_REFUSED;
+    sleep_cycle_message = "Refused: open the contactors first (CAN contactor control needs keep-alive messages)";
+    return;
+  }
+  if (abs(datalayer_battery->status.current_dA) > SLEEP_CYCLE_MAX_CURRENT_DA) {
+    sleep_cycle_state = SLEEP_REFUSED;
+    sleep_cycle_message = "Refused: current is flowing - stop charging/discharging first";
+    return;
+  }
+  sleep_cycle_saved_allow_close = datalayer.system.status.battery_allows_contactor_closing;
+  datalayer.system.status.battery_allows_contactor_closing = false;  // no SME data while it sleeps
+  gUDSContext.UDS_inProgress = false;
+  gUDSContext.UDS_bytesReceived = 0;
+  sleep_cycle_start_ms = currentMillis;
+  sleep_cycle_state = SLEEP_QUIET;
+  sleep_cycle_message = contactor_control_enabled
+                            ? "CAN silent: SME going to sleep (GPIO contactors unchanged, no SME data meanwhile)"
+                            : "CAN silent: SME going to sleep";
+  logging.println("Sleep cycle: CAN silent");
+}
+
+bool BmwIXBattery::handle_sleep_cycle(unsigned long currentMillis) {
+  if (userRequestSleepCycle) {
+    userRequestSleepCycle = false;
+    start_sleep_cycle(currentMillis);
+  }
+
+  switch (sleep_cycle_state) {
+    case SLEEP_QUIET:
+      // The silence is intentional: don't let the CAN watchdog report the battery as lost
+      datalayer_battery->status.CAN_battery_still_alive = CAN_STILL_ALIVE;
+      if (currentMillis - sleep_cycle_start_ms < SLEEP_CYCLE_QUIET_MS) {
+        return true;  // send nothing
+      }
+      // Resume traffic: the first frames wake the SME, which boots (cleanly, if it slept)
+      datalayer.system.status.battery_allows_contactor_closing = sleep_cycle_saved_allow_close;
+      sleep_cycle_wake_ms = currentMillis;
+      balancing_status_since_wake = false;
+      sleep_cycle_state = SLEEP_WAKING;
+      sleep_cycle_message = "Waking SME, waiting for its balancing status";
+      logging.println("Sleep cycle: waking SME");
+      return false;
+    case SLEEP_WAKING:
+      datalayer_battery->status.CAN_battery_still_alive = CAN_STILL_ALIVE;  // allow for the SME's boot
+      if (balancing_status_since_wake) {
+        if (balancing_status == 4) {
+          sleep_cycle_state = SLEEP_DONE_UNCLEAN;
+          sleep_cycle_message = "SME woke but still reports an unclean start (did it get to sleep?)";
+        } else {
+          sleep_cycle_state = SLEEP_DONE_CLEAN;
+          sleep_cycle_message = "SME woke with a clean start";
+        }
+        logging.println(sleep_cycle_message);
+      } else if (currentMillis - sleep_cycle_wake_ms > SLEEP_CYCLE_WAKE_TIMEOUT_MS) {
+        sleep_cycle_state = SLEEP_DONE_NO_REPLY;
+        sleep_cycle_message = "SME did not report its balancing status after waking";
+        logging.println(sleep_cycle_message);
+      }
+      return false;
+    default:
+      return false;
+  }
+}
+
+unsigned long BmwIXBattery::get_sleep_cycle_remaining_ms() const {
+  if (sleep_cycle_state != SLEEP_QUIET)
+    return 0;
+  unsigned long elapsed = millis() - sleep_cycle_start_ms;
+  return elapsed >= SLEEP_CYCLE_QUIET_MS ? 0 : SLEEP_CYCLE_QUIET_MS - elapsed;
 }
