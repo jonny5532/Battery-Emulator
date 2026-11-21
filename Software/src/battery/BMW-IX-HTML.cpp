@@ -58,6 +58,106 @@ String BmwIXHtmlRenderer::get_status_html() {
     default:
       content += "Unknown</h4>";
   }
+
+  // Balancing preconditions (decoded from the SME firmware; the SME decides balancing itself)
+  {
+    const BmwIXBattery::BalancingCondition* conds = batt.get_balancing_conditions();
+    int n = batt.get_num_balancing_conditions();
+    int unmet = 0, unknown = 0;
+    for (int i = 0; i < n; i++) {
+      if (conds[i].state == BmwIXBattery::BAL_COND_NOT_MET)
+        unmet++;
+      else if (conds[i].state == BmwIXBattery::BAL_COND_UNKNOWN)
+        unknown++;
+    }
+    content += "<h4>Balancing Preconditions: ";
+    if (unmet == 0 && unknown == 0) {
+      content += "<span style='color: #43a047;'>all met</span>";
+      if (batt.get_balancing_status() == 0)
+        content += " (SME starts balancing if any cell needs it)";
+    } else if (unmet > 0) {
+      content += "<span style='color: #d32f2f;'>" + String(unmet) + " not met</span>";
+      if (unknown > 0)
+        content += ", " + String(unknown) + " unknown";
+    } else {
+      content += String(unknown) + " unknown (waiting for data)";
+    }
+    content += "</h4>";
+
+    content += "<div style='overflow-x: auto; margin: 5px 0 10px 0;'>";
+    content +=
+        "<table style='border-collapse: collapse; font-size: 0.9em;'>"
+        "<tr style='text-align: left;'><th style='padding: 4px 8px;'></th><th style='padding: 4px 8px;'>Condition</th>"
+        "<th style='padding: 4px 8px;'>Required</th><th style='padding: 4px 8px;'>Now</th></tr>";
+    for (int i = 0; i < n; i++) {
+      String mark, colour;
+      switch (conds[i].state) {
+        case BmwIXBattery::BAL_COND_MET:
+          mark = "&#10004;";
+          colour = "#43a047";
+          break;
+        case BmwIXBattery::BAL_COND_NOT_MET:
+          mark = "&#10008;";
+          colour = "#d32f2f";
+          break;
+        default:
+          mark = "?";
+          colour = "#9e9e9e";
+      }
+      content += "<tr style='border-top: 1px solid #555;'>";
+      content += "<td style='padding: 4px 8px; color: " + colour + "; font-weight: bold;'>" + mark + "</td>";
+      content +=
+          "<td style='padding: 4px 8px;'>" + String(conds[i].name) + (conds[i].approximate ? " &#8776;" : "") + "</td>";
+      content += "<td style='padding: 4px 8px;'>" + String(conds[i].requirement) + "</td>";
+      content += "<td style='padding: 4px 8px;'>" + conds[i].current + "</td>";
+      content += "</tr>";
+    }
+    content += "</table>";
+    content +=
+        "<p style='font-size: 0.8em; color: #9e9e9e; margin: 4px 0;'>&#8776; = estimated from pack min/avg/max "
+        "values; the SME evaluates these per cell. Rest counter accumulates while the SME's contactors are open "
+        "(awake or asleep), freezes while closed and restarts from 0 when they open; it is invalid after a power "
+        "cut until a clean sleep or reset.</p>";
+    content += "</div>";
+  }
+
+  // Sleep cycle (orderly SME sleep + wake, clears the unclean-start state)
+  content += "<h4>SME Sleep Cycle: ";
+  switch (batt.get_sleep_cycle_state()) {
+    case BmwIXBattery::SLEEP_IDLE:
+      content += "idle";
+      break;
+    case BmwIXBattery::SLEEP_QUIET: {
+      unsigned long left_s = (batt.get_sleep_cycle_remaining_ms() + 999) / 1000;
+      content += "<span style='color: #fb8c00;'>SME sleeping, CAN silent - waking in <span id='bmwix_sleep_left'>" +
+                 String(left_s) + "</span> s</span>";
+      content +=
+          "<script>(function(){var e=document.getElementById('bmwix_sleep_left');if(!e)return;var s=parseInt(e."
+          "textContent);var t=setInterval(function(){if(s>0){s--;e.textContent=s;}else{clearInterval(t);}},1000);}"
+          ")();</script>";
+      break;
+    }
+    case BmwIXBattery::SLEEP_WAKING:
+      content += "<span style='color: #fb8c00;'>waking</span>";
+      break;
+    case BmwIXBattery::SLEEP_DONE_CLEAN:
+      content += "<span style='color: #43a047;'>done - clean start</span>";
+      break;
+    case BmwIXBattery::SLEEP_DONE_UNCLEAN:
+    case BmwIXBattery::SLEEP_DONE_NO_REPLY:
+    case BmwIXBattery::SLEEP_REFUSED:
+      content += "<span style='color: #d32f2f;'>" + String(batt.get_sleep_cycle_message()) + "</span>";
+      break;
+  }
+  content += "</h4>";
+  if (batt.is_sleep_cycle_active()) {
+    content += "<p style='font-size: 0.85em; margin: 2px 0;'>" + String(batt.get_sleep_cycle_message()) + "</p>";
+  }
+  if (batt.has_rest_data()) {
+    content += "<h4>SME Rest Counter: " + String(batt.get_rest_time_s()) + " s (last sleep " +
+               String(batt.get_time_asleep_s()) + " s)</h4>";
+  }
+
   // Energy Saving Mode Status
   content += "<h4>Energy Saving Mode: ";
   int energy_mode = batt.get_energy_saving_mode_status();

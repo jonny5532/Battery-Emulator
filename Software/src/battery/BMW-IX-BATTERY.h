@@ -43,6 +43,7 @@ class BmwIXBattery : public CanBattery {
   bool supports_energy_saving_mode_reset() { return true; }
   void reset_energy_saving_mode() { UserRequestEnergySavingModeReset = true; }
   bool supports_contactor_close() { return true; }
+  bool supports_sleep_cycle() { return true; }
   void request_open_contactors() { userRequestContactorOpen = true; }
   void request_close_contactors() { userRequestContactorClose = true; }
 
@@ -66,6 +67,48 @@ class BmwIXBattery : public CanBattery {
   int get_pyro_status_pss4() const;
   int get_pyro_status_pss6() const;
 
+  // --- Balancing preconditions -------------------------------------------------------------
+  // Decoded from the SME firmware (balancing decision model, inhibit words 0xAAE/0xAB0) and
+  // verified in emulation. Each condition is evaluated from UDS data Battery-Emulator already
+  // polls; some are approximations because the SME uses per-cell values internally.
+  enum BalCondState : int8_t { BAL_COND_UNKNOWN = -1, BAL_COND_NOT_MET = 0, BAL_COND_MET = 1 };
+  struct BalancingCondition {
+    const char* name = "";         // short name
+    const char* requirement = "";  // what the SME requires
+    String current;                // current value as text
+    BalCondState state = BAL_COND_UNKNOWN;
+    bool approximate = false;  // true if BE can only estimate what the SME evaluates internally
+  };
+  static const int NUM_BALANCING_CONDITIONS = 9;
+  const BalancingCondition* get_balancing_conditions() const { return balancing_conditions; }
+  int get_num_balancing_conditions() const { return NUM_BALANCING_CONDITIONS; }
+  bool has_rest_data() const { return rest_data_received; }
+  uint32_t get_rest_time_s() const { return sme_rest_time_s; }      // E4C0 +16: rest counter used by the SME
+  uint32_t get_time_asleep_s() const { return sme_time_asleep_s; }  // E4C0 +20: last sleep duration (RTC)
+  uint32_t get_required_rest_s() const { return required_rest_s; }  // estimated, worst case of min/avg/max SOC
+
+  // --- Sleep cycle -------------------------------------------------------------------------
+  // Silences all CAN traffic to the SME for SLEEP_CYCLE_QUIET_MS so it performs its orderly
+  // shutdown (clean-shutdown flag written; ~9-25 s after the bus goes quiet), then resumes
+  // traffic, which wakes it. Clears the "unclean start" state (E4CA = 4, rest counter invalid)
+  // without relying on the 11 01 reset. Refused while CAN-controlled contactors are closed or
+  // significant current flows. Call request_sleep_cycle() from a UI action.
+  enum SleepCycleState : uint8_t {
+    SLEEP_IDLE,
+    SLEEP_QUIET,          // CAN silent, SME going to sleep
+    SLEEP_WAKING,         // traffic resumed, waiting for the SME's balancing status
+    SLEEP_DONE_CLEAN,     // SME woke with a clean start
+    SLEEP_DONE_UNCLEAN,   // SME woke but still reports qualifier invalid
+    SLEEP_DONE_NO_REPLY,  // SME did not answer after waking
+    SLEEP_REFUSED
+  };
+  void request_sleep_cycle() { userRequestSleepCycle = true; }
+  SleepCycleState get_sleep_cycle_state() const { return sleep_cycle_state; }
+  bool is_sleep_cycle_active() const { return sleep_cycle_state == SLEEP_QUIET || sleep_cycle_state == SLEEP_WAKING; }
+  unsigned long get_sleep_cycle_remaining_ms() const;  // time left in the quiet phase
+  const char* get_sleep_cycle_message() const { return sleep_cycle_message; }
+  static const unsigned long SLEEP_CYCLE_QUIET_MS = 60000;
+
   BatteryHtmlRenderer& get_status_renderer() { return renderer; }
 
  private:
@@ -79,7 +122,41 @@ class BmwIXBattery : public CanBattery {
   bool UserRequestBMSReset = false;
   bool UserRequestDTCRead = false;
   bool UserRequestEnergySavingModeReset = false;
-  bool startup_reset_complete = false;               // Track if startup BMS reset is done
+  bool startup_reset_complete = false;  // Track if startup BMS reset is done
+  bool userRequestSleepCycle = false;
+
+  // Sleep cycle
+  SleepCycleState sleep_cycle_state = SLEEP_IDLE;
+  unsigned long sleep_cycle_start_ms = 0;
+  unsigned long sleep_cycle_wake_ms = 0;
+  bool sleep_cycle_saved_allow_close = false;
+  bool balancing_status_since_wake = false;
+  const char* sleep_cycle_message = "";
+  static const unsigned long SLEEP_CYCLE_WAKE_TIMEOUT_MS = 30000;
+  static const int SLEEP_CYCLE_MAX_CURRENT_DA = 50;  // refuse above 5 A
+  void start_sleep_cycle(unsigned long currentMillis);
+  bool handle_sleep_cycle(unsigned long currentMillis);  // true = suppress all transmission
+
+  // Balancing precondition inputs and evaluation
+  BalancingCondition balancing_conditions[NUM_BALANCING_CONDITIONS];
+  bool rest_data_received = false;            // E4C0 parsed
+  bool balancing_data_received = false;       // E4CA parsed
+  bool cell_minmax_received = false;          // E553 parsed
+  bool temperature_received = false;          // DDC0 parsed
+  uint32_t sme_clock_s = 0;                   // E4C0 +12: SME model clock (s), basis of the 30-day check
+  uint32_t sme_rest_time_s = 0;               // E4C0 +16
+  uint32_t sme_time_asleep_s = 0;             // E4C0 +20
+  uint32_t balancing_ref_time_s = 0;          // E4CA bytes 5-8: time of the last balancing calculation
+  uint16_t balancing_ref_soc[3] = {0, 0, 0};  // E4CA bytes 15-20: SOC (0.01 %) at that calculation
+  uint32_t required_rest_s = 0;
+  static const int VMIN_HISTORY = 5;
+  uint16_t vmin_history[VMIN_HISTORY] = {0};
+  uint8_t vmin_history_count = 0;
+  uint8_t vmin_history_pos = 0;
+  void parse_uptime_payload(const uint8_t* p, uint16_t len);     // p = E4C0 payload after 62 E4 C0
+  void parse_balancing_payload(const uint8_t* p, uint16_t len);  // p = E4CA payload after 62 E4 CA
+  void evaluate_balancing_conditions();
+  static uint32_t required_rest_for(int temp_dC, uint16_t soc_pptt);
   static const int MAX_PACK_VOLTAGE_78S_DV = 3354;   // 4.3V per cell | SE12 battery, BMW iX1, 66.45kWh 286.3Vnom
   static const int MIN_PACK_VOLTAGE_78S_DV = 2184;   // 2.8V per cell
   static const int MAX_PACK_VOLTAGE_88S_DV = 3784;   // 4.3V per cell | BMW ix1/ix3
@@ -121,7 +198,9 @@ class BmwIXBattery : public CanBattery {
 
   CmdState cmdState = SOC;
 
-  bool battery_awake = false;
+  bool sme_responded = false;                                // any frame received from the SME since boot
+  unsigned long sme_first_rx_ms = 0;                         // when that first frame arrived
+  static const unsigned long STARTUP_RESET_DELAY_MS = 2000;  // 11 01 reset this long after the SME first responds
 
   bool contactorCloseReq = false;
 
